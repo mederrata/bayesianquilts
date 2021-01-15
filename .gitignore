@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+.vscode
+.tf_ckpts
+
+#scanpy cache directory
+/cache
+.DS_Store
