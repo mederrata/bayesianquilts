@@ -113,7 +113,8 @@ class BayesianModel(object):
             _have_cardinality = False
             card = tf_data_cardinality(data)
             if card < 1:
-                print("We can't determine cardinality of the dataseet, defaulting to batch size of 100")
+                print(
+                    "We can't determine cardinality of the dataseet, defaulting to batch size of 100")
                 batch_size = 100
             else:
                 batch_size = int(np.floor(card/data_batches))
@@ -184,12 +185,17 @@ class BayesianModel(object):
 
         initial_list = [init_state[v] for v in self.var_list]
         bijectors = [self.bijectors[k] for k in self.var_list]
-        
+
         data = self.data if data is None else data
         card = tf_data_cardinality(data)
-        _data = data.batch(card)
-        
-        energy = partial(self.unormalized_log_prob_list, data=next(iter(_data)))
+        _data = data.batch(int(card/10), drop_remainder=False)
+
+        def energy(*params):
+            _energy = 0
+            for batch in _data:
+                _energy += self.unormalized_log_prob_list(
+                    batch, params)
+            return _energy
 
         samples, sampler_stat = run_chain(
             init_state=initial_list,
@@ -210,7 +216,7 @@ class BayesianModel(object):
 
         return samples, sampler_stat
 
-    def log_likelihood(self, *args, **kwargs):
+    def log_likelihood(self, data, *args, **kwargs):
         pass
 
     def psis_loo(self, data=None, params=None, num_samples=100, num_splits=20):
@@ -264,7 +270,7 @@ class BayesianModel(object):
             # data = data.batch
 
         data = data.prefetch(2)
-        
+
         likelihood_vars = inspect.getfullargspec(
             self.log_likelihood).args[1:]
 
