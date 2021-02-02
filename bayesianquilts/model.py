@@ -110,18 +110,8 @@ class BayesianModel(object):
 
         if not batched:
             _have_cardinality = False
-            up = data
-            root = False
-            while (not _have_cardinality) and (not root):
-                card = tf.data.experimental.cardinality(up)
-                if card > 1:
-                    _have_cardinality = True
-                else:
-                    if hasattr(up, "._input_dataset"):
-                        up = up._input_dataset
-                    else:
-                        root = True
-            if not _have_cardinality:
+            card = tf_data_cardinality(data)
+            if card < 1:
                 print("We can't determine cardinality of the dataseet, defaulting to batch size of 100")
                 batch_size = 100
             else:
