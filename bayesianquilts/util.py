@@ -932,3 +932,19 @@ def build_surrogate_posterior(joint_distribution_named,
                 )
             )
     return tfd.JointDistributionNamed(surrogate_dict)
+
+def tf_data_carrdinality(tf_dataset):
+    _have_cardinality = False
+    up = tf_dataset
+    card = -1
+    root = False
+    while (not _have_cardinality) and (not root):
+        card = tf.data.experimental.cardinality(up)
+        if card > 1:
+            _have_cardinality = True
+        else:
+            if hasattr(up, "._input_dataset"):
+                up = up._input_dataset
+            else:
+                root = True
+    return card

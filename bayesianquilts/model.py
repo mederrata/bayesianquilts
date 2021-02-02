@@ -110,6 +110,7 @@ class BayesianModel(object):
         if not batched:
             _have_cardinality = False
             up = data
+            root = False
             while (not _have_cardinality) and (not root):
                 card = tf.data.experimental.cardinality(up)
                 if card > 1:
@@ -125,10 +126,10 @@ class BayesianModel(object):
             else:
                 batch_size = int(np.floor(card/data_batches))
 
-            data = data.batch(batch_size, drop_remainder=True)
+            _data = data.batch(batch_size, drop_remainder=True)
             # data = data.batch
 
-        data = data.prefetch(2)
+        _data = _data.prefetch(2)
 
         def run_approximation(num_epochs):
             losses = fit_surrogate_posterior(
@@ -144,7 +145,7 @@ class BayesianModel(object):
                 clip_value=clip_value,
                 check_every=check_every,
                 strategy=self.strategy,
-                batched_dataset=data
+                batched_dataset=_data
             )
             return(losses)
 
