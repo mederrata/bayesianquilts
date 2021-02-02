@@ -947,4 +947,11 @@ def tf_data_cardinality(tf_dataset):
                 up = up._input_dataset
             else:
                 root = True
+
+    if card < 1:
+        print("Getting the cardinality the slow way")
+        num_elements = 0
+        for _ in up:
+            num_elements += 1
+        card = num_elements
     return card
