@@ -8,6 +8,7 @@ import tensorflow as tf
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from functools import partial
 
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.distribute.input_lib import DistributedDataset
@@ -168,7 +169,7 @@ class BayesianModel(object):
                 for k, v in self.surrogate_sample.items()
             }
 
-    def calibrate_mcmc(self, num_steps=1000, burnin=500,
+    def calibrate_mcmc(self, data=None, num_steps=1000, burnin=500,
                        init_state=None, step_size=1e-1, nuts=True,
                        num_leapfrog_steps=10, clip=None):
         """Calibrate using HMC/NUT
@@ -183,13 +184,19 @@ class BayesianModel(object):
 
         initial_list = [init_state[v] for v in self.var_list]
         bijectors = [self.bijectors[k] for k in self.var_list]
+        
+        data = self.data if data is None else data
+        card = tf_data_cardinality(data)
+        _data = data.batch(card)
+        
+        energy = partial(self.unormalized_log_prob_list, data=next(iter(_data)))
 
         samples, sampler_stat = run_chain(
             init_state=initial_list,
             step_size=step_size,
             target_log_prob_fn=(
-                self.unormalized_log_prob_list if clip is None
-                else clip_gradients(self.unormalized_log_prob_list, clip)),
+                energy if clip is None
+                else clip_gradients(energy, clip)),
             unconstraining_bijectors=bijectors,
             num_steps=num_steps,
             burnin=burnin,
@@ -402,11 +409,11 @@ class BayesianModel(object):
         state['strategy'] = None
         return(state)
 
-    def unormalized_log_prob_list(self, params):
+    def unormalized_log_prob_list(self, data, params):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
-        return self.unormalized_log_prob(**dict_params)
+        return self.unormalized_log_prob(data, **dict_params)
 
-    def unormalized_log_prob(self, *args, **kwargs):
+    def unormalized_log_prob(self, data, *args, **kwargs):
         """Generic method for the unormalized log probability function
         """
         return
