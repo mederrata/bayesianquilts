@@ -13,7 +13,8 @@ from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.distribute.input_lib import DistributedDataset
 
 from bayesianquilts.util import (
-    clip_gradients, fit_surrogate_posterior, run_chain)
+    clip_gradients, fit_surrogate_posterior,
+    run_chain, tf_data_cardinality)
 from bayesianquilts.distributions import FactorizedDistributionMoments
 
 

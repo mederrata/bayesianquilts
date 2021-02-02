@@ -10,7 +10,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="bayesianquilts",
-    version="0.0.2",
+    version="0.0.3",
     author="mederrata",
     author_email="info@mederrata.com",
     description="Quilting a Bayesian Hierarchical model to mimic relu neural networks",

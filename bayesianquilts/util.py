@@ -933,7 +933,7 @@ def build_surrogate_posterior(joint_distribution_named,
             )
     return tfd.JointDistributionNamed(surrogate_dict)
 
-def tf_data_carrdinality(tf_dataset):
+def tf_data_cardinality(tf_dataset):
     _have_cardinality = False
     up = tf_dataset
     card = -1
