@@ -13,7 +13,7 @@ from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.distribute.input_lib import DistributedDataset
 
 from bayesianquilts.util import (
-    clip_gradients, fit_surrogate_posterior)
+    clip_gradients, fit_surrogate_posterior, run_chain)
 from bayesianquilts.distributions import FactorizedDistributionMoments
 
 
@@ -108,8 +108,23 @@ class BayesianModel(object):
                 root = True
 
         if not batched:
-            card = tf.data.experimental.cardinality(data)
-            batch_size = int(np.floor(card/data_batches))
+            _have_cardinality = False
+            up = data
+            while (not _have_cardinality) and (not root):
+                card = tf.data.experimental.cardinality(up)
+                if card > 1:
+                    _have_cardinality = True
+                else:
+                    if hasattr(up, "._input_dataset"):
+                        up = up._input_dataset
+                    else:
+                        root = True
+            if not _have_cardinality:
+                print("We can't determine cardinality of the dataseet, defaulting to batch size of 100")
+                batch_size = 100
+            else:
+                batch_size = int(np.floor(card/data_batches))
+
             data = data.batch(batch_size, drop_remainder=True)
             # data = data.batch
 
