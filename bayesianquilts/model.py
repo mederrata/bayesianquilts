@@ -24,6 +24,7 @@ class BayesianModel(object):
     surrogate_sample = None
     prior_distribution = None
     data = None
+    data_cardinality = None
     var_list = []
     bijectors = []
 
@@ -60,12 +61,13 @@ class BayesianModel(object):
                         np.arange(samples)
                     ))
                 )
-                data = data.batch(samples)
+                #  data = data.batch(samples)
 
         elif not isinstance(data, tf.data.Dataset):
             raise AttributeError("Need numpy/dataframe or tf.dataset")
 
         self.data = data
+        self.data_cardinality = tf_data_cardinality(data)
         self.data_transform_fn = data_transform_fn
 
     #  @tf.function
