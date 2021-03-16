@@ -119,10 +119,8 @@ class DecomposedParam(object):
         return tensors, tensor_names
 
     def set_params(self, tensors):
-        apparent_batch_sizes = []
         for k in self._param_tensors.keys():
-            pass
-        self._param_tensors = tensors
+            self._param_tensors[k] = tensors[k]
 
     def __add__(self, x):
         if tf.is_tensor(x):
@@ -191,8 +189,14 @@ def main():
         [21, 1, 1, 1, 1, 2, 1],
         [12, 1, 1, 1, 1, 2, 1],
         [0, 1, 2, 1, 1, 2,  1],
-        [13, 1, 2, 1, 1, 2,  1]]
+        [13, 1, 2, 1, 1, 2,  1],
+        [13, 2, 2, 1, 1, 2,  1]]
     q = p.query(indices)
+    
+    t = p.generate_tensors(batch_shape=[4])
+    p.set_params(t[0])
+    r = p.query(indices)
+    pass
 
 
 if __name__ == "__main__":
