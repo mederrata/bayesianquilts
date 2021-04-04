@@ -102,11 +102,12 @@ class BayesianModel(object):
         root = False
         up = data
         while (not batched) and (not root):
-            if hasattr(up, "._batch_size"):
+            if hasattr(up, "_batch_size"):
                 batch_size = up._batch_size
                 batched = True
+                _data = data
                 break
-            if hasattr(up, "._input_dataset"):
+            if hasattr(up, "_input_dataset"):
                 up = up._input_dataset
             else:
                 root = True
