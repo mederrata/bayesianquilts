@@ -2,14 +2,11 @@
 import re
 from collections import Counter, defaultdict
 from itertools import product, chain, combinations
-import numpy as np
 import tensorflow as tf
-from tensorflow.python.ops.check_ops import assert_none_equal_v2
-import tensorflow_probability as tfp
-from tensorflow_probability import bijectors as tfb
-from tensorflow_probability import distributions as tfd
-
-from bayesianquilts.stackedtensor import broadcast_tensors
+import jax
+import jax.numpy as jnp
+import numpy as np
+from jax.flatten_util import ravel_pytree
 
 
 class InteractionParameterization(object):
@@ -45,7 +42,7 @@ class DecomposedParam(object):
             interactions,
             param_shape=[],
             default_val=None,
-            dtype=tf.float32,
+            dtype=jnp.float32,
             name="",
             *args,
             **kwargs) -> None:
@@ -83,11 +80,16 @@ class DecomposedParam(object):
         batch_shape = [] if batch_shape is None else batch_shape
         batch_ndims = len(batch_shape)
         if target is None:
-            residual = tf.zeros(batch_shape + self.shape(), self._dtype)
+            residual = jnp.array(
+                np.zeros(batch_shape + self.shape(), dtype=self._dtype))
         else:
             residual = (
-                tf.cast(target, self._dtype) +
-                tf.zeros(batch_shape + self.shape(), self._dtype))
+                target.astype(self._dtype) +
+                jnp.array(
+                    np.zeros(
+                        batch_shape + self.shape(),
+                        dtype=self._dtype))
+            )
         for n_tuple in product([0, 1], repeat=self._interactions.rank()):
             interaction = tuple(
                 [t for j, t in enumerate(
@@ -97,7 +99,7 @@ class DecomposedParam(object):
                 continue
             interaction_name = "_".join(interaction_vars)
             interaction_shape = (
-                self._interactions.shape()**np.array(n_tuple)
+                jnp.array(self._interactions.shape())**jnp.array(n_tuple)
             ).tolist()
 
             tensor_shape = interaction_shape
@@ -111,10 +113,10 @@ class DecomposedParam(object):
             value = residual
             for ax, flag in enumerate(n_tuple):
                 if flag == 0:
-                    value = tf.reduce_mean(value, axis=(
+                    value = jnp.mean(value, axis=(
                         batch_ndims+ax), keepdims=True)
             tensors[self._name + "__" + interaction_name] = value
-            residual = tf.add_n(broadcast_tensors([residual, -1.0*value]))
+            residual = residual - 1.0*value
 
         return tensors, tensor_names
 
@@ -124,11 +126,7 @@ class DecomposedParam(object):
 
     def __add__(self, x):
         if tf.is_tensor(x):
-            return tf.add_n(
-                broadcast_tensors(
-                    [x, self.constitute()]
-                )
-            )
+            return x + self.constitute()
         return self.constitute().__add__(x)
 
     def __radd__(self, x):
@@ -142,11 +140,11 @@ class DecomposedParam(object):
 
     def constitute(self, tensors=None):
         tensors = self._param_tensors if tensors is None else tensors
-        partial_sum = tf.zeros(
-            self.shape(),
-            self._dtype)
-        for t in tf.nest.flatten(self._param_tensors):
-            partial_sum = tf.add_n(broadcast_tensors([partial_sum, t]))
+        partial_sum = jnp.array(
+            np.zeros(self.shape()),
+            dtype=self._dtype)
+        for _, t in self._param_tensors.items():
+            partial_sum += t
         return partial_sum
 
     def tensor_keys(self):
@@ -179,7 +177,6 @@ class DecomposedParam(object):
 def main():
     interact = InteractionParameterization(
         [
-            ("planned", 2), ("pre2011"),
             ("MDC", 26), ("HxD1", 3), ("HxD2", 3),
             ("HxD3", 3), ("HxD4", 3), ("HxD5", 3),
             ("HxD6", 3)],
