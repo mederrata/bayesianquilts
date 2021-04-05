@@ -175,7 +175,7 @@ class BayesianModel(object):
 
     def calibrate_mcmc(self, data=None, num_steps=1000, burnin=500,
                        init_state=None, step_size=1e-1, nuts=True,
-                       num_leapfrog_steps=10, clip=None):
+                       num_leapfrog_steps=10, data_batches=10, clip=None):
         """Calibrate using HMC/NUT
         Keyword Arguments:
             num_chains {int} -- [description] (default: {1})
@@ -190,15 +190,33 @@ class BayesianModel(object):
         bijectors = [self.bijectors[k] for k in self.var_list]
 
         data = self.data if data is None else data
-        card = tf_data_cardinality(data)
-        _data = data.batch(int(card/10), drop_remainder=False)
+        # check if data is batched
+        batched = False
+        root = False
+        up = data
+        while (not batched) and (not root):
+            if hasattr(up, "_batch_size"):
+                batch_size = up._batch_size
+                batched = True
+                break
+            if hasattr(up, "_input_dataset"):
+                up = up._input_dataset
+            else:
+                root = True
 
-        def energy(*params):
-            _energy = 0
-            for batch in _data:
-                _energy += self.unormalized_log_prob_list(
-                    batch, params)
-            return _energy
+        if not batched:
+            card = tf.data.experimental.cardinality(data)
+            batch_size = int(np.floor(card/data_batches))
+            data = data.batch(batch_size, drop_remainder=True)
+            # data = data.batch
+
+        def energy(*x):
+            energies = [
+                tf.reduce_sum(
+                    self.unormalized_log_prob_list(batch, x)) for batch in iter(data)
+            ]
+
+            return tf.add_n(energies)
 
         samples, sampler_stat = run_chain(
             init_state=initial_list,
@@ -257,11 +275,11 @@ class BayesianModel(object):
         root = False
         up = data
         while (not batched) and (not root):
-            if hasattr(up, "._batch_size"):
+            if hasattr(up, "_batch_size"):
                 batch_size = up._batch_size
                 batched = True
                 break
-            if hasattr(up, "._input_dataset"):
+            if hasattr(up, "_input_dataset"):
                 up = up._input_dataset
             else:
                 root = True
@@ -272,7 +290,7 @@ class BayesianModel(object):
             data = data.batch(batch_size, drop_remainder=True)
             # data = data.batch
 
-        data = data.prefetch(2)
+        data = data.prefetch(tf.data.experimental.AUTOTUNE)
 
         likelihood_vars = inspect.getfullargspec(
             self.log_likelihood).args[1:]
