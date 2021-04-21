@@ -44,6 +44,7 @@ setuptools.setup(
         'tensorflow-probability>=0.12.1',
         'tensorflow-addons>=0.12.0',
         'jax',
-        'jaxlib'
+        'jaxlib',
+        'natsort'
         ]
 )
