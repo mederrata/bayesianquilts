@@ -275,14 +275,14 @@ class BayesianModel(object):
         root = False
         up = data
         while (not batched) and (not root):
-            if hasattr(up, "_batch_size"):
+            try:
                 batch_size = up._batch_size
                 batched = True
-                break
-            if hasattr(up, "_input_dataset"):
-                up = up._input_dataset
-            else:
-                root = True
+            except AttributeError:
+                try:
+                    up = up._input_dataset
+                except AttributeError:
+                    root = True
 
         if not batched:
             card = tf.data.experimental.cardinality(data)
