@@ -2,6 +2,8 @@ import inspect
 from itertools import cycle
 import dill
 import arviz as az
+from arviz.data.base import dict_to_dataset
+from arviz.data import InferenceData
 
 import tensorflow as tf
 
@@ -9,9 +11,11 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from functools import partial
+import xarray as xr
 
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.distribute.input_lib import DistributedDataset
+from tqdm import tqdm
 
 from bayesianquilts.util import (
     clip_gradients, fit_surrogate_posterior,
@@ -117,7 +121,7 @@ class BayesianModel(object):
             card = tf_data_cardinality(data)
             if card < 1:
                 print(
-                    "We can't determine cardinality of the dataseet, defaulting to batch size of 100")
+                    "We can't determine cardinality of the dataset, defaulting to batch size of 100")
                 batch_size = 100
             else:
                 batch_size = int(np.floor(card/data_batches))
@@ -125,7 +129,7 @@ class BayesianModel(object):
             _data = data.batch(batch_size, drop_remainder=True)
             # data = data.batch
 
-        _data = _data.prefetch(2)
+        _data = _data.prefetch(prefetch_batches)
 
         def run_approximation(num_epochs):
             losses = fit_surrogate_posterior(
@@ -240,33 +244,12 @@ class BayesianModel(object):
     def log_likelihood(self, data, *args, **kwargs):
         pass
 
-    def psis_loo(self, data=None, params=None, num_samples=100, num_splits=20):
-        data = self.data if data is None else data
-        likelihood_vars = inspect.getfullargspec(
-            self.log_likelihood).args[1:]
+    def posterior_predictive(
+            self, data=None, params=None, num_samples=100,
+            num_splits=20, data_batches=25):
+        pass
 
-        # split param samples
-        params = self.surrogate_sample if params is None else params
-        if 'data' in likelihood_vars:
-            likelihood_vars.remove('data')
-        params = self.surrogate_distribution.sample(num_samples) if (
-            params is None) else params
-        if len(likelihood_vars) == 0:
-            likelihood_vars = params.keys()
-        if 'data' in likelihood_vars:
-            likelihood_vars.remove('data')
-        splits = [
-            tf.split(
-                params[v],
-                num_splits) for v in likelihood_vars]
-
-        # reshape the splits
-        splits = [
-            {
-                k: v for k, v in zip(
-                    likelihood_vars, split)} for split in zip(*splits)]
-
-    def waic(
+    def sample_stats(
             self, data=None, params=None, num_samples=100,
             num_splits=20, data_batches=25):
         data = self.data if data is None else data
@@ -307,31 +290,17 @@ class BayesianModel(object):
             likelihood_vars.remove('data')
         splits = [
             tf.split(
-                params[v],
-                num_splits) for v in likelihood_vars]
+                value=params[v],
+                num_or_size_splits=num_splits
+                ) for v in likelihood_vars]
 
         # reshape the splits
         splits = [
             {
                 k: v for k, v in zip(
                     likelihood_vars, split)} for split in zip(*splits)]
-        """
-        if not isinstance(data, BatchDataset):
-            N = list(data.shape)[0]
-            data = tf.data.Dataset.from_tensor_slices(data)
-            data = data.batch(int(N/num_splits))
-        """
-
-        sum_S_log_likelihoods = 0.
-        sum_N_log_likelihoods = 0.
-        sum_S_sq_log_likes = 0.
-        sum_N_sq_log_likes = 0.
-        sum_S_likelihoods = 0.
-        sum_N_likelihoods = 0.
-        N = 0
-        S = tf.shape(tf.nest.flatten(params)[0])[0]
-
-        for batch in data:
+        ll = []
+        for batch in tqdm(data):
             # This should have shape S x N, where S is the number of param
             # samples and N is the batch size
             batch_log_likelihoods = [
@@ -352,49 +321,17 @@ class BayesianModel(object):
             batch_log_likelihoods = tf.where(
                 tf.math.is_finite(batch_log_likelihoods),
                 batch_log_likelihoods,
-                tf.ones_like(batch_log_likelihoods)*min_val - 1000.
-            )
-            batch_log_likelihoods = tf.cast(batch_log_likelihoods, tf.float64)
-            sum_S_log_likelihoods = sum_S_log_likelihoods + tf.reduce_sum(
-                batch_log_likelihoods, axis=0)
-            sum_N_log_likelihoods = sum_N_log_likelihoods + tf.reduce_sum(
-                batch_log_likelihoods, axis=1)
-            sum_S_sq_log_likes = sum_S_sq_log_likes + tf.reduce_sum(
-                batch_log_likelihoods**2, axis=0)
-            sum_N_sq_log_likes = sum_N_sq_log_likes + tf.reduce_sum(
-                batch_log_likelihoods**2, axis=1)
-            sum_S_likelihoods = sum_S_likelihoods + tf.reduce_sum(
-                tf.math.exp(batch_log_likelihoods), axis=0)
-            sum_N_likelihoods = sum_N_likelihoods + tf.reduce_sum(
-                tf.math.exp(batch_log_likelihoods), axis=1)
-            N += tf.shape(tf.nest.flatten(batch)[0])[0]
-
-        # These stats are over the samples
-        mean_S_likelihood = (
-            sum_S_likelihoods/tf.cast(N, sum_S_likelihoods.dtype))
-        lppdi = tf.math.log(
-            tf.cast(mean_S_likelihood, tf.float64)
-        )
-        lppd = tf.reduce_sum(lppdi).numpy()
-
-        mean_sq_S_log_likelihood = (
-            sum_S_sq_log_likes/tf.cast(N, sum_S_sq_log_likes.dtype))
-        mean__S_log_likelihood = (
-            sum_S_log_likelihoods/tf.cast(N, sum_S_log_likelihoods.dtype))
-        pwaici = mean_sq_S_log_likelihood - mean__S_log_likelihood**2
-
-        pwaic = tf.reduce_sum(pwaici).numpy()
-
-        elpdi = lppdi-pwaici
-
-        waic = 2*(-lppd + pwaic)
-
-        se = 2.0*tf.math.sqrt(
-            tf.cast(N, tf.float64) *
-            tf.cast(tf.math.reduce_variance(elpdi), dtype=tf.float64))
-
+                tf.ones_like(batch_log_likelihoods)*min_val*1.01
+                )
+            ll += [batch_log_likelihoods.numpy()]
+        ll = np.concatenate(ll, axis=1)
+        ll = np.moveaxis(ll, 0, -1)
         return {
-            'waic': waic, 'se': se.numpy(), 'lppd': lppd, 'pwaic': pwaic}
+            'log_likelihood': ll[np.newaxis, ...],
+            'params': {
+                k: v.numpy()[np.newaxis, ...] for k, v in params.items()
+                }
+            }
 
     def save(self, filename="model_save.pkl"):
         with open(filename, 'wb') as file:
@@ -451,6 +388,15 @@ class BayesianModel(object):
                 state['surrogate_vars']):
             self.surrogate_distribution.trainable_variables[j].assign(
                 tf.cast(value, self.dtype))
+
+    def to_arviz(self):
+        sample_stats = self.sample_stats()
+        params = sample_stats['params']
+        return InferenceData(**{
+            'posterior': dict_to_dataset(params),
+            'sample_stats': dict_to_dataset(
+                {'log_likelihood': sample_stats['log_likelihood']})
+        })
 
     def __setstate__(self, state):
         self.__dict__ = state.copy()
