@@ -259,6 +259,7 @@ def batched_minimize(loss_fn,
                      processing_fn=None,
                      name='minimize',
                      clip_value=10.,
+                     temp_dir="/tmp/.tfcheckpoints/"
                      **kwargs):
 
     checkpoint_name = str(
@@ -300,7 +301,7 @@ def batched_minimize(loss_fn,
             "var_" + str(j): v for j, v in enumerate(watched_variables)
         })
     manager = tf.train.CheckpointManager(
-        checkpoint, f'./.tf_ckpts/{checkpoint_name}',
+        checkpoint, f'{temp_dir}/{checkpoint_name}',
         checkpoint_name=checkpoint_name, max_to_keep=3)
 
     @tf.function(autograph=False)

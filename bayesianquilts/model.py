@@ -81,6 +81,7 @@ class BayesianModel(object):
             clip_value=5., max_decay_steps=25, lr_decay_factor=0.99,
             check_every=25, set_expectations=True, sample_size=4,
             data=None, data_batches=25, prefetch_batches=2,
+            temp_dir="/tmp/",
             **kwargs):
         """Calibrate using ADVI
 
