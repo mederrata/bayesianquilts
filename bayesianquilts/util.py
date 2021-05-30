@@ -259,7 +259,7 @@ def batched_minimize(loss_fn,
                      processing_fn=None,
                      name='minimize',
                      clip_value=10.,
-                     temp_dir="/tmp/.tfcheckpoints/"
+                     temp_dir="/tmp/.tfcheckpoints/",
                      **kwargs):
 
     checkpoint_name = str(
