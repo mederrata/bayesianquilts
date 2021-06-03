@@ -38,7 +38,7 @@ setuptools.setup(
         'matplotlib>=3.1',
         'arviz>=0.10.0',
         'numpy>=1.17',
-        'pandas >= 1.0.0,
+        'pandas >= 1.0.0',
         # We need to check for direct depends or we can delete scipy.
         'scipy>=1.4.1',
         'tensorflow>=2.4.0',
