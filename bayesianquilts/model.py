@@ -33,8 +33,8 @@ class BayesianModel(object):
     bijectors = []
 
     def __init__(self, data=None, data_transform_fn=None,
-                 strategy=None, *args, **kwargs):
-        """Instatiate Model object based on tensorflow dataset
+                 strategy=None, dtype=tf.float64, *args, **kwargs):
+        """Instantiate Model object based on tensorflow dataset
         Arguments:
             data {[type]} -- [description]
         Keyword Arguments:
@@ -48,6 +48,7 @@ class BayesianModel(object):
             self.set_data(data, data_transform_fn)
 
         self.strategy = strategy
+        self.dtype = dtype
 
     def set_data(self, data, data_transform_fn=None):
         if isinstance(
@@ -293,7 +294,7 @@ class BayesianModel(object):
             tf.split(
                 value=params[v],
                 num_or_size_splits=num_splits
-                ) for v in likelihood_vars]
+            ) for v in likelihood_vars]
 
         # reshape the splits
         splits = [
@@ -323,7 +324,7 @@ class BayesianModel(object):
                 tf.math.is_finite(batch_log_likelihoods),
                 batch_log_likelihoods,
                 tf.ones_like(batch_log_likelihoods)*min_val*1.01
-                )
+            )
             ll += [batch_log_likelihoods.numpy()]
         ll = np.concatenate(ll, axis=1)
         ll = np.moveaxis(ll, 0, -1)
@@ -331,8 +332,8 @@ class BayesianModel(object):
             'log_likelihood': ll[np.newaxis, ...],
             'params': {
                 k: v.numpy()[np.newaxis, ...] for k, v in params.items()
-                }
             }
+        }
 
     def save(self, filename="model_save.pkl"):
         with open(filename, 'wb') as file:

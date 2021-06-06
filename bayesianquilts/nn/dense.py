@@ -441,7 +441,7 @@ class DenseHorseshoe(Dense, BayesianModel):
                     )
                 )
         self.bijectors = bijectors
-        self.joint_prior = tfd.JointDistributionNamed(distribution_dict)
+        self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
         self.surrogate_distribution = tfd.JointDistributionNamed(
             factorized_dict)
         self.surrogate_distribution_dict = factorized_dict
@@ -455,7 +455,7 @@ class DenseHorseshoe(Dense, BayesianModel):
 def main():
     denseH = DenseHorseshoe(10, [20, 12, 2],
                             reparameterized=True)
-    sample = denseH.joint_prior.sample(10)
+    sample = denseH.prior_distribution.sample(10)
     prob = denseH.log_prob(sample)
     sample2 = denseH.surrogate_distribution.sample(10)
     prob2 = denseH.log_prob(sample2)
