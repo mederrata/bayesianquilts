@@ -21,6 +21,7 @@ from tensorflow_probability.python.internal import (dtype_util, prefer_static,
                                                     tensorshape_util)
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow_probability.python.vi import csiszar_divergence
+from tqdm import tqdm
 
 from bayesianquilts.distributions import SqrtInverseGamma
 
@@ -952,7 +953,7 @@ def tf_data_cardinality(tf_dataset):
     if card < 1:
         print("Getting the cardinality the slow way")
         num_elements = 0
-        for _ in up:
+        for _ in tqdm(up):
             num_elements += 1
         card = num_elements
     return card
