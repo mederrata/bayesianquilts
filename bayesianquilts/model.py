@@ -33,8 +33,8 @@ class BayesianModel(object):
     bijectors = []
 
     def __init__(self, data=None, data_transform_fn=None,
-                 strategy=None, *args, **kwargs):
-        """Instatiate Model object based on tensorflow dataset
+                 strategy=None, dtype=tf.float64, *args, **kwargs):
+        """Instantiate Model object based on tensorflow dataset
         Arguments:
             data {[type]} -- [description]
         Keyword Arguments:
@@ -48,6 +48,7 @@ class BayesianModel(object):
             self.set_data(data, data_transform_fn)
 
         self.strategy = strategy
+        self.dtype = dtype
 
     def set_data(self, data, data_transform_fn=None):
         if isinstance(
@@ -81,6 +82,7 @@ class BayesianModel(object):
             clip_value=5., max_decay_steps=25, lr_decay_factor=0.99,
             check_every=25, set_expectations=True, sample_size=4,
             data=None, data_batches=25, prefetch_batches=2,
+            temp_dir="/tmp/",
             **kwargs):
         """Calibrate using ADVI
 
@@ -117,8 +119,7 @@ class BayesianModel(object):
                 root = True
 
         if not batched:
-            _have_cardinality = False
-            card = tf_data_cardinality(data)
+            card = self.data_cardinality if self.data_cardinality is not None else tf_data_cardinality(data)
             if card < 1:
                 print(
                     "We can't determine cardinality of the dataset, defaulting to batch size of 100")
@@ -292,7 +293,7 @@ class BayesianModel(object):
             tf.split(
                 value=params[v],
                 num_or_size_splits=num_splits
-                ) for v in likelihood_vars]
+            ) for v in likelihood_vars]
 
         # reshape the splits
         splits = [
@@ -322,7 +323,7 @@ class BayesianModel(object):
                 tf.math.is_finite(batch_log_likelihoods),
                 batch_log_likelihoods,
                 tf.ones_like(batch_log_likelihoods)*min_val*1.01
-                )
+            )
             ll += [batch_log_likelihoods.numpy()]
         ll = np.concatenate(ll, axis=1)
         ll = np.moveaxis(ll, 0, -1)
@@ -330,8 +331,8 @@ class BayesianModel(object):
             'log_likelihood': ll[np.newaxis, ...],
             'params': {
                 k: v.numpy()[np.newaxis, ...] for k, v in params.items()
-                }
             }
+        }
 
     def save(self, filename="model_save.pkl"):
         with open(filename, 'wb') as file:
