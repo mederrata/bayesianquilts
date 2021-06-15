@@ -378,7 +378,7 @@ def batched_minimize(loss_fn,
             loss = batch_normalized_loss(data=data)
         else:
             loss = loss_fn()
-        if not np.isfinite(loss.numpy()):
+        if not np.isfinite(np.sum(loss.numpy())):
             # print(loss)
             print("Failed to initialize")
             converged = True

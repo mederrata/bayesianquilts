@@ -7,10 +7,12 @@ from bayesianquilts.metastrings import (
 from bayesianquilts.util import (
     clip_gradients, run_chain,
     build_trainable_InverseGamma_dist,
-    build_trainable_normal_dist
+    build_trainable_normal_dist,
+    build_surrogate_posterior
 )
 from bayesianquilts.distributions import SqrtInverseGamma
 from bayesianquilts.model import BayesianModel
+from bayesianquilts.metastrings import horseshoe_code, horseshoe_lambda_code
 
 tfd = tfp.distributions
 
@@ -93,24 +95,25 @@ class DenseHorseshoe(Dense, BayesianModel):
     reparameterized = True
 
     def __init__(self, input_size=None, layer_sizes=None,
-                 reparameterized=False, decay=0.5,
-                 activation_fn=None, dtype=tf.float32, *args, **kwargs):
+                 decay=0.5, activation_fn=None,
+                 weight_scale=1., bias_scale=1.,
+                 dtype=tf.float64, *args, **kwargs):
         super(DenseHorseshoe, self).__init__(
             input_size, layer_sizes,
             activation_fn=activation_fn, dtype=dtype,
             *args, **kwargs)
         self.dtype = dtype
         self.layer_sizes = [input_size] + layer_sizes
-        self.reparameterized = reparameterized
-        self.assemble_distributions()
         self.decay = decay  # dimensional decay
+        self.weight_scale = weight_scale
+        self.bias_scale = bias_scale
+        self.create_distributions()
 
     def set_weights(self, weights):
         super(DenseHorseshoe, self).set_weights(weights)
-        self.assemble_distributions()
 
     def log_prob(self, x):
-        return self.distribution.log_prob(x)
+        return self.prior_distribution.log_prob(x)
 
     def sample_weights(self, *args, **kwargs):
         return self.distribution.sample(*args, **kwargs)
@@ -122,339 +125,99 @@ class DenseHorseshoe(Dense, BayesianModel):
         net = self.build_network(weight_tensors, activation=activation)
         return net
 
-    def assemble_distributions(self):
+    def create_distributions(self):
         distribution_dict = {}
-        factorized_dict = {}
         bijectors = {}
         var_list = []
         weight_var_list = []
         for j, weight in enumerate(self.weights[::2]):
-            var_list += ['w_' + str(j)] + ['b_' + str(j)]
-            weight_var_list += ['w_' + str(j)] + ['b_' + str(j)]
-            model_code = weight_code.format(
-                'w',
-                j,
-                2,
-                (self.layer_sizes[j],
-                 self.layer_sizes[j+1]),
-                "tf." + self.dtype.name)
-            distribution_dict['w_' + str(j)] = eval(
-                model_code)
-            factorized_dict['w_' + str(j)] = build_trainable_normal_dist(
-                tf.zeros(
-                    (self.layer_sizes[j], self.layer_sizes[j+1]),
-                    dtype=self.dtype),
-                1e-2 *
-                tf.zeros(
-                    (self.layer_sizes[j], self.layer_sizes[j+1]),
-                    dtype=self.dtype),
-                2
+            var_list += [f'w_{j}'] + [f'b_{j}']
+            weight_var_list += [f'w_{j}'] + [f'b_{j}']
+            
+            # Top level priors
+            ## weight
+            
+            # w ~ Horseshoe(0, w_tau)
+            # w_tau ~ cauchy(0, w_tau_scale)
+            # b ~ Horseshoe(0, b_tau)
+            # b_tau ~ cauchy(0, b_tau_scale)
+            
+            bijectors[f'w_{j}'] = tfp.bijectors.Identity()
+
+            distribution_dict[f'w_{j}'] = eval(
+                horseshoe_lambda_code.format(
+                    f'w_{j}_tau',
+                    f'w_{j}_tau',
+                    2
+                )
             )
-            distribution_dict['b_' + str(j)] = eval(
-                weight_code.format(
-                    'b',
-                    j,
+            
+            ## bias
+            bijectors[f'b_{j}'] = tfp.bijectors.Identity()
+            distribution_dict[f'b_{j}'] = eval(
+                horseshoe_lambda_code.format(
+                    f'b_{j}_tau',
+                    f'b_{j}_tau',
+                    1
+                )
+            )
+            
+            # using the auxiliary inverse-gamma parameterization for cauchy vars
+            
+            # Scale
+            bijectors[f'w_{j}_tau'] = tfp.bijectors.Softplus()
+            distribution_dict[f'w_{j}_tau'] = eval(
+                sq_igamma_code.format(
+                    f"({self.layer_sizes[j]}, {self.layer_sizes[j+1]})",
+                    f'w_{j}_tau_a',
+                    2,
+                    "tf." + self.dtype.name
+                )
+            )
+            bijectors[f'b_{j}_tau'] = tfp.bijectors.Softplus()
+            distribution_dict[f'b_{j}_tau'] = eval(
+                sq_igamma_code.format(
+                    f"({self.layer_sizes[j+1]}, )",
+                    f'b_{j}_tau_a',
                     1,
-                    (self.layer_sizes[j+1],),
-                    "tf." + self.dtype.name)
+                    "tf." + self.dtype.name
+                )
             )
-            factorized_dict['b_' + str(j)] = build_trainable_normal_dist(
-                tf.zeros((self.layer_sizes[j+1],), dtype=self.dtype),
-                1e-2*tf.zeros((self.layer_sizes[j+1],), dtype=self.dtype),
-                1
+            
+            # auxiliary scale variables
+            bijectors[f'w_{j}_tau_a'] = tfp.bijectors.Softplus()
+            distribution_dict[f'w_{j}_tau_a'] = eval(
+                igamma_code.format(
+                    f"({self.layer_sizes[j]}, {self.layer_sizes[j+1]})",
+                    1.0/self.weight_scale**2,
+                    2,
+                    "tf." + self.dtype.name
+                )
             )
-            bijectors['w_' + str(j)] = tfp.bijectors.Identity()
-            bijectors['b_' + str(j)] = tfp.bijectors.Identity()
 
-            var_list += (
-                ['tau_w_{0}'.format(j)] + ['lambda_w_{0}'.format(j)]
-                + ['tau_b_{0}'.format(j)] + ['lambda_b_{0}'.format(j)])
-            bijectors['tau_w_{0}'.format(j)] = tfp.bijectors.Softplus()
-            bijectors['lambda_w_{0}'.format(j)] = tfp.bijectors.Softplus()
-            bijectors['tau_b_{0}'.format(j)] = tfp.bijectors.Softplus()
-            bijectors['lambda_b_{0}'.format(j)] = tfp.bijectors.Softplus()
-            if not self.reparameterized:
-                distribution_dict[
-                    'tau_w_{0}'.format(j)
-                ] = eval(
-                    cauchy_code.format(
-                        (1, self.layer_sizes[j+1]),
-                        1.,
-                        2,
-                        "tf." + self.dtype.name
-                    )
+            bijectors[f'b_{j}_tau_a'] = tfp.bijectors.Softplus()
+            distribution_dict[f'b_{j}_tau_a'] = eval(
+                igamma_code.format(
+                    f"({self.layer_sizes[j+1]}, )",
+                    1.0/self.bias_scale**2,
+                    1,
+                    "tf." + self.dtype.name
                 )
-                factorized_dict[
-                    'tau_w_{0}'.format(j)
-                ] = bijectors['tau_w_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5 *
-                        tf.ones((1, self.layer_sizes[j+1]), dtype=self.dtype),
-                        tf.ones(
-                            (1, self.layer_sizes[j+1]),
-                            dtype=self.dtype),
-                        1
-                    )
-                )
-                distribution_dict[
-                    'tau_b_{0}'.format(j)
-                ] = eval(
-                    cauchy_code.format(
-                        1,
-                        1.,
-                        1,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'tau_b_{0}'.format(j)
-                ] = bijectors['tau_b_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5*tf.ones((1), dtype=self.dtype),
-                        tf.ones((1), dtype=self.dtype),
-                        1
-                    )
-                )
-                distribution_dict[
-                    'lambda_b_{0}'.format(j)
-                ] = eval(
-                    cauchy_code.format(
-                        (self.layer_sizes[j+1],),
-                        1.,
-                        1,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'lambda_b_{0}'.format(j)
-                ] = bijectors['lambda_b_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5 *
-                        tf.ones((self.layer_sizes[j+1],), dtype=self.dtype),
-                        tf.ones((self.layer_sizes[j+1],), dtype=self.dtype),
-                        1
-                    )
-                )
-                distribution_dict[
-                    'lambda_w_{0}'.format(j)
-                ] = eval(
-                    cauchy_code.format(
-                        (self.layer_sizes[j], self.layer_sizes[j+1]),
-                        1.,
-                        2,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'lambda_w_{0}'.format(j)
-                ] = bijectors['lambda_w_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5*tf.ones(
-                            (self.layer_sizes[j], self.layer_sizes[j+1]), dtype=self.dtype),
-                        tf.ones(
-                            (self.layer_sizes[j], self.layer_sizes[j+1]), dtype=self.dtype),
-                        2
-                    )
-                )
-            else:
-                var_list += (
-                    ['tau_w_{0}_a'.format(j)] + ['lambda_w_{0}_a'.format(j)]
-                    + ['tau_b_{0}_a'.format(j)] + ['lambda_b_{0}_a'.format(j)])
-                bijectors['tau_w_{0}_a'.format(j)] = tfp.bijectors.Softplus()
-                bijectors[
-                    'lambda_w_{0}_a'.format(j)
-                ] = tfp.bijectors.Softplus()
-                bijectors[
-                    'tau_b_{0}_a'.format(j)
-                ] = tfp.bijectors.Softplus()
-                bijectors[
-                    'lambda_b_{0}_a'.format(j)
-                ] = tfp.bijectors.Softplus()
-                distribution_dict[
-                    'lambda_b_{0}'.format(j)
-                ] = eval(
-                    sq_igamma_code.format(
-                        (self.layer_sizes[j+1],),
-                        'lambda_b_{0}_a'.format(j),
-                        1,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'lambda_b_{0}'.format(j)
-                ] = bijectors['lambda_b_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5 *
-                        tf.ones((self.layer_sizes[j+1],), dtype=self.dtype),
-                        tf.ones((self.layer_sizes[j+1],), dtype=self.dtype),
-                        1
-                    )
-                )
+            )
 
-                distribution_dict[
-                    'lambda_b_{0}_a'.format(j)
-                ] = eval(
-                    igamma_code.format(
-                        (self.layer_sizes[j+1],),
-                        1.0,
-                        1,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'lambda_b_{0}_a'.format(j)
-                ] = bijectors['lambda_b_{0}_a'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5 *
-                        tf.ones((self.layer_sizes[j+1],), dtype=self.dtype),
-                        tf.ones((self.layer_sizes[j+1],), dtype=self.dtype),
-                        1
-                    )
-                )
-
-                distribution_dict[
-                    'lambda_w_{0}'.format(j)
-                ] = eval(
-                    sq_igamma_code.format(
-                        (self.layer_sizes[j], self.layer_sizes[j+1]),
-                        'lambda_w_{0}_a'.format(j),
-                        2,
-                        "tf." + self.dtype.name
-                    )
-                )
-
-                factorized_dict[
-                    'lambda_w_{0}'.format(j)
-                ] = bijectors['lambda_w_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5 *
-                        tf.ones(
-                            (self.layer_sizes[j], self.layer_sizes[j+1]),
-                            dtype=self.dtype),
-                        tf.ones(
-                            (self.layer_sizes[j], self.layer_sizes[j+1]),
-                            dtype=self.dtype),
-                        2
-                    )
-                )
-                distribution_dict[
-                    'lambda_w_{0}_a'.format(j)
-                ] = eval(
-                    igamma_code.format(
-                        (self.layer_sizes[j], self.layer_sizes[j+1]),
-                        1.,
-                        2,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'lambda_w_{0}_a'.format(j)
-                ] = bijectors['lambda_w_{0}_a'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5*tf.ones(
-                            (self.layer_sizes[j], self.layer_sizes[j+1]),
-                            dtype=self.dtype
-                        ),
-                        tf.ones(
-                            (self.layer_sizes[j], self.layer_sizes[j+1]),
-                            dtype=self.dtype
-                        ),
-                        2
-                    )
-                )
-                distribution_dict[
-                    'tau_w_{0}'.format(j)
-                ] = eval(
-                    sq_igamma_code.format(
-                        (1, self.layer_sizes[j+1]),
-                        'tau_w_{0}_a'.format(j),
-                        2,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'tau_w_{0}'.format(j)
-                ] = bijectors['tau_w_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5 *
-                        tf.ones((1, self.layer_sizes[j+1]), dtype=self.dtype),
-                        tf.ones((1, self.layer_sizes[j+1]), dtype=self.dtype),
-                        1
-                    )
-                )
-                distribution_dict[
-                    'tau_w_{0}_a'.format(j)
-                ] = eval(
-                    igamma_code.format(
-                        (1, self.layer_sizes[j+1]),
-                        1.,
-                        2,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'tau_w_{0}_a'.format(j)
-                ] = bijectors['tau_w_{0}_a'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5 *
-                        tf.ones((1, self.layer_sizes[j+1]), dtype=self.dtype),
-                        tf.ones((1, self.layer_sizes[j+1]), dtype=self.dtype),
-                        1
-                    )
-                )
-                distribution_dict[
-                    'tau_b_{0}'.format(j)
-                ] = eval(
-                    sq_igamma_code.format(
-                        1,
-                        'tau_b_{0}_a'.format(j),
-                        1,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'tau_b_{0}'.format(j)
-                ] = bijectors['tau_b_{0}'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5*tf.ones((1), dtype=self.dtype),
-                        tf.ones((1), dtype=self.dtype),
-                        1
-                    )
-                )
-                distribution_dict[
-                    'tau_b_{0}_a'.format(j)
-                ] = eval(
-                    igamma_code.format(
-                        1,
-                        1.,
-                        1,
-                        "tf." + self.dtype.name
-                    )
-                )
-                factorized_dict[
-                    'tau_b_{0}_a'.format(j)
-                ] = bijectors['tau_b_{0}_a'.format(j)](
-                    build_trainable_InverseGamma_dist(
-                        0.5*tf.ones((1), dtype=self.dtype),
-                        tf.ones((1), dtype=self.dtype),
-                        1
-                    )
-                )
         self.bijectors = bijectors
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
-        self.surrogate_distribution = tfd.JointDistributionNamed(
-            factorized_dict)
-        self.surrogate_distribution_dict = factorized_dict
-        self.var_list = var_list
-        self.weight_var_list = weight_var_list
+        self.surrogate_distribution = build_surrogate_posterior(
+            self.prior_distribution, bijectors)
+        self.var_list = list(self.surrogate_distribution.model.keys())
 
     def sample(self, *args, **kwargs):
         return self.surrogate_distribution.sample(*args, **kwargs)
 
 
 def main():
-    denseH = DenseHorseshoe(10, [20, 12, 2],
-                            reparameterized=True)
+    denseH = DenseHorseshoe(
+        10, [20, 12, 2])
     sample = denseH.prior_distribution.sample(10)
     prob = denseH.log_prob(sample)
     sample2 = denseH.surrogate_distribution.sample(10)
