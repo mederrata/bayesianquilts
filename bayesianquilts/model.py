@@ -289,6 +289,8 @@ class BayesianModel(object):
             likelihood_vars = params.keys()
         if 'data' in likelihood_vars:
             likelihood_vars.remove('data')
+        if len(likelihood_vars) == 0:
+            likelihood_vars = self.var_list
         splits = [
             tf.split(
                 value=params[v],
