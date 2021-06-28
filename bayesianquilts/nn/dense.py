@@ -148,7 +148,8 @@ class DenseHorseshoe(Dense, BayesianModel):
                 horseshoe_lambda_code.format(
                     f'w_{j}_tau',
                     f'w_{j}_tau',
-                    2
+                    2,
+                    "tf." + self.dtype.name
                 )
             )
             
@@ -158,7 +159,8 @@ class DenseHorseshoe(Dense, BayesianModel):
                 horseshoe_lambda_code.format(
                     f'b_{j}_tau',
                     f'b_{j}_tau',
-                    1
+                    1,
+                    "tf." + self.dtype.name
                 )
             )
             

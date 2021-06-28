@@ -94,7 +94,8 @@ horseshoe_code = """ tfd.Independent(
 horseshoe_lambda_code = """ lambda {0}: tfd.Independent(
     tfd.Horseshoe(
         scale={1},
-    ), reinterpreted_batch_ndims={2})
+    ), reinterpreted_batch_ndims={2},
+    dtype = {3})
 """
 
 def clean_str(s):
