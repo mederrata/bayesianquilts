@@ -50,7 +50,7 @@ class BayesianModel(object):
         self.strategy = strategy
         self.dtype = dtype
 
-    def set_data(self, data, data_transform_fn=None):
+    def set_data(self, data, data_transform_fn=None, n=None):
         if isinstance(
             data, (np.ndarray, np.generic)) or isinstance(
                 data, pd.DataFrame):
@@ -72,7 +72,7 @@ class BayesianModel(object):
             raise AttributeError("Need numpy/dataframe or tf.dataset")
 
         self.data = data
-        self.data_cardinality = tf_data_cardinality(data)
+        self.data_cardinality = tf_data_cardinality(data) if n is None else n
         self.data_transform_fn = data_transform_fn
 
     #  @tf.function
@@ -289,6 +289,8 @@ class BayesianModel(object):
             likelihood_vars = params.keys()
         if 'data' in likelihood_vars:
             likelihood_vars.remove('data')
+        if len(likelihood_vars) == 0:
+            likelihood_vars = self.var_list
         splits = [
             tf.split(
                 value=params[v],
