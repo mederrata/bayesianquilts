@@ -37,7 +37,11 @@ class Dense(object):
             self.fn = self.build_network(self.weights)
 
     def dense(self, X, W, b, activation):
-        return activation(tf.matmul(X, W) + b[..., tf.newaxis, :])
+        return activation(
+            tf.matmul(
+                tf.cast(X, self.dtype), 
+                tf.cast(W, self.dtype)) + tf.cast(b[..., tf.newaxis, :], self.dtype)
+            )
 
     def set_weights(self, weights):
         self.weights = weights
