@@ -179,7 +179,7 @@ class DecomposedParam(object):
 def main():
     interact = InteractionParameterization(
         [
-            ("planned", 2), ("pre2011"),
+            ("planned", 2), ("pre2011", 2),
             ("MDC", 26), ("HxD1", 3), ("HxD2", 3),
             ("HxD3", 3), ("HxD4", 3), ("HxD5", 3),
             ("HxD6", 3)],

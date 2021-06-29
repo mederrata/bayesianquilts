@@ -73,14 +73,14 @@ igamma_code = """ tfd.Independent(
 
 abshorseshoe_code = """ tfd.Independent(
     AbsHorseshoe(
-        scale={0}, dtype={2})
+        scale={0})
     ),
     reinterpreted_batch_ndims={1})
 """
 
 abshorseshoe_lambda_code = """ lambda {0}: tfd.Independent(
     AbsHorseshoe(
-        scale={1}, dtype={3})
+        scale={1})
     ), reinterpreted_batch_ndims={2})
 """
 
@@ -93,7 +93,7 @@ horseshoe_code = """ tfd.Independent(
 
 horseshoe_lambda_code = """ lambda {0}: tfd.Independent(
     tfd.Horseshoe(
-        scale={1}, dtype = {3}
+        scale={1}
     ), reinterpreted_batch_ndims={2})
 """
 
