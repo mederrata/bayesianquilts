@@ -12,7 +12,7 @@ from tensorflow_probability import distributions as tfd
 from bayesianquilts.stackedtensor import broadcast_tensors
 
 def tf_ravel_multi_index(multi_index, dims):
-    strides = tf.cumprod(dims, exclusive=True, reverse=True)
+    strides = tf.math.cumprod(dims, exclusive=True, reverse=True)
     return tf.reduce_sum(multi_index * tf.expand_dims(strides, 1), axis=0)
 
 class InteractionParameterization(object):
@@ -60,7 +60,8 @@ class DecomposedParam(object):
 
         self._interactions = interactions
         self._default_val = default_val
-        self._intrinsic_shape = interactions.shape() + param_shape
+        self._interaction_shape = interactions.shape()
+        self._intrinsic_shape = self._interaction_shape + param_shape
         self._dtype = dtype
         self._name = name
         self._param_shape = param_shape
@@ -155,26 +156,35 @@ class DecomposedParam(object):
     def tensor_keys(self):
         return sorted(list(self._param_tensors.keys()))
 
-    def query(self, interaction_indices):
-        _global = self.constitute()
+    def query(self, interaction_indices, tensors=None):
+        _global = self.constitute(tensors)
         batch_ndims = tf.rank(_global) - len(self.shape())
+        
         # stick batch axes on the  end
         rank = tf.rank(_global)
-
+        permutation = list(range(batch_ndims, rank)) + list(range(batch_ndims))
         _global = tf.transpose(
             _global,
-            list(range(batch_ndims, rank)) + list(range(batch_ndims))
+            permutation
         )
-        _global = tf.reshape(_global, [-1])
-        localized = tf.gather_nd(_global, interaction_indices)
+        _global = tf.reshape(
+            _global,
+            [
+                np.prod(_global.shape[:-(len(self._param_shape)+batch_ndims)])
+            ] + _global.shape[-(len(self._param_shape)+batch_ndims):])
+        interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
+        indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
+        _global = tf.gather_nd(_global, indices[:,tf.newaxis])
+        
+        # move parameter batch dims back to the front
+        rank = tf.rank(_global)
+        permutation = list(range(rank-batch_ndims, rank)) + list(range(rank-batch_ndims))
+        _global = tf.transpose(
+            _global,
+            permutation
+        )
 
-        local_rank = tf.rank(localized)
-        localized = tf.transpose(
-            localized,
-            list(range(local_rank-batch_ndims, local_rank)) +
-            list(range(local_rank-batch_ndims))
-        )
-        return localized
+        return _global
 
     def shape(self):
         return self._intrinsic_shape
@@ -188,18 +198,17 @@ def main():
         # exclusions=[("Dx",),(),("Dx","Tx","Hx")],
         exclusions=[*[(f"hx_{j}", ) for j in range(7)], ()]
     )
-    p = DecomposedParam(interactions=interact, param_shape=[1000], name="beta")
+    p = DecomposedParam(interactions=interact, param_shape=[100, 5], name="beta")
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0, 1, 0],
         [0, 0, 12, 1, 1, 1, 1, 0, 1, 1],
         [0, 0, 0, 1, 0, 1, 1, 0, 1, 1],
         [0, 0, 13, 1, 0, 1, 1, 0, 1, 0],
         [0, 0, 13, 0, 0, 1, 1, 0, 1, 1]]
-    q = p.query(indices)
 
-    t = p.generate_tensors(batch_shape=[4])
-    p.set_params(t[0])
-    r = p.query(indices)
+    t, n = p.generate_tensors(batch_shape=[4])
+    p.set_params(t)
+    r = p.query(indices, t)
     pass
 
 
