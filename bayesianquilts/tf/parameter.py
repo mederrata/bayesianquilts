@@ -11,6 +11,9 @@ from tensorflow_probability import distributions as tfd
 
 from bayesianquilts.stackedtensor import broadcast_tensors
 
+def tf_ravel_multi_index(multi_index, dims):
+    strides = tf.cumprod(dims, exclusive=True, reverse=True)
+    return tf.reduce_sum(multi_index * tf.expand_dims(strides, 1), axis=0)
 
 class InteractionParameterization(object):
     _interaction_list = []
@@ -162,6 +165,7 @@ class DecomposedParam(object):
             _global,
             list(range(batch_ndims, rank)) + list(range(batch_ndims))
         )
+        _global = tf.reshape(_global, [-1])
         localized = tf.gather_nd(_global, interaction_indices)
 
         local_rank = tf.rank(localized)
@@ -180,19 +184,17 @@ def main():
     interact = InteractionParameterization(
         [
             ("planned", 2), ("pre2011", 2),
-            ("MDC", 26), ("HxD1", 3), ("HxD2", 3),
-            ("HxD3", 3), ("HxD4", 3), ("HxD5", 3),
-            ("HxD6", 3)],
+            ("mdc", 26), *[(f"hx_{j}", 2) for j in range(7)]],
         # exclusions=[("Dx",),(),("Dx","Tx","Hx")],
-        exclusions=[("HxD1",), ("HxD2",), ("HxD3",), ("HxD4",), ("HxD5",), ()]
+        exclusions=[*[(f"hx_{j}", ) for j in range(7)], ()]
     )
     p = DecomposedParam(interactions=interact, param_shape=[1000], name="beta")
     indices = [
-        [21, 1, 1, 1, 1, 2, 1],
-        [12, 1, 1, 1, 1, 2, 1],
-        [0, 1, 2, 1, 1, 2,  1],
-        [13, 1, 2, 1, 1, 2,  1],
-        [13, 2, 2, 1, 1, 2,  1]]
+        [0, 0, 21, 1, 1, 1, 1, 0, 1, 0],
+        [0, 0, 12, 1, 1, 1, 1, 0, 1, 1],
+        [0, 0, 0, 1, 0, 1, 1, 0, 1, 1],
+        [0, 0, 13, 1, 0, 1, 1, 0, 1, 0],
+        [0, 0, 13, 0, 0, 1, 1, 0, 1, 1]]
     q = p.query(indices)
 
     t = p.generate_tensors(batch_shape=[4])
