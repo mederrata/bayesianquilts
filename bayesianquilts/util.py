@@ -2,6 +2,8 @@ import functools
 import inspect
 import uuid
 from collections import defaultdict
+import tempfile
+import os
 
 import numpy as np
 
@@ -260,7 +262,8 @@ def batched_minimize(loss_fn,
                      processing_fn=None,
                      name='minimize',
                      clip_value=10.,
-                     temp_dir="/tmp/.tfcheckpoints/",
+                     temp_dir=os.path.join(
+                         tempfile.gettempdir(),"tfcheckpoints/"),
                      **kwargs):
 
     checkpoint_name = str(
