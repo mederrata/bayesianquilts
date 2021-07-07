@@ -4,6 +4,7 @@ import uuid
 from collections import defaultdict
 import tempfile
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -305,7 +306,7 @@ def batched_minimize(loss_fn,
             "var_" + str(j): v for j, v in enumerate(watched_variables)
         })
     manager = tf.train.CheckpointManager(
-        checkpoint, f'{temp_dir}/{checkpoint_name}',
+        checkpoint, os.path.join(temp_dir, "checkpoint_name"),
         checkpoint_name=checkpoint_name, max_to_keep=3)
 
     @tf.function(autograph=False)
@@ -930,7 +931,7 @@ def build_surrogate_posterior(joint_distribution_named,
             surrogate_dict[k] = bijectors[k](
                 build_trainable_normal_dist(
                     tfb.Invert(bijectors[k])(loc),
-                    1e-3*tf.ones(test_distribution.event_shape, dtype=dtype),
+                    1e-4*tf.ones(test_distribution.event_shape, dtype=dtype),
                     len(test_distribution.event_shape),
                     strategy=strategy,
                     name=name
