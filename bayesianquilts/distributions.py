@@ -11,6 +11,9 @@ from tensorflow_probability.python.internal import dtype_util
 from tensorflow_probability.python.internal import prefer_static
 from tensorflow_probability.python.internal import reparameterization
 from tensorflow_probability.python.internal import tensor_util
+from tensorflow_probability.python.internal import parameter_properties
+from tensorflow_probability.python.bijectors import identity as identity_bijector
+from tensorflow_probability.python.bijectors import softplus as softplus_bijector
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
@@ -55,6 +58,15 @@ class SqrtCauchy(TransformedDistribution):
             pre-transformed standard deviation."""
         return self.distribution.scale
 
+    @classmethod
+    def _parameter_properties(cls, dtype, num_classes=None):
+        # pylint: disable=g-long-lambda
+        return dict(
+            loc=parameter_properties.ParameterProperties(),
+            scale=parameter_properties.ParameterProperties(
+                default_constraining_bijector_fn=(
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))))
+
 
 class SoftplusHorseshoe(TransformedDistribution):
     def __init__(self, scale, validate_args=False,
@@ -78,6 +90,13 @@ class SoftplusHorseshoe(TransformedDistribution):
             pre-transformed standard deviation."""
         return self.distribution.scale
 
+    @classmethod
+    def _parameter_properties(cls, dtype, num_classes=None):
+        # pylint: disable=g-long-lambda
+        return dict(
+            scale=parameter_properties.ParameterProperties(
+                default_constraining_bijector_fn=(
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))))
 
 class AbsHorseshoe(TransformedDistribution):
     def __init__(self, scale, validate_args=False,
@@ -101,6 +120,13 @@ class AbsHorseshoe(TransformedDistribution):
             pre-transformed standard deviation."""
         return self.distribution.scale
 
+    @classmethod
+    def _parameter_properties(cls, dtype, num_classes=None):
+        # pylint: disable=g-long-lambda
+        return dict(
+            scale=parameter_properties.ParameterProperties(
+                default_constraining_bijector_fn=(
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))))
 
 class SqrtInverseGamma(TransformedDistribution):
     def __init__(self, concentration, scale, validate_args=False,
@@ -130,6 +156,14 @@ class SqrtInverseGamma(TransformedDistribution):
             pre-transformed standard deviation."""
         return self.distribution.scale
 
+    @classmethod
+    def _parameter_properties(cls, dtype, num_classes=None):
+        # pylint: disable=g-long-lambda
+        return dict(
+            loc=parameter_properties.ParameterProperties(),
+            scale=parameter_properties.ParameterProperties(
+                default_constraining_bijector_fn=(
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))))
 
 class LogHalfCauchy(TransformedDistribution):
     """Exponent of RV follows a HalfCauchy distribution
@@ -169,7 +203,15 @@ class LogHalfCauchy(TransformedDistribution):
             standard deviation."""
         return self.distribution.scale
 
-
+    @classmethod
+    def _parameter_properties(cls, dtype, num_classes=None):
+        # pylint: disable=g-long-lambda
+        return dict(
+            loc=parameter_properties.ParameterProperties(),
+            scale=parameter_properties.ParameterProperties(
+                default_constraining_bijector_fn=(
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))))
+                    
 """
 def FactorizedDistributionMoments(distribution, exclude=[]):
     means = {}
