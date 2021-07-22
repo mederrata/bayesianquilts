@@ -146,9 +146,9 @@ class SqrtInverseGamma(TransformedDistribution):
         return dict(loc=0, scale=0)
 
     @property
-    def loc(self):
-        """Distribution parameter for the pre-transformed mean."""
-        return self.distribution.loc
+    def concentration(self):
+        """Distribution parameter for the pre-transformed concentration."""
+        return self.distribution.concentration
 
     @property
     def scale(self):
@@ -211,7 +211,7 @@ class LogHalfCauchy(TransformedDistribution):
             scale=parameter_properties.ParameterProperties(
                 default_constraining_bijector_fn=(
                     lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))))
-                    
+
 """
 def FactorizedDistributionMoments(distribution, exclude=[]):
     means = {}
