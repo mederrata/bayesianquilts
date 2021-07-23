@@ -991,10 +991,8 @@ def build_trainable_concentration_distribution(
     scope = strategy.scope() if strategy is not None else tf.name_scope(
         name or 'build_trainable_concentration_distribution')
     with scope:
-        dtype = initial_concentration.dtype
-
-        initial_concentration = tf.cast(
-            initial_concentration, dtype=dtype)
+        dtype = dtype_util.common_dtype(
+            [initial_concentration], dtype_hint=tf.float32)
 
         loc = TransformedVariable(
             initial_concentration,
