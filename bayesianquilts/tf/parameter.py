@@ -35,8 +35,10 @@ class InteractionParameterization(object):
     def rank(self):
         return len(self.shape())
 
-    def exclude(self, interaction):
-        pass
+    def __print__(self):
+        print(f"shape: {self._intrinsic_shape}")
+        print(f"dimensions: {self._dimensions}")
+        print(f"exclusions: {self._exclusions}")
 
 
 class DecomposedParam(object):
