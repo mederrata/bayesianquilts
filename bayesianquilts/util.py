@@ -966,3 +966,54 @@ def tf_data_cardinality(tf_dataset):
             num_elements += 1
         card = num_elements
     return card
+
+def build_trainable_concentration_distribution(
+        initial_concentration,
+        event_ndims,
+        distribution_fn=tfd.Dirichlet,
+        validate_args=False,
+        strategy=None,
+        name=None):
+    """Builds a variational distribution from a location-scale family.
+    Args:
+      initial_concentration: Float `Tensor` initial concentration.
+      event_ndims: Integer `Tensor` number of event dimensions
+        in `initial_concentration`.
+      distribution_fn: Optional constructor for a `tfd.Distribution` instance
+        in a location-scale family. This should have signature `dist =
+        distribution_fn(loc, scale, validate_args)`.
+        Default value: `tfd.Normal`.
+      validate_args: Python `bool`. Whether to validate input with asserts.
+        This imposes a runtime cost. If `validate_args` is `False`, and the
+        inputs are invalid, correct behavior is not guaranteed.
+        Default value: `False`.
+      name: Python `str` name prefixed to ops created by this function.
+        Default value: `None` (i.e.,
+          'build_trainable_location_scale_distribution').
+    Returns:
+      posterior_dist: A `tfd.Distribution` instance.
+    """
+    scope = strategy.scope() if strategy is not None else tf.name_scope(
+        name or 'build_trainable_concentration_distribution')
+    with scope:
+        dtype = dtype_util.common_dtype(
+            [initial_concentration], dtype_hint=tf.float32)
+
+        loc = TransformedVariable(
+            initial_concentration,
+            softplus_lib.Softplus(),
+            scope=scope,
+            name='concentration')
+
+        posterior_dist = distribution_fn(concentration=loc,
+                                         validate_args=validate_args)
+
+        # Ensure the distribution has the desired number of event dimensions.
+        static_event_ndims = tf.get_static_value(event_ndims)
+        if static_event_ndims is None or static_event_ndims > 0:
+            posterior_dist = tfd.Independent(
+                posterior_dist,
+                reinterpreted_batch_ndims=event_ndims,
+                validate_args=validate_args)
+
+    return posterior_dist
