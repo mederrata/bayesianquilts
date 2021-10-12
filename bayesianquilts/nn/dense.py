@@ -120,7 +120,7 @@ class DenseHorseshoe(Dense, BayesianModel):
         return self.prior_distribution.log_prob(x)
 
     def sample_weights(self, *args, **kwargs):
-        return self.distribution.sample(*args, **kwargs)
+        return self.prior_distribution.sample(*args, **kwargs)
 
     def assemble_networks(self, sample, activation=tf.nn.relu):
         weight_tensors = []

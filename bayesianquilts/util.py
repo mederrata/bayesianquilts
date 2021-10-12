@@ -6,6 +6,7 @@ import tempfile
 import os
 from pathlib import Path
 
+
 import numpy as np
 
 import tensorflow as tf
@@ -506,7 +507,11 @@ def batched_minimize(loss_fn,
         trace = tf.stack(losses)
         if initial_trace_step is not None:
             trace = tf.nest.map_structure(
-                lambda a, b: tf.concat([a[tf.newaxis, ...], b], axis=0),
+                lambda a, b: tf.concat(
+                    [
+                        a[tf.newaxis, ...],
+                        tf.cast(b, a.dtype)
+                        ], axis=0),
                 initial_trace_step, trace)
         cp_status = checkpoint.restore(manager.latest_checkpoint)
         cp_status.assert_consumed()
