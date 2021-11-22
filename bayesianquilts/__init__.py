@@ -1,1 +1,1 @@
-from .model import BayesianModel
+from .model import BayesianModel, BayesianModelArtifact

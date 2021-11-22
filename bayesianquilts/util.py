@@ -936,7 +936,7 @@ def build_surrogate_posterior(joint_distribution_named,
             surrogate_dict[k] = bijectors[k](
                 build_trainable_normal_dist(
                     tfb.Invert(bijectors[k])(loc),
-                    1e-4*tf.ones(test_distribution.event_shape, dtype=dtype),
+                    2e-3*tf.ones(test_distribution.event_shape, dtype=dtype),
                     len(test_distribution.event_shape),
                     strategy=strategy,
                     name=name
