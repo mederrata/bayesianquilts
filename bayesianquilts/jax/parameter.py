@@ -9,7 +9,7 @@ import numpy as np
 from jax.flatten_util import ravel_pytree
 
 
-class InteractionParameterization(object):
+class Interactions(object):
     _interaction_list = []
 
     def __init__(
@@ -33,7 +33,7 @@ class InteractionParameterization(object):
         pass
 
 
-class DecomposedParam(object):
+class Decomposed(object):
     _param_tensors = {}
     _intrinsic_shape = None
 
@@ -49,7 +49,7 @@ class DecomposedParam(object):
 
         super().__init__()
         assert isinstance(
-            interactions, InteractionParameterization
+            interactions, Interactions
         ), "Instantiation requires a parameterization"
 
         self._interactions = interactions
@@ -175,7 +175,7 @@ class DecomposedParam(object):
 
 
 def main():
-    interact = InteractionParameterization(
+    interact = Interactions(
         [
             ("MDC", 26), ("HxD1", 3), ("HxD2", 3),
             ("HxD3", 3), ("HxD4", 3), ("HxD5", 3),
@@ -183,7 +183,7 @@ def main():
         # exclusions=[("Dx",),(),("Dx","Tx","Hx")],
         exclusions=[("HxD1",), ("HxD2",), ("HxD3",), ("HxD4",), ("HxD5",), ()]
     )
-    p = DecomposedParam(interactions=interact, param_shape=[1000], name="beta")
+    p = Decomposed(interactions=interact, param_shape=[1000], name="beta")
     indices = [
         [21, 1, 1, 1, 1, 2, 1],
         [12, 1, 1, 1, 1, 2, 1],

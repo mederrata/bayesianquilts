@@ -11,11 +11,13 @@ from tensorflow_probability import distributions as tfd
 
 from bayesianquilts.stackedtensor import broadcast_tensors
 
+
 def tf_ravel_multi_index(multi_index, dims):
     strides = tf.math.cumprod(dims, exclusive=True, reverse=True)
     return tf.reduce_sum(multi_index * tf.expand_dims(strides, 1), axis=0)
 
-class InteractionParameterization(object):
+
+class Interactions(object):
     _interaction_list = []
 
     def __init__(
@@ -41,7 +43,7 @@ class InteractionParameterization(object):
         print(f"exclusions: {self._exclusions}")
 
 
-class DecomposedParam(object):
+class Decomposed(object):
     _param_tensors = {}
     _intrinsic_shape = None
 
@@ -57,7 +59,7 @@ class DecomposedParam(object):
 
         super().__init__()
         assert isinstance(
-            interactions, InteractionParameterization
+            interactions, Interactions
         ), "Instantiation requires a parameterization"
 
         self._interactions = interactions
@@ -161,7 +163,7 @@ class DecomposedParam(object):
     def query(self, interaction_indices, tensors=None):
         _global = self.constitute(tensors)
         batch_ndims = tf.rank(_global) - len(self.shape())
-        
+
         # stick batch axes on the  end
         rank = tf.rank(_global)
         permutation = list(range(batch_ndims, rank)) + list(range(batch_ndims))
@@ -174,13 +176,16 @@ class DecomposedParam(object):
             [
                 np.prod(_global.shape[:-(len(self._param_shape)+batch_ndims)])
             ] + _global.shape[-(len(self._param_shape)+batch_ndims):])
-        interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
-        indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
-        _global = tf.gather_nd(_global, indices[:,tf.newaxis])
-        
+        interaction_indices = tf.transpose(
+            tf.convert_to_tensor(interaction_indices))
+        indices = tf_ravel_multi_index(
+            interaction_indices, self._interaction_shape)
+        _global = tf.gather_nd(_global, indices[:, tf.newaxis])
+
         # move parameter batch dims back to the front
         rank = tf.rank(_global)
-        permutation = list(range(rank-batch_ndims, rank)) + list(range(rank-batch_ndims))
+        permutation = list(range(rank-batch_ndims, rank)) + \
+            list(range(rank-batch_ndims))
         _global = tf.transpose(
             _global,
             permutation
@@ -193,14 +198,15 @@ class DecomposedParam(object):
 
 
 def main():
-    interact = InteractionParameterization(
+    interact = Interactions(
         [
             ("planned", 2), ("pre2011", 2),
             ("mdc", 26), *[(f"hx_{j}", 2) for j in range(7)]],
         # exclusions=[("Dx",),(),("Dx","Tx","Hx")],
         exclusions=[*[(f"hx_{j}", ) for j in range(7)], ()]
     )
-    p = DecomposedParam(interactions=interact, param_shape=[100, 5], name="beta")
+    p = Decomposed(interactions=interact,
+                   param_shape=[100, 5], name="beta")
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0, 1, 0],
         [0, 0, 12, 1, 1, 1, 1, 0, 1, 1],
