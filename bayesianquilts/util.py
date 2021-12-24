@@ -390,7 +390,7 @@ def batched_minimize(loss_fn,
         else:
             print(f"Initial loss: {loss}")
 
-        step = tf.cast(1, tf.int32)
+        step = tf.cast(0, tf.int32)
         batches_since_checkpoint = 0
         batches_since_plateau = 0
         accepted_batches = 0
