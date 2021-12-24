@@ -398,6 +398,11 @@ class BayesianModel(object):
                 state['surrogate_vars']):
             self.surrogate_distribution.trainable_variables[j].assign(
                 tf.cast(value, self.dtype))
+            
+    def sample(self, batch_shape, prior=False):
+        if prior:
+            return self.prior_distributions.sample(batch_shape)
+        return self.surrogate_distribution.sample(batch_shape)
 
     def to_arviz(self):
         sample_stats = self.sample_stats()
