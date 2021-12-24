@@ -399,7 +399,7 @@ class BayesianModel(object):
             self.surrogate_distribution.trainable_variables[j].assign(
                 tf.cast(value, self.dtype))
             
-    def sample(self, batch_shape, prior=False):
+    def sample(self, batch_shape=None, prior=False):
         if prior:
             return self.prior_distributions.sample(batch_shape)
         return self.surrogate_distribution.sample(batch_shape)

@@ -38,7 +38,7 @@ def demo():
     #  [1 1 1 0]]
     print(plant_or_animal.labels)
     #  ['animal', 'reptile', 'plant', 'mammal']
-    dog_cats = CountTokenizer(vocab=['dog', 'cat'])
+    dog_cats = CountTokenizer(vocab=["dog", "cat"])
     dog_cats.fit(["dog,dog,dog,cat,cat,dog", "dog"])
     print(dog_cats.val)
     # [[4 2]
