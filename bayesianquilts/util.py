@@ -501,7 +501,7 @@ def batched_minimize(loss_fn,
                         converged = True
                     batches_since_plateau += 1
             step += 1
-            if step >= num_epochs:
+            if step > num_epochs:
                 print("Terminating because we are out of iterations")
 
         trace = tf.stack(losses)
