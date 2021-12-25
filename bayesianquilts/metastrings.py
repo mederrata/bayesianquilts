@@ -97,5 +97,6 @@ horseshoe_lambda_code = """ lambda {0}: tfd.Independent(
     ), reinterpreted_batch_ndims={2})
 """
 
+
 def clean_str(s):
-    return re.sub('[^0-9a-zA-Z]+', '_', str(s))
+    return re.sub("[^0-9a-zA-Z]+", "_", str(s))
