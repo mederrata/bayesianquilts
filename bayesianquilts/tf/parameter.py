@@ -14,6 +14,7 @@ from bayesianquilts.stackedtensor import broadcast_tensors
 
 def tf_ravel_multi_index(multi_index, dims):
     strides = tf.math.cumprod(dims, exclusive=True, reverse=True)
+    multi_index = tf.cast(multi_index, strides.dtype)
     return tf.reduce_sum(multi_index * tf.expand_dims(strides, 1), axis=0)
 
 
@@ -154,7 +155,9 @@ class Decomposed(object):
             self.shape(),
             self._dtype)
         for t in tf.nest.flatten(self._param_tensors):
-            partial_sum = tf.add_n(broadcast_tensors([partial_sum, t]))
+            partial_sum = tf.add_n(broadcast_tensors(
+                [partial_sum, tf.cast(t, self._dtype)]
+                ))
         return partial_sum
 
     def tensor_keys(self):
