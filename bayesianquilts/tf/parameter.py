@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import re
 from collections import Counter, defaultdict
-from itertools import product, chain, combinations
+from itertools import product
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.ops.check_ops import assert_none_equal_v2
@@ -69,7 +69,9 @@ class Decomposed(object):
         self._param_tensors, self._param_interactions = self.generate_tensors()
         self._param_shapes = {k: v.shape for k, v in self._param_tensors.items()}
 
-    def generate_tensors(self, batch_shape=None, target=None, flatten_indices=False):
+    def generate_tensors(
+        self, batch_shape=None, target=None, flatten_indices=False, dtype=None
+    ):
         """Generate parameter tensors for the parameter decomposition,
            neatly handling TF's limitation in the maximum number of
            axes (6) for a tensor to be used in most common mathematical operations
@@ -85,13 +87,14 @@ class Decomposed(object):
         """
         tensors = {}
         tensor_names = {}
+        dtype = dtype if dtype is not None else self._dtype
         batch_shape = [] if batch_shape is None else batch_shape
         batch_ndims = len(batch_shape)
         if target is None:
-            residual = tf.zeros(batch_shape + self.shape(), self._dtype)
+            residual = tf.zeros(batch_shape + self.shape(), dtype)
         else:
-            residual = tf.cast(target, self._dtype) + tf.zeros(
-                batch_shape + self.shape(), self._dtype
+            residual = tf.cast(target, dtype) + tf.zeros(
+                batch_shape + self.shape(), dtype
             )
         for n_tuple in product([0, 1], repeat=self._interactions.rank()):
             interaction = tuple(
@@ -158,13 +161,9 @@ class Decomposed(object):
                 self._param_shapes[k]
             except KeyError:
                 continue
-            rank = tf.rank(tensors[k])
-            batch_shape = tensors[k].shape.as_list()[
-                : (rank - param_rank - 1)
-            ]
-            tensors[k] = tf.reshape(
-                tensors[k], batch_shape + self._param_shapes[k]
-            )
+            rank = len(tensors[k].shape.as_list())
+            batch_shape = tensors[k].shape.as_list()[: (rank - param_rank - 1)]
+            tensors[k] = tf.reshape(tensors[k], batch_shape + self._param_shapes[k])
         return tensors
 
     def __add__(self, x):
@@ -198,10 +197,11 @@ class Decomposed(object):
 
     def query(self, interaction_indices, tensors=None):
         _global = self.constitute(tensors)
-        batch_ndims = tf.rank(_global) - len(self.shape())
+        rank = len(_global.shape.as_list())
+
+        batch_ndims = rank - len(self.shape())
 
         # stick batch axes on the  end
-        rank = tf.rank(_global)
         permutation = list(range(batch_ndims, rank)) + list(range(batch_ndims))
         _global = tf.transpose(_global, permutation)
         _global = tf.reshape(
@@ -212,9 +212,9 @@ class Decomposed(object):
         interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
         indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
         _global = tf.gather_nd(_global, indices[:, tf.newaxis])
-
+        
+        rank = len(_global.shape.as_list())
         # move parameter batch dims back to the front
-        rank = tf.rank(_global)
         permutation = list(range(rank - batch_ndims, rank)) + list(
             range(rank - batch_ndims)
         )
@@ -227,16 +227,19 @@ class Decomposed(object):
 
 
 def main():
-    interact = Interactions(
-        [
-            ("planned", 2),
-            ("pre2011", 2),
-            ("mdc", 26),
-            *[(f"hx_{j}", 2) for j in range(5)],
-        ],
-        # exclusions=[("Dx",),(),("Dx","Tx","Hx")],
-        exclusions=[*[(f"hx_{j}",) for j in range(5)], ()],
-    )
+    dims = [
+        ("planned", 2),
+        ("pre2011", 2),
+        ("mdc", 26),
+        *[(f"hx_{j}", 2) for j in range(5)],
+    ]
+    onehot = list(filter(lambda x: sum(x) > 4, product([0, 1], repeat=len(dims))))
+    exclusions = [*[(f"hx_{j}",) for j in range(5)]]
+    hot = [set(d[0] for i, d in zip(ind, dims) if i == 1) for ind in onehot]
+    exclusions += hot
+    # get rid of anything higher than 3rd order
+
+    interact = Interactions(dims, exclusions=exclusions)
     p = Decomposed(interactions=interact, param_shape=[20, 2], name="beta")
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],
@@ -250,7 +253,12 @@ def main():
     t1 = p.inflate_indices(t)
     p.set_params(t1)
     r = p.query(indices, t)
-    pass
+    
+    @tf.function
+    def graph_test(tensors):
+        return p.query(indices, tensors)
+    
+    test = graph_test(t)
 
 
 if __name__ == "__main__":
