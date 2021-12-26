@@ -154,6 +154,10 @@ class Decomposed(object):
         param_rank = len(self._param_shape)
         interaction_rank = len(self._interaction_shape)
         for k in tensors.keys():
+            try:
+                self._param_shapes[k]
+            except KeyError:
+                continue
             rank = tf.rank(tensors[k])
             batch_shape = tensors[k].shape.as_list()[
                 : (rank - param_rank - 1)
