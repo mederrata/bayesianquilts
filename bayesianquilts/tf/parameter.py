@@ -37,6 +37,10 @@ class Interactions(object):
         print(f"shape: {self._intrinsic_shape}")
         print(f"dimensions: {self._dimensions}")
         print(f"exclusions: {self._exclusions}")
+    
+    def __str__(self):
+        out = f"Interaction dimenions: {self._dimensions}"
+        return out
 
 
 class Decomposed(object):
@@ -191,6 +195,14 @@ class Decomposed(object):
                 broadcast_tensors([partial_sum, tf.cast(t, self._dtype)])
             )
         return partial_sum
+    
+    def __str__(self):
+        out = f"Parameter shape: {self._param_shape} \n" 
+        out += f"{self._interactions} \n"
+        out += f"Component tensors: {len(self._param_tensors.keys())} \n"
+        out += f"Effective parameter cardinality: {np.prod(self._intrinsic_shape)} \n"
+        out += f"Actual parameter cardinality: {sum([np.prod(t.shape.as_list()) for t in self._param_shapes.values()])}\n"
+        return out
 
     def tensor_keys(self):
         return sorted(list(self._param_tensors.keys()))
@@ -240,7 +252,9 @@ def main():
     # get rid of anything higher than 3rd order
 
     interact = Interactions(dims, exclusions=exclusions)
+    print(interact)
     p = Decomposed(interactions=interact, param_shape=[20, 2], name="beta")
+    print(p)
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],
         [0, 0, 12, 1, 1, 1, 1, 1],
