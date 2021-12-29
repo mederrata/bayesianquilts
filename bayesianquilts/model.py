@@ -430,14 +430,15 @@ class BayesianModel(object):
     def to_arviz(self, data=None):
         sample_stats = self.sample_stats(data=data)
         params = sample_stats["params"]
-        return InferenceData(
-            **{
-                "posterior": dict_to_dataset(params),
-                "sample_stats": dict_to_dataset(
-                    {"log_likelihood": sample_stats["log_likelihood"]}
-                ),
-            }
-        )
+        predictive = sample_stats["predictive"]
+
+        idict = {
+            "posterior": dict_to_dataset(params),
+            "sample_stats": dict_to_dataset(
+                {"log_likelihood": sample_stats["log_likelihood"]}
+            ),
+        }
+        return InferenceData(**idict)
 
     def __setstate__(self, state):
         self.__dict__ = state.copy()
