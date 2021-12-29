@@ -201,7 +201,7 @@ class Decomposed(object):
         out += f"{self._interactions} \n"
         out += f"Component tensors: {len(self._param_tensors.keys())} \n"
         out += f"Effective parameter cardinality: {np.prod(self._intrinsic_shape)} \n"
-        out += f"Actual parameter cardinality: {sum([np.prod(t.shape.as_list()) for t in self._param_shapes.values()])}\n"
+        out += f"Actual parameter cardinality: {sum([np.prod(t) for t in self._param_shapes.values()])}\n"
         return out
 
     def tensor_keys(self):
