@@ -253,7 +253,7 @@ def main():
 
     interact = Interactions(dims, exclusions=exclusions)
     print(interact)
-    p = Decomposed(interactions=interact, param_shape=[20, 2], name="beta")
+    p = Decomposed(interactions=interact, param_shape=[100], name="beta")
     print(p)
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],
