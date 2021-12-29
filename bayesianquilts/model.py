@@ -367,7 +367,8 @@ class BayesianModel(object):
 
     def save(self, filename="model_save.pkl"):
         with open(filename, "wb") as file:
-            dill.dump((self.__class__, self), file)
+            #  dill.dump((self.__class__, self), file)
+            dill.dump(self, file)
 
     def __getstate__(self):
         state = self.__dict__.copy()
