@@ -280,7 +280,7 @@ class BayesianModel(object):
     def log_likelihood(self, data, *args, **kwargs):
         pass
 
-    def posterior_predictive(
+    def predictive_distribution(
         self, data=None, params=None, num_samples=100, num_splits=20, data_batches=25
     ):
         pass
@@ -373,7 +373,7 @@ class BayesianModel(object):
     def __getstate__(self):
         state = self.__dict__.copy()
         keys = self.__dict__.keys()
-
+        state['surrogate_sample'] = None
         for k in keys:
             # print(k)
             if isinstance(state[k], tf.Tensor) or isinstance(state[k], tf.Variable):
@@ -413,10 +413,14 @@ class BayesianModel(object):
 
     def reconstitute(self, state):
         self.create_distributions()
-        for j, value in enumerate(state["surrogate_vars"]):
-            self.surrogate_distribution.trainable_variables[j].assign(
-                tf.cast(value, self.dtype)
-            )
+        try:
+            for j, value in enumerate(state["surrogate_vars"]):
+                self.surrogate_distribution.trainable_variables[j].assign(
+                    tf.cast(value, self.dtype)
+                )
+        except KeyError:
+            self.state = state
+            print("Was unable to set vars, check self.saved_state")
 
     def sample(self, batch_shape=None, prior=False):
         if prior:
@@ -438,6 +442,7 @@ class BayesianModel(object):
                 {"log_likelihood": sample_stats["log_likelihood"]}
             ),
         }
+
         return InferenceData(**idict)
 
     def __setstate__(self, state):
