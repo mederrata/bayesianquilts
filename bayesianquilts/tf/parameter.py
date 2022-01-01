@@ -190,7 +190,7 @@ class Decomposed(object):
         #  batch
 
         # folded
-        for t in tf.nest.flatten(self._param_tensors):
+        for t in tf.nest.flatten(tensors):
             partial_sum = tf.add_n(
                 broadcast_tensors([partial_sum, tf.cast(t, self._dtype)])
             )
@@ -208,31 +208,31 @@ class Decomposed(object):
         return sorted(list(self._param_tensors.keys()))
 
     def query(self, interaction_indices, tensors=None):
-        _global = self.constitute(tensors)
-        rank = len(_global.shape.as_list())
+        summed = self.constitute(tensors)
+        rank = len(summed.shape.as_list())
 
         batch_ndims = rank - len(self.shape())
 
         # stick batch axes on the  end
         permutation = list(range(batch_ndims, rank)) + list(range(batch_ndims))
-        _global = tf.transpose(_global, permutation)
-        _global = tf.reshape(
-            _global,
-            [np.prod(_global.shape[: -(len(self._param_shape) + batch_ndims)])]
-            + _global.shape[(-(len(self._param_shape) + batch_ndims)) :],
+        summed = tf.transpose(summed, permutation)
+        summed = tf.reshape(
+            summed,
+            [np.prod(summed.shape[: -(len(self._param_shape) + batch_ndims)])]
+            + summed.shape[(-(len(self._param_shape) + batch_ndims)) :],
         )
         interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
         indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
-        _global = tf.gather_nd(_global, indices[:, tf.newaxis])
+        summed = tf.gather_nd(summed, indices[:, tf.newaxis])
         
-        rank = len(_global.shape.as_list())
+        rank = len(summed.shape.as_list())
         # move parameter batch dims back to the front
         permutation = list(range(rank - batch_ndims, rank)) + list(
             range(rank - batch_ndims)
         )
-        _global = tf.transpose(_global, permutation)
+        summed = tf.transpose(summed, permutation)
 
-        return _global
+        return summed
 
     def shape(self):
         return self._intrinsic_shape
@@ -265,8 +265,7 @@ def main():
 
     t, n = p.generate_tensors(batch_shape=[4], flatten_indices=True)
     t1 = p.inflate_indices(t)
-    p.set_params(t1)
-    r = p.query(indices, t)
+    r = p.query(indices, t1)
     
     @tf.function
     def graph_test(tensors):
