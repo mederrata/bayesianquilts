@@ -213,15 +213,32 @@ class Decomposed(object):
 
     def sum_parts(self, tensors=None, unravel=False):
         tensors = self._tensor_parts if tensors is None else tensors
-        partial_sum = tf.zeros(self.shape(), self._dtype)
+        raveled_shape = [
+            np.prod(self._interaction_shape[: (-len(self._param_shape))])
+        ] + self._param_shape
+        # infer the batch shape
+
+        batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
+            : (-len(self._param_shape) - 1)
+        ]
+        partial_sum = tf.zeros(batch_shape + raveled_shape, self._dtype)
         #  batch
 
         # folded
-        for t in tf.nest.flatten(tensors):
-            partial_sum = tf.add_n(
-                broadcast_tensors([partial_sum, tf.cast(t, self._dtype)])
-            )
-
+        for k, v in tensors.items():
+            # shuffle axes, placing broadcast axes together
+            part_interact_shape = self._tensor_part_shapes[k][
+                : (-len(self._param_shape))
+            ]
+            broadcast_dims = [k for k, i in enumerate(part_interact_shape) if i == 1]
+            keep_dims = [k for k, i in enumerate(part_interact_shape) if i != 1]
+            if len(keep_dims) == 0:
+                partial_sum += v
+                continue
+            
+            
+            partial_sum_ = tf.reshape(partial_sum)
+            pass
         return partial_sum
 
     def unravel_tensor(self, tensor):
@@ -336,7 +353,8 @@ def main():
     ]
 
     t, n, s = p.generate_tensors(batch_shape=[4])
-    r = p.lookup(indices, t1)
+    out = p.sum_parts(t)
+    r = p.lookup(indices, t)
 
 
 if __name__ == "__main__":
