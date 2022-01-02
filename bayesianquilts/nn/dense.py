@@ -216,6 +216,7 @@ class DenseHorseshoe(Dense, BayesianModel):
         self.surrogate_distribution = build_surrogate_posterior(
             self.prior_distribution, bijectors, dtype=self.dtype)
         self.var_list = list(self.surrogate_distribution.model.keys())
+        self.surrogate_vars = self.surrogate_distribution.variables
 
     def sample(self, *args, **kwargs):
         return self.surrogate_distribution.sample(*args, **kwargs)
