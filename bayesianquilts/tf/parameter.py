@@ -44,6 +44,19 @@ class Interactions(object):
 
 
 class Decomposed(object):
+    """Class for dealing with decomposed parameters
+
+    This class deals with broadcasting and slicing of raveled decomposed
+    parameters.
+
+    Attributes
+    -----------
+
+    Methods
+    -------
+
+    """
+
     _param_tensors = {}
     _intrinsic_shape = None
 
@@ -70,14 +83,13 @@ class Decomposed(object):
         self._dtype = dtype
         self._name = name
         self._param_shape = param_shape
-        self._param_tensors, self._param_interactions = self.generate_tensors(
-            flatten_indices=False
-        )
-        self._param_shapes = {k: v.shape for k, v in self._param_tensors.items()}
+        (
+            self._tensor_parts,
+            self._tensor_part_interactions,
+            self._tensor_part_shapes,
+        ) = self.generate_tensors()
 
-    def generate_tensors(
-        self, batch_shape=None, target=None, flatten_indices=True, dtype=None
-    ):
+    def generate_tensors(self, batch_shape=None, target=None, dtype=None):
         """Generate parameter tensors for the parameter decomposition,
            neatly handling TF's limitation in the maximum number of
            axes (6) for a tensor to be used in most common mathematical operations
@@ -96,6 +108,7 @@ class Decomposed(object):
         dtype = dtype if dtype is not None else self._dtype
         batch_shape = [] if batch_shape is None else batch_shape
         batch_ndims = len(batch_shape)
+        tensor_shapes = {}
         if target is None:
             residual = tf.zeros(batch_shape + self.shape(), dtype)
         else:
@@ -131,13 +144,19 @@ class Decomposed(object):
                     value = tf.reduce_mean(
                         value, axis=(batch_ndims + ax), keepdims=True
                     )
-            tensors[self._name + "__" + interaction_name] = value
+
             residual = tf.add_n(broadcast_tensors([residual, -1.0 * value]))
+            t_shape = value.shape.as_list()[batch_ndims:]
+            tensor_shapes[self._name + "__" + interaction_name] = t_shape
+            value = tf.reshape(
+                value,
+                batch_shape
+                + [np.prod(t_shape[: (-len(self._param_shape))])]
+                + self._param_shape,
+            )
+            tensors[self._name + "__" + interaction_name] = value
 
-        if flatten_indices:
-            tensors = self.flatten_indices(tensors)
-
-        return tensors, tensor_names
+        return tensors, tensor_names, tensor_shapes
 
     def set_params(self, tensors):
         for k in self._param_tensors.keys():
@@ -164,30 +183,36 @@ class Decomposed(object):
         interaction_rank = len(self._interaction_shape)
         for k in tensors.keys():
             try:
-                self._param_shapes[k]
+                self._tensor_part_shapes[k]
             except KeyError:
                 continue
             rank = len(tensors[k].shape.as_list())
             batch_shape = tensors[k].shape.as_list()[: (rank - param_rank - 1)]
-            tensors[k] = tf.reshape(tensors[k], batch_shape + self._param_shapes[k])
+            tensors[k] = tf.reshape(
+                tensors[k], batch_shape + self._tensor_part_shapes[k]
+            )
         return tensors
 
     def __add__(self, x):
         if tf.is_tensor(x):
-            return tf.add_n(broadcast_tensors([x, self.constitute()]))
+            return tf.add_n(
+                broadcast_tensors(
+                    [x, self.unravel_tensor(self.sum_parts(self._tensor_parts))]
+                )
+            )
         return self.constitute().__add__(x)
 
     def __radd__(self, x):
         return self.__add__(x)
 
     def __mul__(self, x):
-        return self.constitute().__mul__(x)
+        return self._tensor_parts().__mul__(x)
 
     def shape(self):
         return self._intrinsic_shape
 
-    def sum_parts(self, tensors=None):
-        tensors = self._param_tensors if tensors is None else tensors
+    def sum_parts(self, tensors=None, unravel=False):
+        tensors = self._tensor_parts if tensors is None else tensors
         partial_sum = tf.zeros(self.shape(), self._dtype)
         #  batch
 
@@ -196,36 +221,18 @@ class Decomposed(object):
             partial_sum = tf.add_n(
                 broadcast_tensors([partial_sum, tf.cast(t, self._dtype)])
             )
+
         return partial_sum
 
-    def inflate_tensor(self, tensor):
+    def unravel_tensor(self, tensor):
         pass
-
-    def _constitute_inflated(self, tensors=None):
-        """Add's up inflated constituent tensors
-
-        Args:
-            tensors ([type], optional): [description]. Defaults to None.
-
-        Returns:
-            tf.Tensor: Tensor of inflated shape
-        """
-        tensors = self._param_tensors if tensors is None else tensors
-        partial_sum = tf.zeros(self.shape(), self._dtype)
-        #  batch
-
-        for t in tf.nest.flatten(tensors):
-            partial_sum = tf.add_n(
-                broadcast_tensors([partial_sum, tf.cast(t, self._dtype)])
-            )
-        return partial_sum
 
     def __str__(self):
         out = f"Parameter shape: {self._param_shape} \n"
         out += f"{self._interactions} \n"
         out += f"Component tensors: {len(self._param_tensors.keys())} \n"
         out += f"Effective parameter cardinality: {np.prod(self._intrinsic_shape)} \n"
-        out += f"Actual parameter cardinality: {sum([np.prod(t) for t in self._param_shapes.values()])}\n"
+        out += f"Actual parameter cardinality: {sum([np.prod(t) for t in self._tensor_part_shapes.values()])}\n"
         return out
 
     def tensor_keys(self):
@@ -234,23 +241,25 @@ class Decomposed(object):
     def lookup(self, interaction_indices, tensors=None):
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
-        assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
+        # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
 
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
         )
 
-        summed = self.sum_parts(tensors)
+        summed = self.sum_parts(tensors, ravel=True)
 
         overall_shape = summed.shape.as_list()
         rank = len(overall_shape)
         batch_ndims = rank - len(self.shape())
-        
+
         summed = tf.reshape(
             summed,
-            overall_shape[:batch_ndims] + [np.prod(self._interaction_shape)] + self._param_shape
+            overall_shape[:batch_ndims]
+            + [np.prod(self._interaction_shape)]
+            + self._param_shape,
         )
-        
+
         new_rank = len(summed.shape.as_list())
 
         # stick batch axes on the  end
@@ -326,8 +335,7 @@ def main():
         [0, 0, 13, 0, 0, 1, 1, 1],
     ]
 
-    t, n = p.generate_tensors(batch_shape=[4], flatten_indices=True)
-    t1 = p.inflate_indices(t)
+    t, n, s = p.generate_tensors(batch_shape=[4])
     r = p.lookup(indices, t1)
 
 
