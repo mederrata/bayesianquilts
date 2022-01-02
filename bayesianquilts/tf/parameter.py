@@ -37,7 +37,7 @@ class Interactions(object):
         print(f"shape: {self._intrinsic_shape}")
         print(f"dimensions: {self._dimensions}")
         print(f"exclusions: {self._exclusions}")
-    
+
     def __str__(self):
         out = f"Interaction dimenions: {self._dimensions}"
         return out
@@ -70,11 +70,13 @@ class Decomposed(object):
         self._dtype = dtype
         self._name = name
         self._param_shape = param_shape
-        self._param_tensors, self._param_interactions = self.generate_tensors()
+        self._param_tensors, self._param_interactions = self.generate_tensors(
+            flatten_indices=False
+        )
         self._param_shapes = {k: v.shape for k, v in self._param_tensors.items()}
 
     def generate_tensors(
-        self, batch_shape=None, target=None, flatten_indices=False, dtype=None
+        self, batch_shape=None, target=None, flatten_indices=True, dtype=None
     ):
         """Generate parameter tensors for the parameter decomposition,
            neatly handling TF's limitation in the maximum number of
@@ -184,7 +186,7 @@ class Decomposed(object):
     def shape(self):
         return self._intrinsic_shape
 
-    def constitute(self, tensors=None):
+    def sum_parts(self, tensors=None):
         tensors = self._param_tensors if tensors is None else tensors
         partial_sum = tf.zeros(self.shape(), self._dtype)
         #  batch
@@ -195,9 +197,31 @@ class Decomposed(object):
                 broadcast_tensors([partial_sum, tf.cast(t, self._dtype)])
             )
         return partial_sum
-    
+
+    def inflate_tensor(self, tensor):
+        pass
+
+    def _constitute_inflated(self, tensors=None):
+        """Add's up inflated constituent tensors
+
+        Args:
+            tensors ([type], optional): [description]. Defaults to None.
+
+        Returns:
+            tf.Tensor: Tensor of inflated shape
+        """
+        tensors = self._param_tensors if tensors is None else tensors
+        partial_sum = tf.zeros(self.shape(), self._dtype)
+        #  batch
+
+        for t in tf.nest.flatten(tensors):
+            partial_sum = tf.add_n(
+                broadcast_tensors([partial_sum, tf.cast(t, self._dtype)])
+            )
+        return partial_sum
+
     def __str__(self):
-        out = f"Parameter shape: {self._param_shape} \n" 
+        out = f"Parameter shape: {self._param_shape} \n"
         out += f"{self._interactions} \n"
         out += f"Component tensors: {len(self._param_tensors.keys())} \n"
         out += f"Effective parameter cardinality: {np.prod(self._intrinsic_shape)} \n"
@@ -207,8 +231,47 @@ class Decomposed(object):
     def tensor_keys(self):
         return sorted(list(self._param_tensors.keys()))
 
-    def query(self, interaction_indices, tensors=None):
-        summed = self.constitute(tensors)
+    def lookup(self, interaction_indices, tensors=None):
+        # flatten the indices
+        interaction_indices = tf.convert_to_tensor(interaction_indices)
+        assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
+
+        interaction_shape = tf.convert_to_tensor(
+            self._interaction_shape, dtype=interaction_indices.dtype
+        )
+
+        summed = self.sum_parts(tensors)
+
+        overall_shape = summed.shape.as_list()
+        rank = len(overall_shape)
+        batch_ndims = rank - len(self.shape())
+        
+        summed = tf.reshape(
+            summed,
+            overall_shape[:batch_ndims] + [np.prod(self._interaction_shape)] + self._param_shape
+        )
+        
+        new_rank = len(summed.shape.as_list())
+
+        # stick batch axes on the  end
+        permutation = list(range(batch_ndims, new_rank)) + list(range(batch_ndims))
+        summed = tf.transpose(summed, permutation)
+
+        interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
+        indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
+        summed = tf.gather_nd(summed, indices[:, tf.newaxis])
+
+        rank = len(summed.shape.as_list())
+        # move parameter batch dims back to the front
+        permutation = list(range(rank - batch_ndims, rank)) + list(
+            range(rank - batch_ndims)
+        )
+        summed = tf.transpose(summed, permutation)
+
+        return summed
+
+    def _lookup_indices_inflated(self, interaction_indices, deflated_tensors=None):
+        summed = self._constitute_inflated(deflated_tensors)
         rank = len(summed.shape.as_list())
 
         batch_ndims = rank - len(self.shape())
@@ -224,7 +287,7 @@ class Decomposed(object):
         interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
         indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
         summed = tf.gather_nd(summed, indices[:, tf.newaxis])
-        
+
         rank = len(summed.shape.as_list())
         # move parameter batch dims back to the front
         permutation = list(range(rank - batch_ndims, rank)) + list(
@@ -265,13 +328,7 @@ def main():
 
     t, n = p.generate_tensors(batch_shape=[4], flatten_indices=True)
     t1 = p.inflate_indices(t)
-    r = p.query(indices, t1)
-    
-    @tf.function
-    def graph_test(tensors):
-        return p.query(indices, tensors)
-    
-    test = graph_test(t)
+    r = p.lookup(indices, t1)
 
 
 if __name__ == "__main__":
