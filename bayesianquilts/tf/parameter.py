@@ -239,7 +239,6 @@ class Decomposed(object):
                 continue
             
             
-            partial_sum_ = tf.reshape(partial_sum)
             pass
         return partial_sum
 
