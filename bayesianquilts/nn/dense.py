@@ -62,10 +62,11 @@ class Dense(object):
         weights_list = weight_tensors[::2]
         biases_list = weight_tensors[1::2]
 
-        for (weights, biases) in zip(weights_list, biases_list):
+        for (weights, biases) in zip(weights_list[:-1], biases_list[:-1]):
             net = self.dense(
                 net, self.weight_scale * weights, self.bias_scale * biases, activation
             )
+        net = self.dense(net, self.weight_scale * weights[-1], self.bias_scale * biases[-1], tf.identity)
         return net
 
     def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
@@ -154,14 +155,15 @@ class DenseHorseshoe(BayesianModel):
         )
         self.dtype = dtype
         self.layer_sizes = [input_size] + layer_sizes
+        self.weight_scale = weight_scale
+        self.bias_scale = bias_scale
         self.nn = Dense(
             input_size=input_size,
             layer_sizes=layer_sizes,
             weight_scale=weight_scale, bias_scale=bias_scale,
             activation_fn=activation_fn, dtype=dtype)
         self.decay = decay  # dimensional decay
-        self.weight_scale = weight_scale
-        self.bias_scale = bias_scale
+
         self.create_distributions()
 
     def set_weights(self, weights):
