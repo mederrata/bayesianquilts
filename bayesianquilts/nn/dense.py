@@ -1,3 +1,4 @@
+import inspect
 import tensorflow as tf
 import tensorflow_probability as tfp
 
@@ -98,7 +99,40 @@ class Dense(object):
 
         return architecture
 
+    def __setstate__(self, state):
+        self.__dict__ = state.copy()
+        self.saved_state = state
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        keys = self.__dict__.keys()
+        for k in keys:
+            # print(k)
+            if isinstance(state[k], tf.Tensor) or isinstance(state[k], tf.Variable):
+                state[k] = state[k].numpy()
+            elif isinstance(state[k], dict) or isinstance(state[k], list):
+                flat = tf.nest.flatten(state[k])
+                new = []
+                for t in flat:
+                    if isinstance(t, tf.Tensor) or isinstance(t, tf.Variable):
+                        # print(k)
+                        new += [t.numpy()]
+                    elif hasattr(inspect.getmodule(t), "__name__"):
+                        if inspect.getmodule(t).__name__.startswith("tensorflow"):
+                            if not isinstance(t, tf.dtypes.DType):
+                                new += [None]
+                            else:
+                                new += [None]
+                        else:
+                            new += [t]
+                    else:
+                        new += [t]
+                state[k] = tf.nest.pack_sequence_as(state[k], new)
+            elif hasattr(inspect.getmodule(state[k]), "__name__"):
+                if inspect.getmodule(state[k]).__name__.startswith("tensorflow"):
+                    if not isinstance(state[k], tf.dtypes.DType):
+                        del state[k]
+        return state
 class DenseHorseshoe(BayesianModel):
     """Dense horseshoe network of given layer sizes
 
