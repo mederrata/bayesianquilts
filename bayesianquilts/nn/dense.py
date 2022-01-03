@@ -99,7 +99,7 @@ class Dense(object):
         return architecture
 
 
-class DenseHorseshoe(Dense, BayesianModel):
+class DenseHorseshoe(BayesianModel):
     """Dense horseshoe network of given layer sizes
 
     Arguments:
@@ -123,24 +123,23 @@ class DenseHorseshoe(Dense, BayesianModel):
         **kwargs,
     ):
         super(DenseHorseshoe, self).__init__(
-            input_size,
-            layer_sizes,
-            activation_fn=activation_fn,
-            dtype=dtype,
-            weight_scale=weight_scale,
-            bias_scale=bias_scale,
             *args,
             **kwargs,
         )
         self.dtype = dtype
         self.layer_sizes = [input_size] + layer_sizes
+        self.nn = Dense(
+            input_size=input_size,
+            layer_sizes=layer_sizes,
+            weight_scale=weight_scale, bias_scale=bias_scale,
+            activation_fn=activation_fn, dtype=dtype)
         self.decay = decay  # dimensional decay
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
         self.create_distributions()
 
     def set_weights(self, weights):
-        super(DenseHorseshoe, self).set_weights(weights)
+        self.nn.set_weights(weights)
 
     def log_prob(self, x):
         return self.prior_distribution.log_prob(x)
@@ -150,9 +149,9 @@ class DenseHorseshoe(Dense, BayesianModel):
 
     def assemble_networks(self, sample, activation=tf.nn.relu):
         weight_tensors = []
-        for j in range(int(len(self.weights) / 2)):
+        for j in range(int(len(self.nn.weights) / 2)):
             weight_tensors += [sample["w_" + str(j)]] + [sample["b_" + str(j)]]
-        net = self.build_network(weight_tensors, activation=activation)
+        net = self.nn.build_network(weight_tensors, activation=activation)
         return net
 
     def create_distributions(self):
@@ -160,7 +159,7 @@ class DenseHorseshoe(Dense, BayesianModel):
         bijectors = {}
         var_list = []
         weight_var_list = []
-        for j, weight in enumerate(self.weights[::2]):
+        for j, weight in enumerate(self.nn.weights[::2]):
             var_list += [f"w_{j}"] + [f"b_{j}"]
             weight_var_list += [f"w_{j}"] + [f"b_{j}"]
 
