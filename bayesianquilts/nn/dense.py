@@ -42,11 +42,7 @@ class Dense(object):
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
         self.activation_fn = tf.nn.relu if (activation_fn is None) else activation_fn
-        if (input_size is None) or (layer_sizes is None):
-            self.fn = lambda x: x
-        else:
-            self.weights = self.sample_initial_nn_params(input_size, layer_sizes)
-            self.fn = self.build_network(self.weights)
+        self.weight_tensors = self.sample_initial_nn_params(input_size, layer_sizes)
 
     def dense(self, X, W, b, activation):
         return activation(
@@ -54,27 +50,23 @@ class Dense(object):
             + tf.cast(b[..., tf.newaxis, :], self.dtype)
         )
 
-    def set_weights(self, weights):
-        self.weights = weights
-        self.fn = self.build_network(self.weights)
+    def set_weights(self, weight_tensors):
+        self.weight_tensors = weight_tensors
 
-    def build_network(self, weight_tensors, activation=None):
+    def eval(self, input, weight_tensors=None, activation=None):
         activation = self.activation_fn if (activation is None) else activation
+        weight_tensors = weight_tensors if weight_tensors is not None else self.weight_tensors
 
-        # @tf.function
-        def model(X):
-            net = X
-            net = tf.cast(net, self.dtype)
-            weights_list = weight_tensors[::2]
-            biases_list = weight_tensors[1::2]
+        net = input
+        net = tf.cast(net, self.dtype)
+        weights_list = weight_tensors[::2]
+        biases_list = weight_tensors[1::2]
 
-            for (weights, biases) in zip(weights_list, biases_list):
-                net = self.dense(
-                    net, self.weight_scale * weights, self.bias_scale * biases, activation
-                )
-            return net
-
-        return model
+        for (weights, biases) in zip(weights_list, biases_list):
+            net = self.dense(
+                net, self.weight_scale * weights, self.bias_scale * biases, activation
+            )
+        return net
 
     def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
         """
@@ -181,11 +173,11 @@ class DenseHorseshoe(BayesianModel):
     def sample_weights(self, *args, **kwargs):
         return self.prior_distribution.sample(*args, **kwargs)
 
-    def assemble_networks(self, sample, activation=tf.nn.relu):
+    def eval(self, input, sample, activation=tf.nn.relu):
         weight_tensors = []
-        for j in range(int(len(self.nn.weights) / 2)):
+        for j in range(int(len(self.nn.weight_tensors) / 2)):
             weight_tensors += [sample["w_" + str(j)]] + [sample["b_" + str(j)]]
-        net = self.nn.build_network(weight_tensors, activation=activation)
+        net = self.nn.eval(input, weight_tensors, activation=activation)
         return net
 
     def create_distributions(self):
@@ -193,7 +185,7 @@ class DenseHorseshoe(BayesianModel):
         bijectors = {}
         var_list = []
         weight_var_list = []
-        for j, weight in enumerate(self.nn.weights[::2]):
+        for j, weight in enumerate(self.nn.weight_tensors[::2]):
             var_list += [f"w_{j}"] + [f"b_{j}"]
             weight_var_list += [f"w_{j}"] + [f"b_{j}"]
 
