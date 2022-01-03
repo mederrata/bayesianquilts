@@ -50,8 +50,8 @@ class Dense(object):
             + tf.cast(b[..., tf.newaxis, :], self.dtype)
         )
 
-    def set_weights(self, weights):
-        self.weights = weights
+    def set_weights(self, weight_tensors):
+        self.weight_tensors = weight_tensors
 
     def eval(self, input, weight_tensors=None, activation=None):
         activation = self.activation_fn if (activation is None) else activation
