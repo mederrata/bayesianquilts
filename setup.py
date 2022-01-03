@@ -41,8 +41,8 @@ setuptools.setup(
         'pandas >= 1.0.0',
         # We need to check for direct depends or we can delete scipy.
         'scipy>=1.4.1',
-        'tensorflow==2.5.0',
-        'tensorflow-probability==0.13.0',
+        'tensorflow==2.6.0',
+        'tensorflow-probability==0.14.0',
         'tensorflow-addons>=0.12.0',
         'jax',
         'jaxlib',
