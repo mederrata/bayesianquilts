@@ -175,6 +175,7 @@ class BayesianModel(object):
                 clip_value=clip_value,
                 check_every=check_every,
                 strategy=self.strategy,
+                trainable_variables=self.surrogate_distribution.variables,
                 batched_dataset=_data,
             )
             return losses

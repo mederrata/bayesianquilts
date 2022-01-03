@@ -3,6 +3,8 @@ import re
 from collections import Counter, defaultdict
 from itertools import product
 import numpy as np
+from numpy.lib.stride_tricks import as_strided
+
 import tensorflow as tf
 from tensorflow.python.ops.check_ops import assert_none_equal_v2
 import tensorflow_probability as tfp
