@@ -175,7 +175,7 @@ class DenseHorseshoe(BayesianModel):
 
     def eval(self, input, sample, activation=tf.nn.relu):
         weight_tensors = []
-        for j in range(int(len(self.nn.weights) / 2)):
+        for j in range(int(len(self.nn.weight_tensors) / 2)):
             weight_tensors += [sample["w_" + str(j)]] + [sample["b_" + str(j)]]
         net = self.nn.eval(input, weight_tensors, activation=activation)
         return net
@@ -185,7 +185,7 @@ class DenseHorseshoe(BayesianModel):
         bijectors = {}
         var_list = []
         weight_var_list = []
-        for j, weight in enumerate(self.nn.weights[::2]):
+        for j, weight in enumerate(self.nn.weight_tensors[::2]):
             var_list += [f"w_{j}"] + [f"b_{j}"]
             weight_var_list += [f"w_{j}"] + [f"b_{j}"]
 
