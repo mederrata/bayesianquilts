@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import re
 from collections import Counter, defaultdict
-from itertools import product
+from itertools import product, groupby
+from operator import itemgetter
 import numpy as np
-from numpy.lib.stride_tricks import as_strided
 
 import tensorflow as tf
 from tensorflow.python.ops.check_ops import assert_none_equal_v2
@@ -19,6 +19,112 @@ def tf_ravel_multi_index(multi_index, dims):
     multi_index = tf.cast(multi_index, strides.dtype)
     return tf.reduce_sum(multi_index * tf.expand_dims(strides, 1), axis=0)
 
+def ravel_broadcast_tile(tensor, from_shape, to_shape):
+    """Unravel, tile to match to_shape, ravel,
+    without raveling.
+    
+    Args:
+        tensor ([type]): The tensor is assumed to have shape:
+            batch_shape + [1] + param_shape
+        from_shape ([type]): shape for unraveled version of tensor
+        to_shape ([type]): shape to tile to
+    """
+    multiple = int(np.prod(to_shape)/np.prod(from_shape))
+    tensor_shape = tensor.shape.as_list()
+
+    param_ndims = 0
+    for tdim, todim, fdim in zip(reversed(tensor_shape), reversed(to_shape), reversed(from_shape)):
+        if tdim == todim and fdim==tdim:
+            param_ndims += 1
+        else:
+            break
+    param_dims = tensor_shape[-param_ndims:]
+    
+    batch_ndims = 0
+    for tdim, todim, fdim in zip(tensor_shape[:(-param_ndims-1)], to_shape[:(-param_ndims-1)], from_shape[:(-param_ndims-1)]):
+        if tdim == todim and tdim == fdim:
+            batch_ndims += 1
+        else:
+            break
+    batch_dims = tensor_shape[:batch_ndims]
+    tensor_ = tf.tile(
+        tensor[..., tf.newaxis], [1]*len(tensor_shape) + [multiple])
+    
+    broadcast_dims = [
+        k for k, i in enumerate(from_shape) if i == 1]
+    
+    # we need to re-arrange tensor_, putting things in the right place
+    # traverse broadcast_dims, looking for continuous regions
+    
+    contiguous = [
+        list(map(
+            itemgetter(1), g
+            )) for k, g in groupby(
+                enumerate(broadcast_dims
+                          ), lambda i_x: i_x[0] - i_x[1])]
+    
+    # the last dimension is now the product of all of the missing
+    # dimensions in broadcast_dims. Let's stick this dimension into
+    # position batch_ndims + 1, so that we have two index dimensions
+    
+    tensor_ = tf.transpose(
+        tensor_,
+        (
+            list(range(batch_ndims + 1)) + [len(tensor_shape)]
+            + list(range(batch_ndims + 1, len(tensor_shape)))
+        )
+    )    
+    
+    for chunk in contiguous:
+        # insert each chunk into the right slots
+        lower = chunk[0]
+        upper = chunk[-1] + 1
+        # prior_dims are dimensions already in from_shape
+        # that are before this chunk
+        prior_dims = to_shape[batch_ndims:lower]
+        chunk_dims = from_shape[lower:upper]
+        chunk_dims_to = to_shape[lower:upper]
+        post_dims = from_shape[upper:(-param_ndims)]
+        # post_dims are dimensions already in from_shape
+        # that are after this chunk
+        
+        # reshape tensor_ to
+        # (raveled) batch_dims, (raveled) prior_dims, (raveled)post_dims,
+        # (raveled) chunk_dims
+        #   (raveled) extra_dims, (raveled) param_dims 
+        
+        _temp_shape = tensor_.shape.as_list()
+        extra_dims = _temp_shape[batch_ndims + 1]
+        
+        dims_to_insert = int(np.prod(chunk_dims_to))
+
+        tensor_ = tf.reshape(
+            tensor_,
+            (
+                batch_dims + [int(np.prod(prior_dims))] + [int(np.prod(post_dims))]
+                + [dims_to_insert] + [int(extra_dims/dims_to_insert)] + [np.prod(param_dims)]
+            )
+        )
+        tensor_ = tf.transpose(
+            tensor_,
+            (0, 1, 3, 2, 4, 5)
+        )
+        _temp_shape = tensor_.shape.as_list()
+        tensor_ = tf.reshape(
+            tensor_,
+            (
+                batch_dims + [int(np.prod(_temp_shape[1:4]))]
+                + [int(np.prod(_temp_shape[4:5]))] + param_dims
+            )
+        )
+        pass
+    
+    _temp_shape = tensor_.shape.as_list()
+    tensor_ = tf.reshape(
+        tensor_,
+        batch_dims + [int(np.prod(_temp_shape[batch_ndims:(-param_ndims)]))] + param_dims
+        )
+    return tensor_
 
 class Interactions(object):
     _interaction_list = []
@@ -216,7 +322,7 @@ class Decomposed(object):
     def sum_parts(self, tensors=None, unravel=False):
         tensors = self._tensor_parts if tensors is None else tensors
         raveled_shape = [
-            np.prod(self._interaction_shape[: (-len(self._param_shape))])
+            np.prod(self._interaction_shape)
         ] + self._param_shape
         # infer the batch shape
 
@@ -237,9 +343,15 @@ class Decomposed(object):
             if len(keep_dims) == 0:
                 partial_sum += v
                 continue
-            
-            
-            pass
+            from_shape = batch_shape + self._tensor_part_shapes[k]
+            to_shape = batch_shape + self.shape()
+            v_ = ravel_broadcast_tile(v, from_shape, to_shape)
+            partial_sum += v_
+                
+        if unravel:
+            partial_sum = tf.reshape(
+                partial_sum, to_shape
+            )
         return partial_sum
 
     def unravel_tensor(self, tensor):
@@ -265,18 +377,11 @@ class Decomposed(object):
             self._interaction_shape, dtype=interaction_indices.dtype
         )
 
-        summed = self.sum_parts(tensors, ravel=True)
+        summed = self.sum_parts(tensors)
 
         overall_shape = summed.shape.as_list()
         rank = len(overall_shape)
-        batch_ndims = rank - len(self.shape())
-
-        summed = tf.reshape(
-            summed,
-            overall_shape[:batch_ndims]
-            + [np.prod(self._interaction_shape)]
-            + self._param_shape,
-        )
+        batch_ndims = rank - len(self._param_shape) - 1
 
         new_rank = len(summed.shape.as_list())
 
