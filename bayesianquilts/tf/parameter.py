@@ -196,6 +196,8 @@ class Decomposed(object):
             self._tensor_part_interactions,
             self._tensor_part_shapes,
         ) = self.generate_tensors()
+        self.scales = defaultdict(lambda:1)
+
 
     def generate_tensors(self, batch_shape=None, target=None, dtype=None):
         """Generate parameter tensors for the parameter decomposition,
@@ -269,6 +271,10 @@ class Decomposed(object):
     def set_params(self, tensors):
         for k in self._param_tensors.keys():
             self._param_tensors[k] = tensors[k]
+            
+    def set_scales(self, scales):
+        for k in scales.keys():
+            self.scales[k] = scales[k]
 
     def flatten_indices(self, tensors=None):
         param_rank = len(self._param_shape)
@@ -346,7 +352,7 @@ class Decomposed(object):
             from_shape = batch_shape + self._tensor_part_shapes[k]
             to_shape = batch_shape + self.shape()
             v_ = ravel_broadcast_tile(v, from_shape, to_shape)
-            partial_sum += v_
+            partial_sum += self.scales[k] * v_
                 
         if unravel:
             partial_sum = tf.reshape(
