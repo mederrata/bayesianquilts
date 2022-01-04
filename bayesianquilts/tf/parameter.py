@@ -19,7 +19,7 @@ def tf_ravel_multi_index(multi_index, dims):
     multi_index = tf.cast(multi_index, strides.dtype)
     return tf.reduce_sum(multi_index * tf.expand_dims(strides, 1), axis=0)
 
-def ravel_broadcast_tile(tensor, from_shape, to_shape):
+def ravel_broadcast_tile(tensor, from_shape, to_shape, param_ndims=None, batch_ndims=None):
     """Unravel, tile to match to_shape, ravel,
     without raveling.
     
@@ -31,21 +31,22 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape):
     """
     multiple = int(np.prod(to_shape)/np.prod(from_shape))
     tensor_shape = tensor.shape.as_list()
-
-    param_ndims = 0
-    for tdim, todim, fdim in zip(reversed(tensor_shape), reversed(to_shape), reversed(from_shape)):
-        if tdim == todim and fdim==tdim:
-            param_ndims += 1
-        else:
-            break
+    if param_ndims is None:
+        param_ndims = 0
+        for tdim, todim, fdim in zip(reversed(tensor_shape), reversed(to_shape), reversed(from_shape)):
+            if tdim == todim and fdim==tdim:
+                param_ndims += 1
+            else:
+                break
     param_dims = tensor_shape[-param_ndims:]
     
-    batch_ndims = 0
-    for tdim, todim, fdim in zip(tensor_shape[:(-param_ndims-1)], to_shape[:(-param_ndims-1)], from_shape[:(-param_ndims-1)]):
-        if tdim == todim and tdim == fdim:
-            batch_ndims += 1
-        else:
-            break
+    if batch_ndims is None:
+        batch_ndims = 0
+        for tdim, todim, fdim in zip(tensor_shape[:(-param_ndims-1)], to_shape[:(-param_ndims-1)], from_shape[:(-param_ndims-1)]):
+            if tdim == todim and tdim == fdim:
+                batch_ndims += 1
+            else:
+                break
     batch_dims = tensor_shape[:batch_ndims]
     tensor_ = tf.tile(
         tensor[..., tf.newaxis], [1]*len(tensor_shape) + [multiple])
@@ -101,7 +102,7 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape):
         tensor_ = tf.reshape(
             tensor_,
             (
-                batch_dims + [int(np.prod(prior_dims))] + [int(np.prod(post_dims))]
+                (batch_dims if len(batch_dims)>0 else [1]) + [int(np.prod(prior_dims))] + [int(np.prod(post_dims))]
                 + [dims_to_insert] + [int(extra_dims/dims_to_insert)] + [np.prod(param_dims)]
             )
         )
@@ -113,7 +114,7 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape):
         tensor_ = tf.reshape(
             tensor_,
             (
-                batch_dims + [int(np.prod(_temp_shape[1:4]))]
+                (batch_dims if len(batch_dims)>0 else [1]) + [int(np.prod(_temp_shape[1:4]))]
                 + [int(np.prod(_temp_shape[4:5]))] + param_dims
             )
         )
@@ -351,7 +352,7 @@ class Decomposed(object):
                 continue
             from_shape = batch_shape + self._tensor_part_shapes[k]
             to_shape = batch_shape + self.shape()
-            v_ = ravel_broadcast_tile(v, from_shape, to_shape)
+            v_ = ravel_broadcast_tile(v, from_shape, to_shape, param_ndims=len(self._param_shape))
             partial_sum += self.scales[k] * v_
                 
         if unravel:
@@ -440,6 +441,11 @@ class Decomposed(object):
 
 
 def main():
+    
+    v = tf.ones([10, 2, 2])
+    from_shape = [10, 1, 1, 1, 1, 1, 1, 2, 2]
+    to_shape = [10, 2, 26, 2, 2, 2, 2, 2, 2]
+    
     dims = [
         ("planned", 2),
         ("pre2011", 2),
