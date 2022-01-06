@@ -203,8 +203,8 @@ def minimize_distributed(
                 """
                 if (
                     (
-                        (avg_losses[-1] > avg_losses[-3])
-                        and (avg_losses[-1] > avg_losses[-2])
+                        (avg_losses[-1].numpy() > avg_losses[-3].numpy())
+                        and (avg_losses[-1].numpy() > avg_losses[-2].numpy())
                     )
                     or batches_since_checkpoint > 4
                 ) and batches_since_plateau > 2:
@@ -228,7 +228,7 @@ def minimize_distributed(
                         batches_since_plateau = 0
                         num_resets += 1
                 else:
-                    if losses[-1] < min_loss:
+                    if losses[-1].numpy() - min_loss.numpy() < 0.:
                         """
                         Save a checkpoint
                         """
