@@ -228,7 +228,7 @@ def minimize_distributed(
                         batches_since_plateau = 0
                         num_resets += 1
                 else:
-                    if losses[-1].numpy() - min_loss.numpy() < 0.:
+                    if losses[-1].numpy() - min_loss.numpy() < 0.0:
                         """
                         Save a checkpoint
                         """
@@ -422,16 +422,16 @@ def batched_minimize(
                     if processing_fn is not None:
                         data = processing_fn(data)
                     batch_loss = train_loop_body(state_initializer, step, data)
-                    if not np.isfinite(batch_loss.numpy()):
+
+                    if np.isfinite(batch_loss.numpy()):
+                        batch_losses += [batch_loss]
+                    else:
+                        print("Batch loss NaN")
                         cp_status = checkpoint.restore(manager.latest_checkpoint)
                         cp_status.assert_consumed()
 
                         batch_loss = train_loop_body(state_initializer, step, data)
                         decay_step += 1
-                    if np.isfinite(batch_loss.numpy()):
-                        batch_losses += [batch_loss]
-                    else:
-                        print("Batch loss NaN")
 
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss]
@@ -459,8 +459,8 @@ def batched_minimize(
                 """
                 if (
                     (
-                        (avg_losses[-1] > avg_losses[-3])
-                        and (avg_losses[-1] > avg_losses[-2])
+                        (avg_losses[-1].numpy() > avg_losses[-3].numpy())
+                        and (avg_losses[-1].numpy() > avg_losses[-2].numpy())
                     )
                 ) and batches_since_plateau > 3:
                     decay_step += 1
