@@ -435,7 +435,6 @@ class BayesianModel(object):
     def to_arviz(self, data=None):
         sample_stats = self.sample_stats(data=data)
         params = sample_stats["params"]
-        predictive = sample_stats["predictive"]
 
         idict = {
             "posterior": dict_to_dataset(params),
