@@ -403,10 +403,10 @@ def batched_minimize(
             loss = loss_fn()
         if not np.isfinite(np.sum(loss.numpy())):
             # print(loss)
-            print("Failed to initialize")
+            print("Failed to initialize", flush=True)
             converged = True
         else:
-            print(f"Initial loss: {loss}")
+            print(f"Initial loss: {loss}", flush=True)
 
         step = tf.cast(0, tf.int32)
         batches_since_checkpoint = 0
@@ -426,7 +426,7 @@ def batched_minimize(
                     if np.isfinite(batch_loss.numpy()):
                         batch_losses += [batch_loss.numpy()]
                     else:
-                        print("Batch loss NaN")
+                        print("Batch loss NaN", flush=True)
                         cp_status = checkpoint.restore(manager.latest_checkpoint)
                         cp_status.assert_consumed()
 
@@ -440,7 +440,8 @@ def batched_minimize(
             rel = deviation / loss
             print(
                 f"Epoch {step}: average-batch loss:"
-                + f"{loss} last batch loss: {batch_loss}"
+                + f"{loss} last batch loss: {batch_loss}", 
+                flush=True
             )
 
             if True:  # step % check_every == 0:
@@ -452,7 +453,7 @@ def batched_minimize(
 
                     # raise ArithmeticError(
                     #    "We are NaN, restored the last checkpoint")
-                    print("Got NaN, restoring a checkpoint")
+                    print("Got NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
 
                 """Check for plateau
@@ -466,14 +467,14 @@ def batched_minimize(
                     decay_step += 1
                     if num_resets >= max_decay_steps:
                         converged = True
-                        print(f"We have reset {num_resets} times so quitting")
+                        print(f"We have reset {num_resets} times so quitting", flush=True)
                     else:
                         status = "We are in a loss plateau"
                         status += f" learning rate: {optimizer.lr} loss: "
                         status += (
                             f"{batch_normalized_loss(data=next(iter(batched_dataset)))}"
                         )
-                        print(status)
+                        print(status, flush=True)
                         # cp_status = checkpoint.restore(
                         #    manager.latest_checkpoint)
                         # cp_status.assert_consumed()
@@ -483,7 +484,7 @@ def batched_minimize(
                         else:
                             status = "Restoring from a checkpoint - loss: "
                             status += f"{batch_normalized_loss(data=next(iter(batched_dataset)))}"
-                        print(status)
+                        print(status, flush=True)
                         batches_since_checkpoint = 0
                         batches_since_plateau = 0
                         num_resets += 1
@@ -495,7 +496,7 @@ def batched_minimize(
                         min_loss = losses[-1]
                         save_path = manager.save()
                         accepted_batches += 1
-                        print(f"Saved a checkpoint: {save_path}")
+                        print(f"Saved a checkpoint: {save_path}", flush=True)
                         batches_since_checkpoint = 0
                     else:
                         batches_since_checkpoint += 1
@@ -503,7 +504,8 @@ def batched_minimize(
                     if deviation < abs_tol:
                         print(
                             f"Converged in {step} iterations "
-                            + "with acceptable absolute tolerance"
+                            + "with acceptable absolute tolerance",
+                            flush=True
                         )
                         converged = True
                     elif rel < rel_tol:
@@ -515,7 +517,7 @@ def batched_minimize(
                     batches_since_plateau += 1
             step += 1
             if step > num_epochs:
-                print("Terminating because we are out of iterations")
+                print("Terminating because we are out of iterations", flush=True)
 
         trace = tf.stack(losses)
         if initial_trace_step is not None:
