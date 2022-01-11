@@ -203,8 +203,8 @@ def minimize_distributed(
                 """
                 if (
                     (
-                        (avg_losses[-1].numpy() > avg_losses[-3].numpy())
-                        and (avg_losses[-1].numpy() > avg_losses[-2].numpy())
+                        (avg_losses[-1] > avg_losses[-3])
+                        and (avg_losses[-1] > avg_losses[-2])
                     )
                     or batches_since_checkpoint > 4
                 ) and batches_since_plateau > 2:
@@ -228,7 +228,7 @@ def minimize_distributed(
                         batches_since_plateau = 0
                         num_resets += 1
                 else:
-                    if losses[-1].numpy() - min_loss.numpy() < 0.0:
+                    if losses[-1] - min_loss < 0.0:
                         """
                         Save a checkpoint
                         """
@@ -415,7 +415,7 @@ def batched_minimize(
         num_resets = 0
         while (step < num_epochs) and not converged:
             if batched_dataset is None:
-                losses += [train_loop_body(state_initializer, step)]
+                losses += [train_loop_body(state_initializer, step).numpy()]
             else:
                 batch_losses = []
                 for data in batched_dataset:
@@ -424,7 +424,7 @@ def batched_minimize(
                     batch_loss = train_loop_body(state_initializer, step, data)
 
                     if np.isfinite(batch_loss.numpy()):
-                        batch_losses += [batch_loss]
+                        batch_losses += [batch_loss.numpy()]
                     else:
                         print("Batch loss NaN")
                         cp_status = checkpoint.restore(manager.latest_checkpoint)
@@ -434,9 +434,9 @@ def batched_minimize(
                         decay_step += 1
 
             loss = tf.reduce_mean(batch_losses)
-            avg_losses += [loss]
-            losses += [loss]
-            deviation = tf.math.reduce_std(batch_losses)
+            avg_losses += [loss.numpy()]
+            losses += [loss.numpy()]
+            deviation = tf.math.reduce_std(batch_losses).numpy()
             rel = deviation / loss
             print(
                 f"Epoch {step}: average-batch loss:"
@@ -459,8 +459,8 @@ def batched_minimize(
                 """
                 if (
                     (
-                        (avg_losses[-1].numpy() > avg_losses[-3].numpy())
-                        and (avg_losses[-1].numpy() > avg_losses[-2].numpy())
+                        (avg_losses[-1] > avg_losses[-3])
+                        and (avg_losses[-1] > avg_losses[-2])
                     )
                 ) and batches_since_plateau > 3:
                     decay_step += 1
