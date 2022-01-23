@@ -105,6 +105,7 @@ class BayesianModel(object):
         data=None,
         data_batches=25,
         prefetch_batches=2,
+        shuffle_batches=False,
         temp_dir=tempfile.gettempdir(),
         **kwargs
     ):

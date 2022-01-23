@@ -73,7 +73,8 @@ def minimize_distributed(
     **kwargs,
 ):
 
-    checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
+    checkpoint_name = str(
+        uuid.uuid4()) if checkpoint_name is None else checkpoint_name
 
     with strategy.scope():
 
@@ -82,7 +83,8 @@ def minimize_distributed(
             loss = loss_fn(data=data)
             return loss / tf.cast(N, loss.dtype)
 
-        train_dist_dataset = strategy.experimental_distribute_dataset(batched_dataset)
+        train_dist_dataset = strategy.experimental_distribute_dataset(
+            batched_dataset)
         iterator = iter(train_dist_dataset)
 
         learning_rate = 1.0 if learning_rate is None else learning_rate
@@ -131,7 +133,8 @@ def minimize_distributed(
 
         @tf.function(input_signature=[train_dist_dataset.element_spec])
         def distributed_train_step(data):
-            per_replica_losses = strategy.experimental_run_v2(train_step, args=(data,))
+            per_replica_losses = strategy.experimental_run_v2(
+                train_step, args=(data,))
             return strategy.reduce(
                 tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None
             )
@@ -152,7 +155,7 @@ def minimize_distributed(
         epoch = 1
         save_path = manager.save()
         print(f"Saved an initial checkpoint: {save_path}")
-        for epoch in range(1, num_epochs):
+        for epoch in range(1, num_epochs+1):
             if converged:
                 break
             print(f"Epoch: {epoch}")
@@ -216,7 +219,8 @@ def minimize_distributed(
                         status = "We are in a loss plateau"
                         status += f" learning rate: {optimizer.lr}"
                         print(status)
-                        cp_status = checkpoint.restore(manager.latest_checkpoint)
+                        cp_status = checkpoint.restore(
+                            manager.latest_checkpoint)
                         cp_status.assert_consumed()
                         if batched_dataset is None:
                             status = "Restoring from a checkpoint"
@@ -275,12 +279,14 @@ def batched_minimize(
     batched_dataset=None,
     processing_fn=None,
     name="minimize",
+    shuffle_batches=False,
     clip_value=10.0,
     temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
     **kwargs,
 ):
 
-    checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
+    checkpoint_name = str(
+        uuid.uuid4()) if checkpoint_name is None else checkpoint_name
     learning_rate = 1.0 if learning_rate is None else learning_rate
 
     def learning_rate_schedule_fn(step):
@@ -418,6 +424,8 @@ def batched_minimize(
                 losses += [train_loop_body(state_initializer, step).numpy()]
             else:
                 batch_losses = []
+                if shuffle_batches:
+                    batched_dataset = batched_dataset.shuffle(10)
                 for data in batched_dataset:
                     if processing_fn is not None:
                         data = processing_fn(data)
@@ -427,10 +435,12 @@ def batched_minimize(
                         batch_losses += [batch_loss.numpy()]
                     else:
                         print("Batch loss NaN", flush=True)
-                        cp_status = checkpoint.restore(manager.latest_checkpoint)
+                        cp_status = checkpoint.restore(
+                            manager.latest_checkpoint)
                         cp_status.assert_consumed()
 
-                        batch_loss = train_loop_body(state_initializer, step, data)
+                        batch_loss = train_loop_body(
+                            state_initializer, step, data)
                         decay_step += 1
 
             loss = tf.reduce_mean(batch_losses)
@@ -440,7 +450,7 @@ def batched_minimize(
             rel = deviation / loss
             print(
                 f"Epoch {step}: average-batch loss:"
-                + f"{loss} last batch loss: {batch_loss}", 
+                + f"{loss} last batch loss: {batch_loss}",
                 flush=True
             )
 
@@ -467,7 +477,8 @@ def batched_minimize(
                     decay_step += 1
                     if num_resets >= max_decay_steps:
                         converged = True
-                        print(f"We have reset {num_resets} times so quitting", flush=True)
+                        print(
+                            f"We have reset {num_resets} times so quitting", flush=True)
                     else:
                         status = "We are in a loss plateau"
                         status += f" learning rate: {optimizer.lr} loss: "
@@ -545,9 +556,11 @@ def clip_gradients(fn, clip_value, dtype=tf.float64):
                 ret = fn(*new_args, **new_kwargs)
 
             def grad_fn(*dy):
-                flat_grads = tape.gradient(ret, flat_args_kwargs, output_gradients=dy)
+                flat_grads = tape.gradient(
+                    ret, flat_args_kwargs, output_gradients=dy)
                 flat_grads = tf.nest.map_structure(
-                    lambda g: tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)),
+                    lambda g: tf.where(tf.math.is_finite(g),
+                                       g, tf.zeros_like(g)),
                     flat_grads,
                 )
                 return tf.clip_by_global_norm(flat_grads, clip_value)[0]
@@ -592,10 +605,12 @@ def run_chain(
             inner_kernel=kernel,
             num_adaptation_steps=burnin,
             step_size_setter_fn=lambda pkr, new_step_size: pkr._replace(
-                inner_results=pkr.inner_results._replace(step_size=new_step_size)
+                inner_results=pkr.inner_results._replace(
+                    step_size=new_step_size)
             ),
             step_size_getter_fn=lambda pkr: pkr.inner_results.step_size,
-            log_accept_prob_getter_fn=lambda pkr: (pkr.inner_results.log_accept_ratio),
+            log_accept_prob_getter_fn=lambda pkr: (
+                pkr.inner_results.log_accept_ratio),
         )
 
         # Sampling from the chain.
@@ -889,6 +904,7 @@ def fit_surrogate_posterior(
     abs_tol=None,
     rel_tol=None,
     batched_dataset=None,
+    shuffle_batches=False;
     strategy=None,
     name=None,
     **kwargs,
@@ -914,6 +930,7 @@ def fit_surrogate_posterior(
             seed=seed,
             strategy=strategy,
             name=name,
+            shuffle_batches=shuffle_batches,
             **kwargs,
         )
 
@@ -931,6 +948,7 @@ def fit_surrogate_posterior(
             decay_rate=decay_rate,
             batched_dataset=batched_dataset,
             check_every=check_every,
+            shuffle_batches=shuffle_batches,
             **kwargs,
         )
     else:
@@ -975,7 +993,8 @@ def build_surrogate_posterior(
         if k in exclude:
             continue
         if callable(v):
-            test_input = {a: prior_sample[a] for a in inspect.getfullargspec(v).args}
+            test_input = {a: prior_sample[a]
+                          for a in inspect.getfullargspec(v).args}
             test_distribution = v(**test_input)
         else:
             test_distribution = v
@@ -1065,7 +1084,8 @@ def build_trainable_concentration_distribution(
         else tf.name_scope(name or "build_trainable_concentration_distribution")
     )
     with scope:
-        dtype = dtype_util.common_dtype([initial_concentration], dtype_hint=tf.float32)
+        dtype = dtype_util.common_dtype(
+            [initial_concentration], dtype_hint=tf.float32)
 
         loc = TransformedVariable(
             initial_concentration,
@@ -1074,7 +1094,8 @@ def build_trainable_concentration_distribution(
             name="concentration",
         )
 
-        posterior_dist = distribution_fn(concentration=loc, validate_args=validate_args)
+        posterior_dist = distribution_fn(
+            concentration=loc, validate_args=validate_args)
 
         # Ensure the distribution has the desired number of event dimensions.
         static_event_ndims = tf.get_static_value(event_ndims)
