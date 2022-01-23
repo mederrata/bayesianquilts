@@ -873,6 +873,7 @@ def minibatch_mc_variational_loss(
     data=None,
     strategy=None,
     name=None,
+    **kwargs
 ):
     _target_log_prob_fn = functools.partial(target_log_prob_fn, data=data)
 
@@ -930,7 +931,6 @@ def fit_surrogate_posterior(
             seed=seed,
             strategy=strategy,
             name=name,
-            shuffle_batches=shuffle_batches,
             **kwargs,
         )
 
