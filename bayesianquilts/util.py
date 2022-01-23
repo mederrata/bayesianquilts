@@ -904,7 +904,7 @@ def fit_surrogate_posterior(
     abs_tol=None,
     rel_tol=None,
     batched_dataset=None,
-    shuffle_batches=False;
+    shuffle_batches=False,
     strategy=None,
     name=None,
     **kwargs,
