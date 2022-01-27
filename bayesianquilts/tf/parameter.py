@@ -342,6 +342,8 @@ class Decomposed(object):
         # folded
         for k, v in tensors.items():
             # shuffle axes, placing broadcast axes together
+            if k not in self._tensor_part_shapes.keys():
+                continue
             part_interact_shape = self._tensor_part_shapes[k][
                 : (-len(self._param_shape))
             ]
@@ -374,8 +376,30 @@ class Decomposed(object):
 
     def tensor_keys(self):
         return sorted(list(self._param_tensors.keys()))
+    
+    def _lookup_by_parts(self, interaction_indices, tensors=None):
+        """Multi-index lookup without summing
 
+        Args:
+            interaction_indices ([type]): [description]
+            tensors ([type], optional): [description]. Defaults to None.
+        """
+        # flatten the indices
+        interaction_indices = tf.convert_to_tensor(interaction_indices)
+        # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
+
+        interaction_shape = tf.convert_to_tensor(
+            self._interaction_shape, dtype=interaction_indices.dtype
+        )
+        
+        for k, tensor in tensors.items():
+            pass
+        
     def lookup(self, interaction_indices, tensors=None):
+        return self._lookup_by_sum(interaction_indices, tensors=tensors)
+        
+        
+    def _lookup_by_sum(self, interaction_indices, tensors=None):
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
