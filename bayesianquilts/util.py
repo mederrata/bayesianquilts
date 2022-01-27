@@ -65,8 +65,6 @@ def minimize_distributed(
     checkpoint_name=None,
     max_initialization_steps=1000,
     batched_dataset=None,
-    data_input_signature=None,
-    processing_fn=None,
     clip_value=5.0,
     name="minimize",
     dtype=tf.float64,
