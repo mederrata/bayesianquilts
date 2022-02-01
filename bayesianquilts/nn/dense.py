@@ -1,3 +1,4 @@
+from abc import abstractmethod
 import inspect
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -68,7 +69,7 @@ class Dense(object):
             )
         net = self.dense(net, self.weight_scale * weights[-1], self.bias_scale * biases[-1], tf.identity)
         return net
-
+    
     def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
         """
         Priors should be either none or a list of tuples:
@@ -269,7 +270,15 @@ class DenseHorseshoe(BayesianModel):
     def sample(self, *args, **kwargs):
         return self.surrogate_distribution.sample(*args, **kwargs)
 
+    @abstractmethod
+    def predictive_distribution(data, **params):
+        pass
 
+    @abstractmethod
+    def log_likelihood(self, data, **params):
+        pass
+    
+    
 def main():
     denseH = DenseHorseshoe(10, [20, 12, 2])
     sample = denseH.prior_distribution.sample(10)

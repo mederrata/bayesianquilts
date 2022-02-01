@@ -320,6 +320,8 @@ def batched_minimize(
     @tf.function(autograph=False)
     def train_loop_body(old_result, step, data=None):
         """Run a single optimization step."""
+        if data is None:
+            data = next(iter(data_factory()))
         with tf.GradientTape(
             watch_accessed_variables=trainable_variables is None
         ) as tape:
@@ -350,7 +352,7 @@ def batched_minimize(
     with tf.name_scope(name) as name:
         # Compute the shape of the trace without executing the graph.
         concrete_loop_body = train_loop_body.get_concrete_function(
-            tf.TensorSpec([]), tf.TensorSpec([])
+            tf.TensorSpec([]), tf.TensorSpec([],)
         )  # Inputs ignored.
         if all(
             [
@@ -394,8 +396,6 @@ def batched_minimize(
         num_resets = 0
         while (step < num_epochs) and not converged:
             batch_losses = []
-            if shuffle_batches:
-                batched_dataset = batched_dataset.shuffle(10)
             for data in data_factory():
                 if processing_fn is not None:
                     data = processing_fn(data)

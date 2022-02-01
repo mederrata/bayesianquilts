@@ -68,12 +68,12 @@ class BayesianModel(ABC):
         self.strategy = strategy
         self.dtype = dtype
         
-    def fit(*args, **kwargs):
+    def fit(self, *args, **kwargs):
         return self._calibrate_advi(*args, **kwargs)
     
     def _calibrate_advi(
         self,
-        data,
+        data_factory,
         num_epochs=100,
         learning_rate=0.1,
         opt=None,
@@ -237,31 +237,8 @@ class BayesianModel(ABC):
         ]
 
     def sample_stats(
-        self, data=None, params=None, num_samples=100, num_splits=20, data_batches=25
+        self, data_factory, params=None, num_samples=100, num_splits=20, data_batches=25
     ):
-        data = self.data if data is None else data
-        # check if data is batched
-        batched = False
-        root = False
-        up = data
-        while (not batched) and (not root):
-            try:
-                batch_size = up._batch_size
-                batched = True
-            except AttributeError:
-                try:
-                    up = up._input_dataset
-                except AttributeError:
-                    root = True
-
-        if not batched:
-            card = tf.data.experimental.cardinality(data)
-            batch_size = int(np.floor(card / data_batches))
-            data = data.batch(batch_size, drop_remainder=True)
-            # data = data.batch
-
-        data = data.prefetch(tf.data.experimental.AUTOTUNE)
-
         likelihood_vars = inspect.getfullargspec(self.log_likelihood).args[1:]
 
         # split param samples
@@ -289,7 +266,7 @@ class BayesianModel(ABC):
             {k: v for k, v in zip(likelihood_vars, split)} for split in zip(*splits)
         ]
         ll = []
-        for batch in tqdm(data):
+        for batch in tqdm(data_factory()):
             # This should have shape S x N, where S is the number of param
             # samples and N is the batch size
             batch_log_likelihoods = [
