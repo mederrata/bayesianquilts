@@ -305,13 +305,7 @@ def batched_minimize(
         loss = loss_fn(data=data)
         return loss / tf.cast(N, loss.dtype)
 
-    with tf.GradientTape(watch_accessed_variables=trainable_variables is None) as tape:
-        for v in trainable_variables or []:
-            tape.watch(v)
-            
-        loss = batch_normalized_loss(data=next(iter(data_factory())))
-
-    watched_variables = tape.watched_variables()
+    watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
         optimizer=opt, **{"var_" + str(j): v for j, v in enumerate(watched_variables)}
@@ -331,20 +325,9 @@ def batched_minimize(
         ) as tape:
             for v in trainable_variables or []:
                 tape.watch(v)
-            if data is not None:
-                loss = batch_normalized_loss(data=data)
-            else:
-                loss = batch_normalized_loss(next(iter(batched_dataset)))
+            loss = batch_normalized_loss(data=data)
         watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, watched_variables)
-        """
-        grads = tf.nest.pack_sequence_as(
-            grads,
-            [
-                tf.clip_by_value(
-                    t, -clip_value, clip_value) for t in tf.nest.flatten(grads)]
-        )
-        """
         grads = tf.nest.pack_sequence_as(
             grads,
             tf.clip_by_global_norm(
@@ -388,7 +371,6 @@ def batched_minimize(
             initial_trace_step = state_initializer
 
         converged = False
-        results = []
         losses = []
         avg_losses = [1e10] * 3
         deviations = [1e10] * 3
@@ -396,7 +378,7 @@ def batched_minimize(
         min_state = None
         # Test the first step, and make sure we can initialize safely
 
-        loss = batch_normalized_loss(data=data)
+        loss = batch_normalized_loss(data=next(iter(data_factory())))
 
         if not np.isfinite(np.sum(loss.numpy())):
             # print(loss)
@@ -411,28 +393,25 @@ def batched_minimize(
         accepted_batches = 0
         num_resets = 0
         while (step < num_epochs) and not converged:
-            if batched_dataset is None:
-                losses += [train_loop_body(state_initializer, step).numpy()]
-            else:
-                batch_losses = []
-                if shuffle_batches:
-                    batched_dataset = batched_dataset.shuffle(10)
-                for data in batched_dataset:
-                    if processing_fn is not None:
-                        data = processing_fn(data)
-                    batch_loss = train_loop_body(state_initializer, step, data)
+            batch_losses = []
+            if shuffle_batches:
+                batched_dataset = batched_dataset.shuffle(10)
+            for data in data_factory():
+                if processing_fn is not None:
+                    data = processing_fn(data)
+                batch_loss = train_loop_body(state_initializer, step, data)
 
-                    if np.isfinite(batch_loss.numpy()):
-                        batch_losses += [batch_loss.numpy()]
-                    else:
-                        print("Batch loss NaN", flush=True)
-                        cp_status = checkpoint.restore(
-                            manager.latest_checkpoint)
-                        cp_status.assert_consumed()
+                if np.isfinite(batch_loss.numpy()):
+                    batch_losses += [batch_loss.numpy()]
+                else:
+                    print("Batch loss NaN", flush=True)
+                    cp_status = checkpoint.restore(
+                        manager.latest_checkpoint)
+                    cp_status.assert_consumed()
 
-                        batch_loss = train_loop_body(
-                            state_initializer, step, data)
-                        decay_step += 1
+                    batch_loss = train_loop_body(
+                        state_initializer, step, data)
+                    decay_step += 1
 
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss.numpy()]
