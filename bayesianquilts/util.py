@@ -374,10 +374,11 @@ def batched_minimize(
 
         converged = False
         losses = []
-        avg_losses = [1e10] * 3
-        deviations = [1e10] * 3
-        min_loss = 1e10
-        min_state = None
+        avg_losses = [1e308] * 3
+        deviations = [1e308] * 3
+        min_loss = 1e308
+        
+        """
         # Test the first step, and make sure we can initialize safely
 
         loss = batch_normalized_loss(data=next(iter(data_factory())))
@@ -388,7 +389,8 @@ def batched_minimize(
             converged = True
         else:
             print(f"Initial loss: {loss}", flush=True)
-
+        """
+        
         step = tf.cast(0, tf.int32)
         batches_since_checkpoint = 0
         batches_since_plateau = 0
