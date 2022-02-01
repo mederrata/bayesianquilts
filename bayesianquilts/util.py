@@ -263,6 +263,7 @@ def minimize_distributed(
 
 def batched_minimize(
     loss_fn,
+    data_factory,
     num_epochs=1000,
     max_decay_steps=25,
     abs_tol=1e-4,
@@ -270,11 +271,9 @@ def batched_minimize(
     trainable_variables=None,
     trace_fn=_trace_loss,
     learning_rate=1.0,
-    check_every=25,
     decay_rate=0.95,
     checkpoint_name=None,
     max_initialization_steps=1000,
-    batched_dataset=None,
     processing_fn=None,
     name="minimize",
     shuffle_batches=False,
@@ -309,10 +308,9 @@ def batched_minimize(
     with tf.GradientTape(watch_accessed_variables=trainable_variables is None) as tape:
         for v in trainable_variables or []:
             tape.watch(v)
-        if batched_dataset is not None:
-            loss = batch_normalized_loss(data=next(iter(batched_dataset)))
-        else:
-            loss = loss_fn()
+            
+        loss = batch_normalized_loss(data=next(iter(data_factory())))
+
     watched_variables = tape.watched_variables()
 
     checkpoint = tf.train.Checkpoint(
@@ -397,14 +395,9 @@ def batched_minimize(
         min_loss = 1e10
         min_state = None
         # Test the first step, and make sure we can initialize safely
-        if batched_dataset is not None:
-            assert isinstance(batched_dataset, tf.data.Dataset)
-            data = next(iter(batched_dataset))
-            if processing_fn is not None:
-                data = processing_fn(data)
-            loss = batch_normalized_loss(data=data)
-        else:
-            loss = loss_fn()
+
+        loss = batch_normalized_loss(data=data)
+
         if not np.isfinite(np.sum(loss.numpy())):
             # print(loss)
             print("Failed to initialize", flush=True)
@@ -889,6 +882,7 @@ def minibatch_mc_variational_loss(
 def fit_surrogate_posterior(
     target_log_prob_fn,
     surrogate_posterior,
+    data_factory,
     num_epochs=1000,
     trace_fn=_trace_loss,
     variational_loss_fn=_reparameterized_elbo,
@@ -902,8 +896,6 @@ def fit_surrogate_posterior(
     seed=None,
     abs_tol=None,
     rel_tol=None,
-    batched_dataset=None,
-    shuffle_batches=False,
     strategy=None,
     name=None,
     **kwargs,
@@ -935,6 +927,7 @@ def fit_surrogate_posterior(
     if strategy is None:
         return batched_minimize(
             complete_variational_loss_fn,
+            data_factory=data_factory,
             num_epochs=num_epochs,
             max_decay_steps=max_decay_steps,
             trace_fn=trace_fn,
@@ -944,14 +937,13 @@ def fit_surrogate_posterior(
             rel_tol=rel_tol,
             clip_value=clip_value,
             decay_rate=decay_rate,
-            batched_dataset=batched_dataset,
             check_every=check_every,
-            shuffle_batches=shuffle_batches,
             **kwargs,
         )
     else:
         return minimize_distributed(
             complete_variational_loss_fn,
+            data_factory=data_factory,
             num_epochs=num_epochs,
             max_decay_steps=max_decay_steps,
             trace_fn=trace_fn,
@@ -960,7 +952,6 @@ def fit_surrogate_posterior(
             abs_tol=abs_tol,
             rel_tol=rel_tol,
             decay_rate=decay_rate,
-            batched_dataset=batched_dataset,
             check_every=check_every,
             strategy=strategy,
             **kwargs,
