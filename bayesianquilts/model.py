@@ -7,6 +7,7 @@ import dill
 import arviz as az
 from arviz.data.base import dict_to_dataset
 from arviz.data import InferenceData
+from abc import ABC, abstractmethod
 
 import tensorflow as tf
 
@@ -33,7 +34,7 @@ from bayesianquilts.util import (
 from bayesianquilts.distributions import FactorizedDistributionMoments
 
 
-class BayesianModel(object):
+class BayesianModel(ABC):
     surrogate_distribution = None
     surrogate_sample = None
     prior_distribution = None
@@ -53,7 +54,7 @@ class BayesianModel(object):
     ):
         """Instantiate Model object based on tensorflow dataset
         Arguments:
-            data {[type]} -- [description]
+            data {tf.data or factory} -- Either a dataset or a factory to generate a dataset
         Keyword Arguments:
             data_transform_fn {[type]} -- [description] (default: {None})
             strategy {[type]} -- [description] (default: {None})
@@ -66,31 +67,13 @@ class BayesianModel(object):
 
         self.strategy = strategy
         self.dtype = dtype
-
-    def set_data(self, data, data_transform_fn=None, n=None):
-        if isinstance(data, (np.ndarray, np.generic)) or isinstance(data, pd.DataFrame):
-
-            if isinstance(data, pd.DataFrame):
-                data = data.to_numpy()
-                samples = data.shape[0]
-                data = tf.data.Dataset.zip(
-                    (
-                        tf.data.Dataset.from_tensor_slices(data),
-                        tf.data.Dataset.from_tensor_slices(np.arange(samples)),
-                    )
-                )
-                #  data = data.batch(samples)
-
-        elif not isinstance(data, tf.data.Dataset):
-            raise AttributeError("Need numpy/dataframe or tf.dataset")
-
-        self.data = data
-        self.data_cardinality = tf_data_cardinality(data) if n is None else n
-        self.data_transform_fn = data_transform_fn
-
-    #  @tf.function
-    def calibrate_advi(
+        
+    def fit(self, *args, **kwargs):
+        return self._calibrate_advi(*args, **kwargs)
+    
+    def _calibrate_advi(
         self,
+        data_factory,
         num_epochs=100,
         learning_rate=0.1,
         opt=None,
@@ -102,16 +85,16 @@ class BayesianModel(object):
         check_every=25,
         set_expectations=True,
         sample_size=4,
-        data=None,
-        data_batches=25,
+        batch_size=1000,
         prefetch_batches=2,
-        shuffle_batches=False,
         temp_dir=tempfile.gettempdir(),
         **kwargs
     ):
         """Calibrate using ADVI
 
         Args:
+            data_factory (callable, required): [description]. Factory
+                for generating a batch iterator.
             num_epochs (int, optional): [description]. Defaults to 100.
             learning_rate (float, optional): [description]. Defaults to 0.1.
             opt ([type], optional): [description]. Defaults to None.
@@ -123,44 +106,7 @@ class BayesianModel(object):
             check_every (int, optional): [description]. Defaults to 25.
             set_expectations (bool, optional): [description]. Defaults to True.
             sample_size (int, optional): [description]. Defaults to 4.
-            data ([type], optional): [description]. Defaults to None.
-            data_batches (int, optional): Ignored if data is already batched.
-                Defaults to 25.
         """
-        data = self.data if data is None else data
-        # check if data is batched
-        batched = False
-        root = False
-        up = data
-        while (not batched) and (not root):
-            if hasattr(up, "_batch_size"):
-                batch_size = up._batch_size
-                batched = True
-                _data = data
-                break
-            if hasattr(up, "_input_dataset"):
-                up = up._input_dataset
-            else:
-                root = True
-
-        if not batched:
-            card = (
-                self.data_cardinality
-                if self.data_cardinality is not None
-                else tf_data_cardinality(data)
-            )
-            if card < 1:
-                print(
-                    "We can't determine cardinality of the dataset, defaulting to batch size of 100"
-                )
-                batch_size = 100
-            else:
-                batch_size = int(np.floor(card / data_batches))
-
-            _data = data.batch(batch_size, drop_remainder=True)
-            # data = data.batch
-
-        _data = _data.prefetch(prefetch_batches)
 
         def run_approximation(num_epochs):
             losses = fit_surrogate_posterior(
@@ -177,7 +123,7 @@ class BayesianModel(object):
                 check_every=check_every,
                 strategy=self.strategy,
                 trainable_variables=self.surrogate_distribution.variables,
-                batched_dataset=_data,
+                data_factory=data_factory,
             )
             return losses
 
@@ -193,7 +139,8 @@ class BayesianModel(object):
             mean, var = FactorizedDistributionMoments(
                 self.surrogate_distribution, samples=samples
             )
-            self.calibrated_expectations = {k: tf.Variable(v) for k, v in mean.items()}
+            self.calibrated_expectations = {
+                k: tf.Variable(v) for k, v in mean.items()}
             self.calibrated_sd = {
                 k: tf.Variable(tf.math.sqrt(v)) for k, v in var.items()
             }
@@ -274,45 +221,24 @@ class BayesianModel(object):
             num_leapfrog_steps=num_leapfrog_steps,
             nuts=nuts,
         )
-        self.surrogate_sample = {k: sample for k, sample in zip(self.var_list, samples)}
+        self.surrogate_sample = {k: sample for k,
+                                 sample in zip(self.var_list, samples)}
         self.set_calibration_expectations()
 
         return samples, sampler_stat
 
-    def log_likelihood(self, data, *args, **kwargs):
+    @abstractmethod
+    def predictive_distribution(self, data, **params):
         pass
 
-    def predictive_distribution(
-        self, data=None, params=None, num_samples=100, num_splits=20, data_batches=25
-    ):
-        pass
+    def log_likelihood(self, data, **params):
+        return self.predictive_distribution(data, return_params=False, **params)[
+            "log_likelihood"
+        ]
 
     def sample_stats(
-        self, data=None, params=None, num_samples=100, num_splits=20, data_batches=25
+        self, data_factory, params=None, num_samples=100, num_splits=20, data_batches=25
     ):
-        data = self.data if data is None else data
-        # check if data is batched
-        batched = False
-        root = False
-        up = data
-        while (not batched) and (not root):
-            try:
-                batch_size = up._batch_size
-                batched = True
-            except AttributeError:
-                try:
-                    up = up._input_dataset
-                except AttributeError:
-                    root = True
-
-        if not batched:
-            card = tf.data.experimental.cardinality(data)
-            batch_size = int(np.floor(card / data_batches))
-            data = data.batch(batch_size, drop_remainder=True)
-            # data = data.batch
-
-        data = data.prefetch(tf.data.experimental.AUTOTUNE)
-
         likelihood_vars = inspect.getfullargspec(self.log_likelihood).args[1:]
 
         # split param samples
@@ -340,7 +266,7 @@ class BayesianModel(object):
             {k: v for k, v in zip(likelihood_vars, split)} for split in zip(*splits)
         ]
         ll = []
-        for batch in tqdm(data):
+        for batch in tqdm(data_factory()):
             # This should have shape S x N, where S is the number of param
             # samples and N is the batch size
             batch_log_likelihoods = [
@@ -409,6 +335,7 @@ class BayesianModel(object):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
         return self.unormalized_log_prob(data, **dict_params)
 
+    @abstractmethod
     def unormalized_log_prob(self, data, *args, **kwargs):
         """Generic method for the unormalized log probability function"""
         return

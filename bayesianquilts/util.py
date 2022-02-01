@@ -263,6 +263,7 @@ def minimize_distributed(
 
 def batched_minimize(
     loss_fn,
+    data_factory,
     num_epochs=1000,
     max_decay_steps=25,
     abs_tol=1e-4,
@@ -270,11 +271,9 @@ def batched_minimize(
     trainable_variables=None,
     trace_fn=_trace_loss,
     learning_rate=1.0,
-    check_every=25,
     decay_rate=0.95,
     checkpoint_name=None,
     max_initialization_steps=1000,
-    batched_dataset=None,
     processing_fn=None,
     name="minimize",
     shuffle_batches=False,
@@ -306,14 +305,7 @@ def batched_minimize(
         loss = loss_fn(data=data)
         return loss / tf.cast(N, loss.dtype)
 
-    with tf.GradientTape(watch_accessed_variables=trainable_variables is None) as tape:
-        for v in trainable_variables or []:
-            tape.watch(v)
-        if batched_dataset is not None:
-            loss = batch_normalized_loss(data=next(iter(batched_dataset)))
-        else:
-            loss = loss_fn()
-    watched_variables = tape.watched_variables()
+    watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
         optimizer=opt, **{"var_" + str(j): v for j, v in enumerate(watched_variables)}
@@ -328,25 +320,16 @@ def batched_minimize(
     @tf.function(autograph=False)
     def train_loop_body(old_result, step, data=None):
         """Run a single optimization step."""
+        if data is None:
+            data = next(iter(data_factory()))
         with tf.GradientTape(
             watch_accessed_variables=trainable_variables is None
         ) as tape:
             for v in trainable_variables or []:
                 tape.watch(v)
-            if data is not None:
-                loss = batch_normalized_loss(data=data)
-            else:
-                loss = batch_normalized_loss(next(iter(batched_dataset)))
+            loss = batch_normalized_loss(data=data)
         watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, watched_variables)
-        """
-        grads = tf.nest.pack_sequence_as(
-            grads,
-            [
-                tf.clip_by_value(
-                    t, -clip_value, clip_value) for t in tf.nest.flatten(grads)]
-        )
-        """
         grads = tf.nest.pack_sequence_as(
             grads,
             tf.clip_by_global_norm(
@@ -369,7 +352,7 @@ def batched_minimize(
     with tf.name_scope(name) as name:
         # Compute the shape of the trace without executing the graph.
         concrete_loop_body = train_loop_body.get_concrete_function(
-            tf.TensorSpec([]), tf.TensorSpec([])
+            tf.TensorSpec([]), tf.TensorSpec([],)
         )  # Inputs ignored.
         if all(
             [
@@ -390,21 +373,15 @@ def batched_minimize(
             initial_trace_step = state_initializer
 
         converged = False
-        results = []
         losses = []
         avg_losses = [1e10] * 3
         deviations = [1e10] * 3
         min_loss = 1e10
         min_state = None
         # Test the first step, and make sure we can initialize safely
-        if batched_dataset is not None:
-            assert isinstance(batched_dataset, tf.data.Dataset)
-            data = next(iter(batched_dataset))
-            if processing_fn is not None:
-                data = processing_fn(data)
-            loss = batch_normalized_loss(data=data)
-        else:
-            loss = loss_fn()
+
+        loss = batch_normalized_loss(data=next(iter(data_factory())))
+
         if not np.isfinite(np.sum(loss.numpy())):
             # print(loss)
             print("Failed to initialize", flush=True)
@@ -418,28 +395,23 @@ def batched_minimize(
         accepted_batches = 0
         num_resets = 0
         while (step < num_epochs) and not converged:
-            if batched_dataset is None:
-                losses += [train_loop_body(state_initializer, step).numpy()]
-            else:
-                batch_losses = []
-                if shuffle_batches:
-                    batched_dataset = batched_dataset.shuffle(10)
-                for data in batched_dataset:
-                    if processing_fn is not None:
-                        data = processing_fn(data)
-                    batch_loss = train_loop_body(state_initializer, step, data)
+            batch_losses = []
+            for data in data_factory():
+                if processing_fn is not None:
+                    data = processing_fn(data)
+                batch_loss = train_loop_body(state_initializer, step, data)
 
-                    if np.isfinite(batch_loss.numpy()):
-                        batch_losses += [batch_loss.numpy()]
-                    else:
-                        print("Batch loss NaN", flush=True)
-                        cp_status = checkpoint.restore(
-                            manager.latest_checkpoint)
-                        cp_status.assert_consumed()
+                if np.isfinite(batch_loss.numpy()):
+                    batch_losses += [batch_loss.numpy()]
+                else:
+                    print("Batch loss NaN", flush=True)
+                    cp_status = checkpoint.restore(
+                        manager.latest_checkpoint)
+                    cp_status.assert_consumed()
 
-                        batch_loss = train_loop_body(
-                            state_initializer, step, data)
-                        decay_step += 1
+                    batch_loss = train_loop_body(
+                        state_initializer, step, data)
+                    decay_step += 1
 
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss.numpy()]
@@ -889,6 +861,7 @@ def minibatch_mc_variational_loss(
 def fit_surrogate_posterior(
     target_log_prob_fn,
     surrogate_posterior,
+    data_factory,
     num_epochs=1000,
     trace_fn=_trace_loss,
     variational_loss_fn=_reparameterized_elbo,
@@ -902,8 +875,6 @@ def fit_surrogate_posterior(
     seed=None,
     abs_tol=None,
     rel_tol=None,
-    batched_dataset=None,
-    shuffle_batches=False,
     strategy=None,
     name=None,
     **kwargs,
@@ -935,6 +906,7 @@ def fit_surrogate_posterior(
     if strategy is None:
         return batched_minimize(
             complete_variational_loss_fn,
+            data_factory=data_factory,
             num_epochs=num_epochs,
             max_decay_steps=max_decay_steps,
             trace_fn=trace_fn,
@@ -944,14 +916,13 @@ def fit_surrogate_posterior(
             rel_tol=rel_tol,
             clip_value=clip_value,
             decay_rate=decay_rate,
-            batched_dataset=batched_dataset,
             check_every=check_every,
-            shuffle_batches=shuffle_batches,
             **kwargs,
         )
     else:
         return minimize_distributed(
             complete_variational_loss_fn,
+            data_factory=data_factory,
             num_epochs=num_epochs,
             max_decay_steps=max_decay_steps,
             trace_fn=trace_fn,
@@ -960,7 +931,6 @@ def fit_surrogate_posterior(
             abs_tol=abs_tol,
             rel_tol=rel_tol,
             decay_rate=decay_rate,
-            batched_dataset=batched_dataset,
             check_every=check_every,
             strategy=strategy,
             **kwargs,
