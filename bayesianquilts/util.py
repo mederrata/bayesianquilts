@@ -52,6 +52,7 @@ def _trace_variables(loss, grads, variables):
 
 def minimize_distributed(
     loss_fn,
+    data_factory,
     strategy,
     trainable_variables,
     num_epochs=100000,
@@ -64,7 +65,6 @@ def minimize_distributed(
     decay_rate=0.95,
     checkpoint_name=None,
     max_initialization_steps=1000,
-    batched_dataset=None,
     clip_value=5.0,
     name="minimize",
     dtype=tf.float64,
@@ -290,9 +290,7 @@ def batched_minimize(
     optimizer = tf.optimizers.Adam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step)
     )
-    # optimizer = tf.optimizers.SGD(
-    #    learning_rate=lambda: learning_rate_schedule_fn(decay_step)
-    # )
+
     opt = tfa.optimizers.Lookahead(optimizer)
 
     # @tf.function
@@ -300,7 +298,7 @@ def batched_minimize(
         N = tf.shape(tf.nest.flatten(data)[0])[0]
         loss = loss_fn(data=data)
         return loss / tf.cast(N, loss.dtype)
-
+    
     watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
