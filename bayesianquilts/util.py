@@ -82,7 +82,7 @@ def minimize_distributed(
             return loss / tf.cast(N, loss.dtype)
 
         train_dist_dataset = strategy.experimental_distribute_dataset(
-            batched_dataset)
+            data_factory())
         iterator = iter(train_dist_dataset)
 
         learning_rate = 1.0 if learning_rate is None else learning_rate
@@ -220,11 +220,7 @@ def minimize_distributed(
                         cp_status = checkpoint.restore(
                             manager.latest_checkpoint)
                         cp_status.assert_consumed()
-                        if batched_dataset is None:
-                            status = "Restoring from a checkpoint"
-                            # status += f"loss: {loss_fn()}"
-                        else:
-                            status = "Restoring from a checkpoint"
+
                         print(status)
                         batches_since_checkpoint = 0
                         batches_since_plateau = 0
@@ -455,18 +451,18 @@ def batched_minimize(
                         status = "We are in a loss plateau"
                         status += f" learning rate: {optimizer.lr} loss: "
                         status += (
-                            f"{batch_normalized_loss(data=next(iter(batched_dataset)))}"
+                            f"{batch_normalized_loss(data=next(iter(data_factory())))}"
                         )
                         print(status, flush=True)
                         # cp_status = checkpoint.restore(
                         #    manager.latest_checkpoint)
                         # cp_status.assert_consumed()
-                        if batched_dataset is None:
+                        if data_factory() is None:
                             status = "Restoring from a checkpoint - "
                             status += f"loss: {loss_fn()}"
                         else:
                             status = "Restoring from a checkpoint - loss: "
-                            status += f"{batch_normalized_loss(data=next(iter(batched_dataset)))}"
+                            status += f"{batch_normalized_loss(data=next(iter(data_factory())))}"
                         print(status, flush=True)
                         batches_since_checkpoint = 0
                         batches_since_plateau = 0
