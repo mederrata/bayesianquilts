@@ -432,17 +432,12 @@ def batched_minimize(
 
                 """Check for plateau
                 """
-                if (
-                    (
-                        (avg_losses[-1] > avg_losses[-3])
-                        and (avg_losses[-1] > avg_losses[-2])
-                    )
-                ) and batches_since_plateau >= 3:
+                if  batches_since_checkpoint >= 3:
                     decay_step += 1
-                    if batches_since_plateau >= max_plateau_epochs:
+                    if batches_since_checkpoint >= max_plateau_epochs:
                         converged = True
                         print(
-                            f"We have reset {num_resets} times so quitting",
+                            f"We have had {batches_since_checkpoint} epochs with no improvement so we give up",
                             flush=True)
                     else:
                         status = "We are in a loss plateau"
