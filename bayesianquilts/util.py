@@ -192,9 +192,9 @@ def minimize_distributed(
                         print(f"We have reset {num_resets} times so quitting")
                 avg_losses += [avg_loss]
                 # deviation = tf.math.reduce_std(recent_losses).numpy()
-                deviation = avg_losses[-1] - avg_losses[-2]
+                deviation = np.abs(avg_losses[-1] - avg_losses[-2])
                 deviations += [deviation]
-                rel = deviation / avg_loss
+                rel = np.abs(deviation / avg_loss)
                 status = f"Iteration {epoch} -- loss: {losses[-1].numpy()}, "
                 status += f"abs_err: {deviation}, rel_err: {rel}"
                 print(status, flush=True)
