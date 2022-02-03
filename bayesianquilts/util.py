@@ -53,7 +53,7 @@ def minimize_distributed(
     strategy,
     trainable_variables,
     num_epochs=100000,
-    max_decay_steps=25,
+    max_plateau_epochs=3,
     abs_tol=1e-4,
     rel_tol=1e-4,
     trace_fn=_trace_loss,
@@ -187,9 +187,6 @@ def minimize_distributed(
                     epoch += 1
                     cp_status.assert_consumed()
                     print(f" new learning rate: {optimizer.lr}")
-                    if num_resets >= max_decay_steps:
-                        converged = True
-                        print(f"We have reset {num_resets} times so quitting")
                 avg_losses += [avg_loss]
                 # deviation = tf.math.reduce_std(recent_losses).numpy()
                 deviation = np.abs(avg_losses[-1] - avg_losses[-2])
@@ -208,7 +205,7 @@ def minimize_distributed(
                     or batches_since_checkpoint > 4
                 ) and batches_since_plateau > 2:
                     decay_step += 1
-                    if num_resets >= max_decay_steps:
+                    if batches_since_plateau >= max_plateau_epochs:
                         converged = True
                         print(f"We have reset {num_resets} times so quitting")
                     else:
@@ -260,7 +257,7 @@ def batched_minimize(
     loss_fn,
     data_factory,
     num_epochs=1000,
-    max_decay_steps=25,
+    max_plateau_epochs=3,
     abs_tol=1e-4,
     rel_tol=1e-4,
     trainable_variables=None,
@@ -440,9 +437,9 @@ def batched_minimize(
                         (avg_losses[-1] > avg_losses[-3])
                         and (avg_losses[-1] > avg_losses[-2])
                     )
-                ) and batches_since_plateau > 3:
+                ) and batches_since_plateau >= 3:
                     decay_step += 1
-                    if num_resets >= max_decay_steps:
+                    if batches_since_plateau >= max_plateau_epochs:
                         converged = True
                         print(
                             f"We have reset {num_resets} times so quitting",
