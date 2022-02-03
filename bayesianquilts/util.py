@@ -194,12 +194,13 @@ def minimize_distributed(
                         converged = True
                         print(f"We have reset {num_resets} times so quitting")
                 avg_losses += [avg_loss]
-                deviation = tf.math.reduce_std(recent_losses).numpy()
+                # deviation = tf.math.reduce_std(recent_losses).numpy()
+                deviation = avg_losses[-1] - avg_losses[-2]
                 deviations += [deviation]
                 rel = deviation / avg_loss
                 status = f"Iteration {epoch} -- loss: {losses[-1].numpy()}, "
                 status += f"abs_err: {deviation}, rel_err: {rel}"
-                print(status)
+                print(status, flush=True)
                 """Check for plateau
                 """
                 if (
@@ -241,13 +242,13 @@ def minimize_distributed(
                     if deviation < abs_tol:
                         print(
                             f"Converged in {epoch} iterations "
-                            + "with acceptable absolute tolerance"
+                            + f"with acceptable absolute tolerance {round(deviation, 3)}"
                         )
                         converged = True
                     elif rel < rel_tol:
                         print(
                             f"Converged in {epoch} iterations with "
-                            + "acceptable relative tolerance"
+                            + f"acceptable relative tolerance: {rel}"
                         )
                         converged = True
                     batches_since_plateau += 1
