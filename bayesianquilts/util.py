@@ -13,18 +13,15 @@ import tensorflow_probability as tfp
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
+from tensorflow.python.tools.inspect_checkpoint import \
+    print_tensors_in_checkpoint_file
 from tensorflow.python.training import optimizer
 from tensorflow_probability.python import util as tfp_util
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import (
-    TransformedDistribution,
-)
-from tensorflow_probability.python.internal import (
-    dtype_util,
-    prefer_static,
-    tensorshape_util,
-)
+from tensorflow_probability.python.distributions.transformed_distribution import \
+    TransformedDistribution
+from tensorflow_probability.python.internal import (dtype_util, prefer_static,
+                                                    tensorshape_util)
 from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
 
@@ -52,6 +49,7 @@ def _trace_variables(loss, grads, variables):
 
 def minimize_distributed(
     loss_fn,
+    data_factory,
     strategy,
     trainable_variables,
     num_epochs=100000,
@@ -64,7 +62,6 @@ def minimize_distributed(
     decay_rate=0.95,
     checkpoint_name=None,
     max_initialization_steps=1000,
-    batched_dataset=None,
     clip_value=5.0,
     name="minimize",
     dtype=tf.float64,
@@ -194,12 +191,13 @@ def minimize_distributed(
                         converged = True
                         print(f"We have reset {num_resets} times so quitting")
                 avg_losses += [avg_loss]
-                deviation = tf.math.reduce_std(recent_losses).numpy()
+                # deviation = tf.math.reduce_std(recent_losses).numpy()
+                deviation = avg_losses[-1] - avg_losses[-2]
                 deviations += [deviation]
                 rel = deviation / avg_loss
                 status = f"Iteration {epoch} -- loss: {losses[-1].numpy()}, "
                 status += f"abs_err: {deviation}, rel_err: {rel}"
-                print(status)
+                print(status, flush=True)
                 """Check for plateau
                 """
                 if (
@@ -241,13 +239,14 @@ def minimize_distributed(
                     if deviation < abs_tol:
                         print(
                             f"Converged in {epoch} iterations "
-                            + "with acceptable absolute tolerance"
+                            + "with acceptable absolute tolerance "
+                            + f"{round(deviation, 3)}"
                         )
                         converged = True
                     elif rel < rel_tol:
                         print(
                             f"Converged in {epoch} iterations with "
-                            + "acceptable relative tolerance"
+                            + f"acceptable relative tolerance: {rel}"
                         )
                         converged = True
                     batches_since_plateau += 1
@@ -290,9 +289,7 @@ def batched_minimize(
     optimizer = tf.optimizers.Adam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step)
     )
-    # optimizer = tf.optimizers.SGD(
-    #    learning_rate=lambda: learning_rate_schedule_fn(decay_step)
-    # )
+
     opt = tfa.optimizers.Lookahead(optimizer)
 
     # @tf.function
@@ -304,7 +301,9 @@ def batched_minimize(
     watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
-        optimizer=opt, **{"var_" + str(j): v for j, v in enumerate(watched_variables)}
+        optimizer=opt, **{
+            "var_" + str(j): v for j, v in enumerate(watched_variables)
+            }
     )
     manager = tf.train.CheckpointManager(
         checkpoint,
@@ -373,7 +372,7 @@ def batched_minimize(
         avg_losses = [1e308] * 3
         deviations = [1e308] * 3
         min_loss = 1e308
-        
+
         """
         # Test the first step, and make sure we can initialize safely
 
@@ -386,7 +385,7 @@ def batched_minimize(
         else:
             print(f"Initial loss: {loss}", flush=True)
         """
-        
+
         step = tf.cast(0, tf.int32)
         batches_since_checkpoint = 0
         batches_since_plateau = 0
@@ -446,7 +445,8 @@ def batched_minimize(
                     if num_resets >= max_decay_steps:
                         converged = True
                         print(
-                            f"We have reset {num_resets} times so quitting", flush=True)
+                            f"We have reset {num_resets} times so quitting",
+                            flush=True)
                     else:
                         status = "We are in a loss plateau"
                         status += f" learning rate: {optimizer.lr} loss: "
@@ -496,7 +496,8 @@ def batched_minimize(
                     batches_since_plateau += 1
             step += 1
             if step > num_epochs:
-                print("Terminating because we are out of iterations", flush=True)
+                print("Terminating because we are out of iterations",
+                      flush=True)
 
         trace = tf.stack(losses)
         if initial_trace_step is not None:
@@ -652,7 +653,8 @@ def build_trainable_concentration_scale_distribution(
     scope = (
         strategy.scope()
         if strategy is not None
-        else tf.name_scope(name or "build_trainable_concentration_scale_distribution")
+        else tf.name_scope(
+            name or "build_trainable_concentration_scale_distribution")
     )
     with scope:
         dtype = dtype_util.common_dtype(
@@ -719,7 +721,8 @@ def build_trainable_location_scale_distribution(
     scope = (
         strategy.scope()
         if strategy is not None
-        else tf.name_scope(name or "build_trainable_location_scale_distribution")
+        else tf.name_scope(
+            name or "build_trainable_location_scale_distribution")
     )
     with scope:
         dtype = dtype_util.common_dtype(
@@ -964,7 +967,9 @@ def build_surrogate_posterior(
             test_distribution = v(**test_input)
         else:
             test_distribution = v
-        if isinstance(test_distribution.distribution, tfd.InverseGamma) or isinstance(
+        if isinstance(
+            test_distribution.distribution, tfd.InverseGamma
+            ) or isinstance(
             test_distribution.distribution, SqrtInverseGamma
         ):
             surrogate_dict[k] = bijectors[k](
