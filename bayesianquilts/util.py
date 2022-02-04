@@ -217,7 +217,7 @@ def minimize_distributed(
                         cp_status.assert_consumed()
 
                         print(status)
-                        batches_since_checkpoint = 0
+                        batches_since_checkpoint += 1
                         batches_since_plateau = 0
                         num_resets += 1
                 else:
@@ -232,7 +232,17 @@ def minimize_distributed(
                         batches_since_checkpoint = 0
                     else:
                         batches_since_checkpoint += 1
+                        decay_step += 1
+                        status = "We are in a loss plateau"
+                        status += f" learning rate: {optimizer.lr}"
+                        print(status)
+                        cp_status = checkpoint.restore(
+                            manager.latest_checkpoint)
+                        cp_status.assert_consumed()
 
+                        print(status)
+                        batches_since_plateau = 0
+                        
                     if deviation < abs_tol:
                         print(
                             f"Converged in {epoch} iterations "
@@ -294,7 +304,7 @@ def batched_minimize(
         N = tf.shape(tf.nest.flatten(data)[0])[0]
         loss = loss_fn(data=data)
         return loss / tf.cast(N, loss.dtype)
-
+    
     watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
