@@ -481,6 +481,7 @@ def batched_minimize(
                         batches_since_checkpoint = 0
                     else:
                         batches_since_checkpoint += 1
+                        decay_step += 1
 
                     if deviation < abs_tol:
                         print(
