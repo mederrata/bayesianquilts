@@ -82,11 +82,9 @@ class BayesianModel(ABC):
         clip_value=5.0,
         max_decay_steps=25,
         lr_decay_factor=0.99,
-        check_every=25,
+        check_every=1,
         set_expectations=True,
         sample_size=4,
-        batch_size=1000,
-        prefetch_batches=2,
         temp_dir=tempfile.gettempdir(),
         **kwargs
     ):
