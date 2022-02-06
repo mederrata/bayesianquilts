@@ -242,7 +242,7 @@ def minimize_distributed(
 
                         print(status)
                         batches_since_plateau = 0
-                        
+
                     if deviation < abs_tol:
                         print(
                             f"Converged in {epoch} iterations "
@@ -267,7 +267,7 @@ def batched_minimize(
     loss_fn,
     data_factory,
     num_epochs=1000,
-    max_plateau_epochs=3,
+    max_plateau_epochs=6,
     abs_tol=1e-4,
     rel_tol=1e-4,
     trainable_variables=None,
@@ -278,7 +278,7 @@ def batched_minimize(
     max_initialization_steps=1000,
     processing_fn=None,
     name="minimize",
-    shuffle_batches=False,
+    check_every=1,
     clip_value=10.0,
     temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
     **kwargs,
@@ -304,13 +304,13 @@ def batched_minimize(
         N = tf.shape(tf.nest.flatten(data)[0])[0]
         loss = loss_fn(data=data)
         return loss / tf.cast(N, loss.dtype)
-    
+
     watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
         optimizer=opt, **{
             "var_" + str(j): v for j, v in enumerate(watched_variables)
-            }
+        }
     )
     manager = tf.train.CheckpointManager(
         checkpoint,
@@ -420,29 +420,29 @@ def batched_minimize(
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss.numpy()]
             losses += [loss.numpy()]
-            deviation = tf.math.reduce_std(batch_losses).numpy()
+            deviation = np.abs(losses[-1]-losses[-2])
             rel = deviation / loss
             print(
                 f"Epoch {step}: average-batch loss:"
-                + f"{loss} last batch loss: {batch_loss}",
+                + f"{loss} rel loss: {rel}",
                 flush=True
             )
 
-            if True:  # step % check_every == 0:
+            if step % check_every == 0:
+                """
+                Check for convergence
+                """
 
-                """Check for convergence"""
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
-
-                    # raise ArithmeticError(
-                    #    "We are NaN, restored the last checkpoint")
-                    print("Got NaN, restoring a checkpoint", flush=True)
+                    print("Epoch NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
+                    continue
 
                 """Check for plateau
                 """
-                if  batches_since_checkpoint >= 3:
+                if batches_since_checkpoint >= 3:
                     decay_step += 1
                     if batches_since_checkpoint >= max_plateau_epochs:
                         converged = True
@@ -451,20 +451,8 @@ def batched_minimize(
                             flush=True)
                     else:
                         status = "We are in a loss plateau"
-                        status += f" learning rate: {optimizer.lr} loss: "
-                        status += (
-                            f"{batch_normalized_loss(data=next(iter(data_factory())))}"
-                        )
                         print(status, flush=True)
-                        # cp_status = checkpoint.restore(
-                        #    manager.latest_checkpoint)
-                        # cp_status.assert_consumed()
-                        if data_factory() is None:
-                            status = "Restoring from a checkpoint - "
-                            status += f"loss: {loss_fn()}"
-                        else:
-                            status = "Restoring from a checkpoint - loss: "
-                            status += f"{batch_normalized_loss(data=next(iter(data_factory())))}"
+                        status = "Restoring from a checkpoint"
                         print(status, flush=True)
                         batches_since_checkpoint = 0
                         batches_since_plateau = 0
@@ -969,7 +957,7 @@ def build_surrogate_posterior(
             test_distribution = v
         if isinstance(
             test_distribution.distribution, tfd.InverseGamma
-            ) or isinstance(
+        ) or isinstance(
             test_distribution.distribution, SqrtInverseGamma
         ):
             surrogate_dict[k] = bijectors[k](
