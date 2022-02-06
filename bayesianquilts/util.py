@@ -480,7 +480,6 @@ def batched_minimize(
                             print(status, flush=True)
                             status = "Restoring from a checkpoint"
                             print(status, flush=True)
-                            batches_since_checkpoint = 0
                             batches_since_plateau = 0
 
             step += 1
