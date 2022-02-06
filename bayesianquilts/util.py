@@ -275,7 +275,6 @@ def batched_minimize(
     learning_rate=1.0,
     decay_rate=0.95,
     checkpoint_name=None,
-    max_initialization_steps=1000,
     processing_fn=None,
     name="minimize",
     check_every=1,
@@ -436,41 +435,20 @@ def batched_minimize(
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
-                    print("Epoch NaN, restoring a checkpoint", flush=True)
+                    print("Epoch loss NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
+                    print(f"New learning rate: {optimizer.lr}", flush=True)
                     continue
 
-                """Check for plateau
-                """
-                if batches_since_checkpoint >= 3:
-                    decay_step += 1
-                    if batches_since_checkpoint >= max_plateau_epochs:
-                        converged = True
-                        print(
-                            f"We have had {batches_since_checkpoint} epochs with no improvement so we give up",
-                            flush=True)
-                    else:
-                        status = "We are in a loss plateau"
-                        print(status, flush=True)
-                        status = "Restoring from a checkpoint"
-                        print(status, flush=True)
-                        batches_since_checkpoint = 0
-                        batches_since_plateau = 0
-                        num_resets += 1
-                else:
-                    if losses[-1] < min_loss:
-                        """
-                        Save a checkpoint
-                        """
-                        min_loss = losses[-1]
-                        save_path = manager.save()
-                        accepted_batches += 1
-                        print(f"Saved a checkpoint: {save_path}", flush=True)
-                        batches_since_checkpoint = 0
-                    else:
-                        batches_since_checkpoint += 1
-                        decay_step += 1
-
+                if losses[-1] < min_loss:
+                    """
+                    Save a checkpoint
+                    """
+                    min_loss = losses[-1]
+                    save_path = manager.save()
+                    accepted_batches += 1
+                    print(f"Saved a checkpoint: {save_path}", flush=True)
+                    batches_since_checkpoint = 0
                     if deviation < abs_tol:
                         print(
                             f"Converged in {step} iterations "
@@ -485,6 +463,26 @@ def batched_minimize(
                         )
                         converged = True
                     batches_since_plateau += 1
+                else:
+                    batches_since_checkpoint += 1
+                    decay_step += 1
+                    batches_since_plateau = 0
+                    print(f"New learning rate: {optimizer.lr}", flush=True)
+
+                    if batches_since_checkpoint >= 3:
+                        if batches_since_checkpoint >= max_plateau_epochs:
+                            converged = True
+                            print(
+                                f"We have had {batches_since_checkpoint} epochs with no improvement so we give up",
+                                flush=True)
+                        else:
+                            status = "We are in a loss plateau"
+                            print(status, flush=True)
+                            status = "Restoring from a checkpoint"
+                            print(status, flush=True)
+                            batches_since_checkpoint = 0
+                            batches_since_plateau = 0
+
             step += 1
             if step > num_epochs:
                 print("Terminating because we are out of iterations",
