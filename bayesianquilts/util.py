@@ -419,7 +419,7 @@ def batched_minimize(
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss.numpy()]
             losses += [loss.numpy()]
-            deviation = np.abs(avg_losses[-1]-avg_losses[-2])
+            deviation = np.abs(avg_losses[-1]-min_loss)
             rel = deviation / loss
             print(
                 f"Epoch {step}: average-batch loss:"
@@ -480,7 +480,6 @@ def batched_minimize(
                             print(status, flush=True)
                             status = "Restoring from a checkpoint"
                             print(status, flush=True)
-                            batches_since_checkpoint = 0
                             batches_since_plateau = 0
 
             step += 1
