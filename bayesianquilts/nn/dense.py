@@ -67,7 +67,7 @@ class Dense(object):
             net = self.dense(
                 net, self.weight_scale * weights, self.bias_scale * biases, activation
             )
-        net = self.dense(net, self.weight_scale * weights[-1], self.bias_scale * biases[-1], tf.identity)
+        net = self.dense(net, self.weight_scale * weights_list[-1], self.bias_scale * biases_list[-1], tf.identity)
         return net
     
     def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
