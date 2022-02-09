@@ -12,4 +12,4 @@ from .transformed_inversegamma import (
 from .util import FactorizedDistributionMoments
 
 from .generalized_gamma import GeneralizedGamma
-from .peicewise_exponential import PeicewiseExponential
+from .piecewise_exponential import PiecewiseExponential

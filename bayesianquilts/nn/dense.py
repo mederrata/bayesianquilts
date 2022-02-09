@@ -1,4 +1,5 @@
 from abc import abstractmethod
+import numpy as np
 import inspect
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -42,8 +43,10 @@ class Dense(object):
         self.dtype = dtype
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
-        self.activation_fn = tf.nn.relu if (activation_fn is None) else activation_fn
-        self.weight_tensors = self.sample_initial_nn_params(input_size, layer_sizes)
+        self.activation_fn = tf.nn.relu if (
+            activation_fn is None) else activation_fn
+        self.weight_tensors = self.sample_initial_nn_params(
+            input_size, layer_sizes)
 
     def dense(self, X, W, b, activation):
         return activation(
@@ -67,9 +70,10 @@ class Dense(object):
             net = self.dense(
                 net, self.weight_scale * weights, self.bias_scale * biases, activation
             )
-        net = self.dense(net, self.weight_scale * weights_list[-1], self.bias_scale * biases_list[-1], tf.identity)
+        net = self.dense(net, self.weight_scale *
+                         weights_list[-1], self.bias_scale * biases_list[-1], tf.identity)
         return net
-    
+
     def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
         """
         Priors should be either none or a list of tuples:
@@ -81,7 +85,8 @@ class Dense(object):
         if priors is None:
             for j, layer_size in enumerate(layer_sizes[1:]):
                 weights = tfd.Normal(
-                    loc=tf.zeros((layer_sizes[j], layer_size), dtype=self.dtype),
+                    loc=tf.zeros(
+                        (layer_sizes[j], layer_size), dtype=self.dtype),
                     scale=1e-1,
                 ).sample()
                 biases = tfd.Normal(
@@ -127,6 +132,8 @@ class Dense(object):
                     if not isinstance(state[k], tf.dtypes.DType):
                         del state[k]
         return state
+
+
 class DenseHorseshoe(BayesianModel):
     """Dense horseshoe network of given layer sizes
 
@@ -188,12 +195,13 @@ class DenseHorseshoe(BayesianModel):
         bijectors = {}
         var_list = []
         weight_var_list = []
+        initial = {}
         for j, weight in enumerate(self.nn.weight_tensors[::2]):
             var_list += [f"w_{j}"] + [f"b_{j}"]
             weight_var_list += [f"w_{j}"] + [f"b_{j}"]
 
             # Top level priors
-            ## weight
+            # weight
 
             # w ~ Horseshoe(0, w_tau)
             # w_tau ~ cauchy(0, w_tau_scale)
@@ -201,6 +209,11 @@ class DenseHorseshoe(BayesianModel):
             # b_tau ~ cauchy(0, b_tau_scale)
 
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
+            initial[f"w_{j}"] = tf.convert_to_tensor(
+                1e-3*np.random.normal(
+                    np.zeros([self.layer_sizes[j], self.layer_sizes[j+1]]),
+                    np.ones([self.layer_sizes[j], self.layer_sizes[j+1]])
+                ), self.dtype)
 
             distribution_dict[f"w_{j}"] = eval(
                 horseshoe_lambda_code.format(
@@ -208,13 +221,18 @@ class DenseHorseshoe(BayesianModel):
                 )
             )
 
-            ## bias
+            # bias
             bijectors[f"b_{j}"] = tfp.bijectors.Identity()
             distribution_dict[f"b_{j}"] = eval(
                 horseshoe_lambda_code.format(
                     f"b_{j}_tau", f"b_{j}_tau", 1, "tf." + self.dtype.name
                 )
             )
+            initial[f"w_{j}"] = tf.convert_to_tensor(
+                1e-3*np.random.normal(
+                    np.zeros([self.layer_sizes[j+1], ]),
+                    np.ones([self.layer_sizes[j+1], ])
+                ), self.dtype)
 
             # using the auxiliary inverse-gamma parameterization for cauchy vars
 
@@ -262,7 +280,7 @@ class DenseHorseshoe(BayesianModel):
         self.bijectors = bijectors
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
         self.surrogate_distribution = build_surrogate_posterior(
-            self.prior_distribution, bijectors, dtype=self.dtype
+            self.prior_distribution, bijectors, dtype=self.dtype, initializers=initial
         )
         self.var_list = list(self.surrogate_distribution.model.keys())
         self.surrogate_vars = self.surrogate_distribution.variables
@@ -277,10 +295,20 @@ class DenseHorseshoe(BayesianModel):
     @abstractmethod
     def log_likelihood(self, data, **params):
         pass
-    
-    
+
+
 def main():
-    denseH = DenseHorseshoe(10, [20, 12, 2])
+    class AutoEncoder(DenseHorseshoe):
+        def log_likelihood(self, data, **params):
+            return super().log_likelihood(data, **params)
+
+        def predictive_distribution(data, **params):
+            return super().predictive_distribution(**params)
+
+        def unormalized_log_prob(self, data, *args, **kwargs):
+            return super().unormalized_log_prob(data, *args, **kwargs)
+
+    denseH = AutoEncoder(10, [20, 12, 2])
     sample = denseH.prior_distribution.sample(10)
     prob = denseH.log_prob(sample)
     sample2 = denseH.surrogate_distribution.sample(10)
