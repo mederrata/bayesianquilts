@@ -39,14 +39,14 @@ import tensorflow_probability.python.distributions as tfd
 import tensorflow_probability.python.bijectors as tfb
 
 
-class PeicewiseExponential(tfd.Distribution):
+class PiecewiseExponential(tfd.Distribution):
     def __init__(
         self,
         rates,
         breakpoints,
         validate_args=False,
         allow_nan_stats=True,
-        name="PeicewiseExponential",
+        name="PiecewiseExponential",
     ):
 
         parameters = dict(locals())
@@ -57,7 +57,7 @@ class PeicewiseExponential(tfd.Distribution):
                 rates, dtype=dtype, name='rates')
             self._breakpoints = tensor_util.convert_nonref_to_tensor(
                 breakpoints, dtype=dtype, name='breakpoints')
-            super(PeicewiseExponential, self).__init__(
+            super(PiecewiseExponential, self).__init__(
                 dtype=dtype,
                 validate_args=validate_args,
                 allow_nan_stats=allow_nan_stats,
@@ -66,10 +66,20 @@ class PeicewiseExponential(tfd.Distribution):
                 ),
                 parameters=parameters,
                 name=name)
-            
+
         # compute cumulative masses
-        
-        
+        self.hazard_sums = (
+            self._breakpoints[..., 1:] - self._breakpoints[..., :-1]
+        )
+        pass
+
+    @property
+    def rates(self):
+        return self._rates
+
+    @property
+    def breakpoints(self):
+        self._breakpoints
 
     @classmethod
     def _parameter_properties(cls, dtype, num_classes=None):
@@ -85,8 +95,8 @@ class PeicewiseExponential(tfd.Distribution):
 
 
 def demo():
-    pe = PeicewiseExponential(
-        rates=[1, 2, 1], breakpoints=[2, 2])
+    pe = PiecewiseExponential(
+        rates=[1, 2, 1], breakpoints=[2, 8])
     pass
 
 
