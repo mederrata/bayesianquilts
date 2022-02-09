@@ -262,7 +262,7 @@ class DenseHorseshoe(BayesianModel):
         self.bijectors = bijectors
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
         self.surrogate_distribution = build_surrogate_posterior(
-            self.prior_distribution, bijectors, dtype=self.dtype
+            self.prior_distribution, bijectors, dtype=self.dtype, damping=1e-3
         )
         self.var_list = list(self.surrogate_distribution.model.keys())
         self.surrogate_vars = self.surrogate_distribution.variables
