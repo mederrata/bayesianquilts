@@ -931,7 +931,6 @@ def build_surrogate_posterior(
     initializers={},
     strategy=None,
     name=None,
-    damping=1.,
     dtype=tf.float64,
 ):
 
@@ -971,7 +970,7 @@ def build_surrogate_posterior(
             if k in initializers.keys():
                 loc = initializers[k]
             else:
-                loc = means[k]*damping
+                loc = means[k]
             surrogate_dict[k] = bijectors[k](
                 build_trainable_normal_dist(
                     tfb.Invert(bijectors[k])(loc),
