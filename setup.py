@@ -42,8 +42,8 @@ setuptools.setup(
         # We need to check for direct depends or we can delete scipy.
         'scipy',
         'tensorflow==2.6.3',
-        'tensorflow-probability>=0.14.1',
-        'tensorflow-addons>=0.16.1',
+        'tensorflow-probability==0.14.1',
+        'tensorflow-addons==0.16.1',
         'jax',
         'jaxlib',
         'natsort',
