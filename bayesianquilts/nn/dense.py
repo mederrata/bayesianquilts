@@ -209,10 +209,11 @@ class DenseHorseshoe(BayesianModel):
             # b_tau ~ cauchy(0, b_tau_scale)
 
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
-            distribution_dict[f"w_{j}"] = tfd.Horseshoe(
-                scale=tf.ones(
-                    [self.layer_sizes[j], self.layer_sizes[j+1]], dtype=self.dtype)
-            )
+            distribution_dict[f"w_{j}"] = tfd.Independent(
+                tfd.Horseshoe(
+                    scale=tf.ones(
+                        [self.layer_sizes[j], self.layer_sizes[j+1]], dtype=self.dtype)
+                ), reinterpreted_batch_ndims=2)
 
             initial[f"w_{j}"] = tf.convert_to_tensor(
                 1e-3*np.random.normal(
@@ -236,8 +237,10 @@ class DenseHorseshoe(BayesianModel):
             )
             """
 
-            distribution_dict[f"b_{j}"] = tfd.Horseshoe(
-                scale=tf.ones([self.layer_sizes[j+1], ], dtype=self.dtype)
+            distribution_dict[f"b_{j}"] = tfd.Independent(
+                tfd.Horseshoe(
+                    scale=tf.ones([self.layer_sizes[j+1], ], dtype=self.dtype)
+                ), reinterpreted_batch_ndims=1
             )
 
             """
