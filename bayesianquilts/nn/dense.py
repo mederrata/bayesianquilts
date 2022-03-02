@@ -209,31 +209,44 @@ class DenseHorseshoe(BayesianModel):
             # b_tau ~ cauchy(0, b_tau_scale)
 
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
+            distribution_dict[f"w_{j}"] = tfd.Horseshoe(
+                scale=tf.ones(
+                    [self.layer_sizes[j], self.layer_sizes[j+1]], dtype=self.dtype)
+            )
+
             initial[f"w_{j}"] = tf.convert_to_tensor(
                 1e-3*np.random.normal(
                     np.zeros([self.layer_sizes[j], self.layer_sizes[j+1]]),
                     np.ones([self.layer_sizes[j], self.layer_sizes[j+1]])
                 ), self.dtype)
-
+            """
             distribution_dict[f"w_{j}"] = eval(
                 horseshoe_lambda_code.format(
                     f"w_{j}_tau", f"w_{j}_tau", 2, "tf." + self.dtype.name
                 )
             )
-
+            """
             # bias
             bijectors[f"b_{j}"] = tfp.bijectors.Identity()
+            """
             distribution_dict[f"b_{j}"] = eval(
                 horseshoe_lambda_code.format(
                     f"b_{j}_tau", f"b_{j}_tau", 1, "tf." + self.dtype.name
                 )
             )
+            """
+
+            distribution_dict[f"b_{j}"] = tfd.Horseshoe(
+                scale=tf.ones([self.layer_sizes[j+1], ], dtype=self.dtype)
+            )
+
+            """
             initial[f"w_{j}"] = tf.convert_to_tensor(
                 1e-3*np.random.normal(
                     np.zeros([self.layer_sizes[j+1], ]),
                     np.ones([self.layer_sizes[j+1], ])
                 ), self.dtype)
-
+            
             # using the auxiliary inverse-gamma parameterization for cauchy vars
 
             # Scale
@@ -276,7 +289,7 @@ class DenseHorseshoe(BayesianModel):
                     "tf." + self.dtype.name,
                 )
             )
-
+        """
         self.bijectors = bijectors
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
         self.surrogate_distribution = build_surrogate_posterior(
