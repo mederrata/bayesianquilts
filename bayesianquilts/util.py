@@ -449,14 +449,16 @@ def batched_minimize(
                     accepted_batches += 1
                     print(f"Saved a checkpoint: {save_path}", flush=True)
                     batches_since_checkpoint = 0
-                    if deviation < abs_tol:
+                    if (deviation < abs_tol) and (
+                            np.abs((avg_losses[2]-min_loss)) < abs_tol):
                         print(
                             f"Converged in {step} iterations "
                             + "with acceptable absolute tolerance",
                             flush=True
                         )
                         converged = True
-                    elif rel < rel_tol:
+                    elif (rel < rel_tol) and (
+                            (np.abs(avg_losses[2]-min_loss)/loss) < abs_tol):
                         print(
                             f"Converged in {step} iterations with "
                             + "acceptable relative tolerance"
