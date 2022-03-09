@@ -420,7 +420,7 @@ def batched_minimize(
             avg_losses += [loss.numpy()]
             losses += [loss.numpy()]
             deviation = np.abs(avg_losses[-1]-min_loss)
-            rel = deviation / loss
+            rel = np.abs(deviation / loss)
             print(
                 f"Epoch {step}: average-batch loss:"
                 + f"{loss} rel loss: {rel}",
