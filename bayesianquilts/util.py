@@ -931,6 +931,7 @@ def build_surrogate_posterior(
     initializers={},
     strategy=None,
     name=None,
+    gaussian_only=False,
     dtype=tf.float64,
 ):
 
@@ -952,11 +953,11 @@ def build_surrogate_posterior(
             test_distribution = v(**test_input)
         else:
             test_distribution = v
-        if isinstance(
+        if (isinstance(
             test_distribution.distribution, tfd.InverseGamma
         ) or isinstance(
             test_distribution.distribution, SqrtInverseGamma
-        ):
+        )) and not gaussian_only:
             surrogate_dict[k] = bijectors[k](
                 build_trainable_InverseGamma_dist(
                     2.0 * tf.ones(test_distribution.event_shape, dtype=dtype),

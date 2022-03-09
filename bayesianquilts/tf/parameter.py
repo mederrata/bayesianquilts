@@ -138,6 +138,7 @@ class Interactions(object):
 
     def __init__(self, dimensions, exclusions=None) -> None:
         super().__init__()
+        exclusions = [] if exclusions is None else exclusions
         self._dimensions = dimensions
         self._intrinsic_shape = [x[1] for x in self._dimensions]
         self._exclusions = [set(s) for s in exclusions]
@@ -154,7 +155,7 @@ class Interactions(object):
         print(f"exclusions: {self._exclusions}")
 
     def __str__(self):
-        out = f"Interaction dimenions: {self._dimensions}"
+        out = f"Interaction dimensions: {self._dimensions}"
         return out
 
     def retrieve_indices(self, data):
