@@ -167,10 +167,13 @@ class PiecewiseExponential(tfd.Distribution):
 
         """
         value = tf.convert_to_tensor(value)
-        value_batch_shape = value.shape.as_list()
+        try:
+            value_batch_shape = value.shape.as_list()
+        except ValueError:
+            value_batch_shape = []
         if len(value_batch_shape) == 0:
             value = value[tf.newaxis]
-            value_batch_shape = value.shape.as_list()
+            value_batch_shape = []
 
         breakpoint_batch_shape = self._breakpoints.shape.as_list()[:-1]
         rate_batch_shape = self.rates.shape.as_list()[:-1]
@@ -198,12 +201,16 @@ class PiecewiseExponential(tfd.Distribution):
         indices = tf.reduce_sum(
             indicator,
             axis=-1)
+        try:
+            middle_dims = [value_batch_shape[0]]
+        except IndexError:
+            middle_dims = [1]
         hazards = tf.gather_nd(
-            tf.tile(rates, [1, value_batch_shape[0], 1]),
+            tf.tile(rates, [1] + middle_dims + [1]),
             indices[..., tf.newaxis], batch_dims=2
         )
 
-        breakpoints = tf.tile(breakpoints, [1, value_batch_shape[0], 1])
+        breakpoints = tf.tile(breakpoints, [1] +  middle_dims + [1])
         breakpoints = tf.concat(
             [tf.zeros((breakpoints.shape[0], value_batch_shape[0], 1),
                       dtype=breakpoints.dtype), breakpoints],
@@ -230,6 +237,9 @@ class PiecewiseExponential(tfd.Distribution):
         cum, haz = self.cumulative_hazard(value, ret_hazard=True)
 
         return tf.math.log(haz) - cum
+    
+    def _cdf(self, value, name='cdf', **kwargs):
+        return 1.0 - tf.math.exp(self._log_survival_function(value))
     
 
 
