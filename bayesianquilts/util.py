@@ -65,6 +65,7 @@ def minimize_distributed(
     checkpoint_name=None,
     max_initialization_steps=1000,
     clip_value=5.0,
+    training_order=None,
     name="minimize",
     dtype=tf.float64,
     **kwargs,

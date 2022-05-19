@@ -67,10 +67,10 @@ class BayesianModel(ABC):
 
         self.strategy = strategy
         self.dtype = dtype
-        
+
     def fit(self, *args, **kwargs):
         return self._calibrate_advi(*args, **kwargs)
-    
+
     def _calibrate_advi(
         self,
         data_factory,
@@ -85,6 +85,7 @@ class BayesianModel(ABC):
         check_every=1,
         set_expectations=True,
         sample_size=4,
+        trainable_variables=None,
         temp_dir=tempfile.gettempdir(),
         **kwargs
     ):
@@ -105,6 +106,8 @@ class BayesianModel(ABC):
             set_expectations (bool, optional): [description]. Defaults to True.
             sample_size (int, optional): [description]. Defaults to 4.
         """
+        if trainable_variables is None:
+            trainable_variables = self.surrogate_distribution.variables
 
         def run_approximation(num_epochs):
             losses = fit_surrogate_posterior(
@@ -120,7 +123,7 @@ class BayesianModel(ABC):
                 clip_value=clip_value,
                 check_every=check_every,
                 strategy=self.strategy,
-                trainable_variables=self.surrogate_distribution.variables,
+                trainable_variables=trainable_variables,
                 data_factory=data_factory,
             )
             return losses
@@ -144,12 +147,12 @@ class BayesianModel(ABC):
             }
         else:
             self.calibrated_expectations = {
-                k: tf.Variable(tf.reduce_mean(v, axis=0))
+                k: tf.Variable(tf.reduce_mean(v, axis=0, keepdims=True))
                 for k, v in self.surrogate_sample.items()
             }
 
             self.calibrated_sd = {
-                k: tf.Variable(tf.math.reduce_std(v, axis=0))
+                k: tf.Variable(tf.math.reduce_std(v, axis=0, keepdims=True))
                 for k, v in self.surrogate_sample.items()
             }
 
