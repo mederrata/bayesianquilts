@@ -305,3 +305,40 @@ def _kl_ggamma_ggamma(a, b, name=None):
             )-tf.math.lgamma(a_concentration/a_exponent) * tf.math.pow(a_scale/b_scale, b_exponent))
             - a_concentration/a_exponent
         )
+
+
+
+class Weibull(GeneralizedGamma):
+    def __init__(self,
+                 scale, shape,
+                 validate_args=False,
+                 allow_nan_stats=True,
+                 name='Weibull'):
+        parameters = dict(locals())
+        with tf.name_scope(name) as name:
+            dtype = dtype_util.common_dtype(
+                [scale, shape], dtype_hint=tf.float32)
+            self._scale = tensor_util.convert_nonref_to_tensor(
+                scale, dtype=dtype, name='scale')
+            self._shape = tensor_util.convert_nonref_to_tensor(
+                shape, dtype=dtype, name='shape')
+            self._exponent = tensor_util.convert_nonref_to_tensor(
+                shape, dtype=dtype, name='exponent')
+
+            super(GeneralizedGamma, self).__init__(
+                dtype=dtype,
+                validate_args=validate_args,
+                allow_nan_stats=allow_nan_stats,
+                reparameterization_type=(
+                    reparameterization.FULLY_REPARAMETERIZED
+                ),
+                parameters=parameters,
+                name=name)
+
+    @property
+    def scale(self):
+        return self._scale
+
+    @property
+    def shape(self):
+        return self._shape
