@@ -267,13 +267,14 @@ def batched_minimize(
     loss_fn,
     data_factory,
     num_epochs=1000,
-    max_plateau_epochs=6,
+    max_plateau_epochs=3,
     abs_tol=1e-4,
     rel_tol=1e-4,
     trainable_variables=None,
     trace_fn=_trace_loss,
     learning_rate=1.0,
     decay_rate=0.95,
+    max_decay_steps=4,
     checkpoint_name=None,
     processing_fn=None,
     name="minimize",
@@ -471,7 +472,7 @@ def batched_minimize(
                     batches_since_plateau = 0
                     print(f"New learning rate: {optimizer.lr}", flush=True)
 
-                    if batches_since_checkpoint >= 3:
+                    if batches_since_checkpoint >= 2:
                         if batches_since_checkpoint >= max_plateau_epochs:
                             converged = True
                             print(
