@@ -42,6 +42,7 @@ import tensorflow_probability.python.bijectors as tfb
 __all__ = [
     'GeneralizedGamma',
     '_kl_ggamma_ggamma'
+    'Weibull'
 ]
 
 
