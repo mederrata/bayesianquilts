@@ -25,6 +25,8 @@ from tensorflow_probability.python.internal import (dtype_util, prefer_static,
 from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
 
+from tensorflow_probability.python.vi import GradientEstimators 
+
 from bayesianquilts.distributions import SqrtInverseGamma
 
 tfd = tfp.distributions
@@ -821,7 +823,7 @@ build_trainable_normal_dist = functools.partial(
 _reparameterized_elbo = functools.partial(
     csiszar_divergence.monte_carlo_variational_loss,
     discrepancy_fn=csiszar_divergence.kl_reverse,
-    use_reparameterization=True,
+    gradient_estimator=GradientEstimators.REPARAMETERIZATION,
 )
 
 
@@ -830,7 +832,6 @@ def minibatch_mc_variational_loss(
     surrogate_posterior,
     sample_size=1,
     discrepancy_fn=tfp.vi.kl_reverse,
-    use_reparameterization=None,
     seed=None,
     data=None,
     strategy=None,
@@ -844,7 +845,7 @@ def minibatch_mc_variational_loss(
         surrogate_posterior,
         sample_size=sample_size,
         discrepancy_fn=discrepancy_fn,
-        use_reparameterization=use_reparameterization,
+        gradient_estimator=GradientEstimators.REPARAMETERIZATIONn,
         seed=seed,
         name=name,
     )
