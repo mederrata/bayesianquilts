@@ -845,7 +845,7 @@ def minibatch_mc_variational_loss(
         surrogate_posterior,
         sample_size=sample_size,
         discrepancy_fn=discrepancy_fn,
-        gradient_estimator=GradientEstimators.REPARAMETERIZATIONn,
+        gradient_estimator=GradientEstimators.REPARAMETERIZATION,
         seed=seed,
         name=name,
     )
