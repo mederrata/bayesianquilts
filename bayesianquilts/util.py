@@ -950,6 +950,10 @@ def build_surrogate_posterior(
     prior_sample = joint_distribution_named.sample()
     bijectors = defaultdict(tfb.Identity) if bijectors is None else bijectors
     for k, v in joint_distribution_named.model.items():
+        if name is not None:
+            label = f"{name}/{k}"
+        else:
+            label = k
         if k in exclude:
             continue
         if callable(v):
@@ -969,7 +973,7 @@ def build_surrogate_posterior(
                     tf.ones(test_distribution.event_shape, dtype=dtype),
                     len(test_distribution.event_shape),
                     strategy=strategy,
-                    name=name,
+                    name=label,
                 )
             )
         else:
@@ -983,7 +987,7 @@ def build_surrogate_posterior(
                     1e-3 * tf.ones(test_distribution.event_shape, dtype=dtype),
                     len(test_distribution.event_shape),
                     strategy=strategy,
-                    name=name,
+                    name=label,
                 )
             )
     return tfd.JointDistributionNamed(surrogate_dict)
