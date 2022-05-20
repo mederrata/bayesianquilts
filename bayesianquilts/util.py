@@ -495,6 +495,7 @@ def batched_minimize(
                       flush=True)
 
         trace = tf.stack(losses)
+        """
         if initial_trace_step is not None:
             trace = tf.nest.map_structure(
                 lambda a, b: tf.concat(
@@ -503,6 +504,7 @@ def batched_minimize(
                 initial_trace_step,
                 trace,
             )
+        """
         cp_status = checkpoint.restore(manager.latest_checkpoint)
         cp_status.assert_consumed()
         return trace
