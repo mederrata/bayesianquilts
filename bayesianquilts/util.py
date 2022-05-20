@@ -25,7 +25,7 @@ from tensorflow_probability.python.internal import (dtype_util, prefer_static,
 from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
 
-from tensorflow_probability.python.vi import GradientEstimators 
+from tensorflow_probability.python.vi import GradientEstimators
 
 from bayesianquilts.distributions import SqrtInverseGamma
 
@@ -335,7 +335,7 @@ def batched_minimize(
             loss = batch_normalized_loss(data=data)
         watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, watched_variables)
-        grads = tf.nest.pack_sequence_as(
+        adjusted = tf.nest.pack_sequence_as(
             grads,
             tf.clip_by_global_norm(
                 [
@@ -345,14 +345,14 @@ def batched_minimize(
                 clip_value,
             )[0],
         )
-        train_op = opt.apply_gradients(zip(grads, watched_variables))
+        train_op = opt.apply_gradients(zip(adjusted, watched_variables))
         with tf.control_dependencies([train_op]):
             state = trace_fn(
                 tf.identity(loss),
                 [tf.identity(g) for g in grads],
                 [tf.identity(v) for v in watched_variables],
             )
-        return state
+        return state, grads
 
     with tf.name_scope(name) as name:
         # Compute the shape of the trace without executing the graph.
@@ -406,7 +406,8 @@ def batched_minimize(
             for data in data_factory():
                 if processing_fn is not None:
                     data = processing_fn(data)
-                batch_loss = train_loop_body(state_initializer, step, data)
+                batch_loss, grads = train_loop_body(
+                    state_initializer, step, data)
 
                 if np.isfinite(batch_loss.numpy()):
                     batch_losses += [batch_loss.numpy()]
@@ -857,14 +858,18 @@ def fit_surrogate_posterior(
     surrogate_posterior,
     data_factory,
     num_epochs=1000,
+    convergence_criterion=None,
     trace_fn=_trace_loss,
-    variational_loss_fn=_reparameterized_elbo,
-    sample_size=5,
+    variational_loss_fn=None,
+    sample_size=1,
+    importance_sample_size=1,
     check_every=25,
     decay_rate=0.9,
     learning_rate=1.0,
     clip_value=10.0,
     trainable_variables=None,
+    discrepancy_fn=csiszar_divergence.kl_reverse,
+    jit_compile=None,
     seed=None,
     abs_tol=None,
     rel_tol=None,
@@ -875,6 +880,18 @@ def fit_surrogate_posterior(
     if trainable_variables is None:
         trainable_variables = surrogate_posterior.trainable_variables
 
+    if variational_loss_fn is None:
+        variational_loss_fn = functools.partial(
+            csiszar_divergence.monte_carlo_variational_loss,
+            discrepancy_fn=discrepancy_fn,
+            importance_sample_size=importance_sample_size,
+            # Silent fallback to score-function gradients leads to
+            # difficult-to-debug failures, so force reparameterization gradients by
+            # default.
+            gradient_estimator=(
+                csiszar_divergence.GradientEstimators.REPARAMETERIZATION),
+            )
+        
     def complete_variational_loss_fn(data=None):
         """This becomes the loss function called in the
         optimization loop
@@ -984,7 +1001,7 @@ def build_surrogate_posterior(
             surrogate_dict[k] = bijectors[k](
                 build_trainable_normal_dist(
                     tfb.Invert(bijectors[k])(loc),
-                    1e-3 * tf.ones(test_distribution.event_shape, dtype=dtype),
+                    1e-2 * tf.ones(test_distribution.event_shape, dtype=dtype),
                     len(test_distribution.event_shape),
                     strategy=strategy,
                     name=label,
