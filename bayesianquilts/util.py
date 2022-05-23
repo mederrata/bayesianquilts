@@ -59,6 +59,7 @@ def minimize_distributed(
     abs_tol=1e-4,
     rel_tol=1e-4,
     trace_fn=_trace_loss,
+    max_decay_steps=8,
     learning_rate=1.0,
     check_every=25,
     decay_rate=0.95,
@@ -184,8 +185,14 @@ def minimize_distributed(
                                 "Failed to initialize within"
                                 + f" {max_initialization_steps} steps"
                             )
+                        if decay_step > max_decay_steps:
+                            converged = True
+                            continue
                     else:
                         decay_step += 1
+                        if decay_step > max_decay_steps:
+                            converged = True
+                            continue
 
                     epoch += 1
                     cp_status.assert_consumed()
@@ -270,14 +277,14 @@ def batched_minimize(
     loss_fn,
     data_factory,
     num_epochs=1000,
-    max_plateau_epochs=10,
+    max_plateau_epochs=8,
     abs_tol=1e-4,
     rel_tol=1e-4,
     trainable_variables=None,
     trace_fn=_trace_loss,
     learning_rate=1.0,
     decay_rate=0.95,
-    max_decay_steps=10,
+    max_decay_steps=8,
     checkpoint_name=None,
     processing_fn=None,
     name="minimize",
@@ -420,6 +427,9 @@ def batched_minimize(
                     batch_loss = train_loop_body(
                         state_initializer, step, data)
                     decay_step += 1
+                    if decay_step > max_decay_steps:
+                        converged = True
+                        continue
 
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss.numpy()]
@@ -442,9 +452,12 @@ def batched_minimize(
                     cp_status.assert_consumed()
                     print("Epoch loss NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
+
+                    if decay_step > max_decay_steps:
+                        converged = True
+                        continue
                     print(f"New learning rate: {optimizer.lr}", flush=True)
                     continue
-
                 if losses[-1] < min_loss:
                     """
                     Save a checkpoint
@@ -473,6 +486,9 @@ def batched_minimize(
                 else:
                     batches_since_checkpoint += 1
                     decay_step += 1
+                    if decay_step > max_decay_steps:
+                        converged = True
+                        continue
                     batches_since_plateau = 0
                     print(f"New learning rate: {optimizer.lr}", flush=True)
 
