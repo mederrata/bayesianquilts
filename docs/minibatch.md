@@ -7,7 +7,7 @@ $$
 \begin{align}
     L(\xi|D) &= D_{KL}(q(\theta|\xi)|P(\theta)) - \mathbb{E}_q \log P(D| \theta) \nonumber \\
     &= D_{KL}(q(\theta|\xi)|P(\theta)) - \sum_{n=1}^N \mathbb{E}_q \log P(D_n| \theta)  \nonumber \\
-    &= \sum_{b=1}^N  \underbrace{\left(\frac{1}{N}D_{KL}(q(\theta|\xi)|P(\theta)) -  \mathbb{E}_q \log P(D_n| \theta) \right)}_{\textrm{elbo}_n}
+    &= \sum_{n=1}^N  \underbrace{\left(\frac{1}{N}D_{KL}(q(\theta|\xi)|P(\theta)) -  \mathbb{E}_q \log P(D_n| \theta) \right)}_{\textrm{elbo}_n}
 \end{align}
 $$
 
@@ -20,9 +20,13 @@ $$
 and approximate $\textrm{elbo}_n$ using a general expression
 
 $$
-\textrm{elbo}_n \approx \sum_{k=1}^K w_k\left[ \frac{1}{N} \frac{\log q(\theta_k|\xi)}{P(\theta_k)}  - \log P(D_n | \theta_k)\right],
+\textrm{elbo}_n \approx \sum_{k=1}^K w_k\left[ \frac{1}{N} \log\frac{ q(\theta_k|\xi)}{P(\theta_k)}  - \log P(D_n | \theta_k)\right],
 $$
-where $w_k$ are importance weights.
+where $w_k$ are importance weights. If we are able to exactly compute the entropy of the proposal density, then
+
+$$
+\textrm{elbo}_n \approx \frac{1}{N} S[q(\theta|\xi)] -\sum_{k=1}^K w_k\left[ \frac{1}{N} \log P(\theta_k)  + \log P(D_n | \theta_k)\right],
+$$
 
 # TFP's built-in routines
 
