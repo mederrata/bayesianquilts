@@ -1,6 +1,6 @@
 
 
-Let $q(w|\theta)$ be a joint probability distribution on parameters $w$ conditional on internal parameters $\theta$. The negative ELBO is:
+Let $q(\theta|\xi)$ be a joint probability distribution on parameters $\theta$ conditional on internal parameters $\xi$, that we will use to approximate the posterior distribution $P(\theta | D)$. The ELBO is:
 
 
 $$
@@ -25,7 +25,7 @@ $$
 where $w_k$ are importance weights. If we are able to exactly compute the entropy of the proposal density, then
 
 $$
-\textrm{elbo}_n \approx \frac{1}{N} S[q(\theta|\xi)] -\sum_{k=1}^K w_k\left[ \frac{1}{N} \log P(\theta_k)  + \log P(D_n | \theta_k)\right],
+\textrm{elbo}_n \approx -\frac{1}{N} S[q(\theta|\xi)] -\sum_{k=1}^K w_k\left[ \frac{1}{N} \log P(\theta_k)  + \log P(D_n | \theta_k)\right],
 $$
 
 # TFP's built-in routines

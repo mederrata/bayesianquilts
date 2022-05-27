@@ -27,10 +27,11 @@ from bentoml.service.artifacts import BentoServiceArtifact
 
 from bayesianquilts.util import (
     clip_gradients,
-    fit_surrogate_posterior,
     run_chain,
     tf_data_cardinality,
 )
+from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
+
 from bayesianquilts.distributions import FactorizedDistributionMoments
 
 
@@ -69,11 +70,16 @@ class BayesianModel(ABC):
         self.dtype = dtype
 
     def fit(self, *args, **kwargs):
-        return self._calibrate_advi(*args, **kwargs)
+        return self._calibrate_minibatch_advi(*args, **kwargs)
 
-    def _calibrate_advi(
+    def _calibrate_advi(self):
+        pass
+
+    def _calibrate_minibatch_advi(
         self,
-        data_factory,
+        batched_data_factory,
+        batch_size,
+        dataset_size,
         num_epochs=100,
         learning_rate=0.1,
         opt=None,
@@ -110,9 +116,11 @@ class BayesianModel(ABC):
             trainable_variables = self.surrogate_distribution.variables
 
         def run_approximation(num_epochs):
-            losses = fit_surrogate_posterior(
+            losses = minibatch_fit_surrogate_posterior(
                 target_log_prob_fn=self.unormalized_log_prob,
                 surrogate_posterior=self.surrogate_distribution,
+                dataset_size=dataset_size,
+                batch_size=batch_size,
                 num_epochs=num_epochs,
                 sample_size=sample_size,
                 learning_rate=learning_rate,
@@ -124,7 +132,7 @@ class BayesianModel(ABC):
                 check_every=check_every,
                 strategy=self.strategy,
                 trainable_variables=trainable_variables,
-                data_factory=data_factory,
+                batched_data_factory=batched_data_factory,
             )
             return losses
 
@@ -332,12 +340,12 @@ class BayesianModel(ABC):
         state["strategy"] = None
         return state
 
-    def unormalized_log_prob_list(self, data, params):
+    def unormalized_log_prob_list(self, data, params, prior_weight=1):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
-        return self.unormalized_log_prob(data, **dict_params)
+        return self.unormalized_log_prob(data=data, prior_weight=prior_weight, **dict_params)
 
     @abstractmethod
-    def unormalized_log_prob(self, data, *args, **kwargs):
+    def unormalized_log_prob(self, data, prior_weight=1., *args, **kwargs):
         """Generic method for the unormalized log probability function"""
         return
 

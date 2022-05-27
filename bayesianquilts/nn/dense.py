@@ -14,14 +14,16 @@ from bayesianquilts.metastrings import (
 from bayesianquilts.util import (
     clip_gradients,
     run_chain,
-    build_trainable_InverseGamma_dist,
-    build_trainable_normal_dist,
-    build_surrogate_posterior,
+
 )
 from bayesianquilts.distributions import SqrtInverseGamma
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.metastrings import horseshoe_code, horseshoe_lambda_code
-
+from bayesianquilts.vi.advi import  (
+    build_trainable_InverseGamma_dist,
+    build_trainable_normal_dist,
+    build_surrogate_posterior,
+)
 tfd = tfp.distributions
 
 

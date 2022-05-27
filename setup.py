@@ -10,7 +10,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="bayesianquilts",
-    version="0.0.9",
+    version="0.1.0",
     author="mederrata",
     author_email="info@mederrata.com",
     description="Quilting a Bayesian Hierarchical model to mimic relu neural networks",
@@ -27,12 +27,12 @@ setuptools.setup(
     },
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: Closed",
+        "License :: MIT",
         "Operating System :: Linux",
     ],
     scripts=[
     ],
-    python_requires='>=3.6',
+    python_requires='>=3.9',
     install_requires=[
         'dill',
         'matplotlib',
