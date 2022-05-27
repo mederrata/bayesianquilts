@@ -77,11 +77,6 @@ def minimize_distributed(
 
     with strategy.scope():
 
-        def batch_normalized_loss(data):
-            N = tf.shape(tf.nest.flatten(data)[0])[0]
-            loss = loss_fn(data=data)
-            return loss / tf.cast(N, loss.dtype)
-
         train_dist_dataset = strategy.experimental_distribute_dataset(
             data_factory())
         iterator = iter(train_dist_dataset)
@@ -113,7 +108,7 @@ def minimize_distributed(
         @tf.function
         def train_step(data):
             with tf.GradientTape() as tape:
-                loss = batch_normalized_loss(data=data)
+                loss = loss_fn(data=data)
                 gradients = tape.gradient(loss, trainable_variables)
                 gradients = tf.nest.pack_sequence_as(
                     gradients,
@@ -275,9 +270,9 @@ def minimize_distributed(
 
 def batched_minimize(
     loss_fn,
-    data_factory,
+    batched_data_factory,
     num_epochs=1000,
-    max_plateau_epochs=8,
+    max_plateau_epochs=10,
     abs_tol=1e-4,
     rel_tol=1e-4,
     trainable_variables=None,
@@ -309,12 +304,6 @@ def batched_minimize(
 
     opt = tfa.optimizers.Lookahead(optimizer)
 
-    # @tf.function
-    def batch_normalized_loss(data):
-        N = tf.shape(tf.nest.flatten(data)[0])[0]
-        loss = loss_fn(data=data)
-        return loss / tf.cast(N, loss.dtype)
-
     watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
@@ -333,13 +322,13 @@ def batched_minimize(
     def train_loop_body(old_result, step, data=None):
         """Run a single optimization step."""
         if data is None:
-            data = next(iter(data_factory()))
+            data = next(iter(batched_data_factory()))
         with tf.GradientTape(
             watch_accessed_variables=trainable_variables is None
         ) as tape:
             for v in trainable_variables or []:
                 tape.watch(v)
-            loss = batch_normalized_loss(data=data)
+            loss = loss_fn(data=data)
         watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, watched_variables)
         adjusted = tf.nest.pack_sequence_as(
@@ -410,7 +399,7 @@ def batched_minimize(
         num_resets = 0
         while (step < num_epochs) and not converged:
             batch_losses = []
-            for data in data_factory():
+            for data in batched_data_factory():
                 if processing_fn is not None:
                     data = processing_fn(data)
                 batch_loss, grads = train_loop_body(
@@ -634,136 +623,6 @@ def run_chain(
     return chain_state, sampler_stat
 
 
-def build_trainable_concentration_scale_distribution(
-    initial_concentration,
-    initial_scale,
-    event_ndims,
-    distribution_fn=tfd.InverseGamma,
-    validate_args=False,
-    strategy=None,
-    name=None,
-):
-    """Builds a variational distribution from a location-scale family.
-    Args:
-      initial_concentration: Float `Tensor` initial concentration.
-      initial_scale: Float `Tensor` initial scale.
-      event_ndims: Integer `Tensor` number of event dimensions
-        in `initial_concentration`.
-      distribution_fn: Optional constructor for a `tfd.Distribution` instance
-        in a location-scale family. This should have signature `dist =
-        distribution_fn(loc, scale, validate_args)`.
-        Default value: `tfd.Normal`.
-      validate_args: Python `bool`. Whether to validate input with asserts.
-        This imposes a runtime cost. If `validate_args` is `False`, and the
-        inputs are invalid, correct behavior is not guaranteed.
-        Default value: `False`.
-      name: Python `str` name prefixed to ops created by this function.
-        Default value: `None` (i.e.,
-          'build_trainable_location_scale_distribution').
-    Returns:
-      posterior_dist: A `tfd.Distribution` instance.
-    """
-    scope = (
-        strategy.scope()
-        if strategy is not None
-        else tf.name_scope(
-            name or "build_trainable_concentration_scale_distribution")
-    )
-    with scope:
-        dtype = dtype_util.common_dtype(
-            [initial_concentration, initial_scale], dtype_hint=tf.float64
-        )
-        initial_concentration = tf.cast(initial_concentration, dtype=dtype)
-        initial_scale = tf.cast(initial_scale, dtype=dtype)
-
-        loc = TransformedVariable(
-            initial_concentration,
-            softplus_lib.Softplus(),
-            scope=scope,
-            name="concentration",
-        )
-        scale = TransformedVariable(
-            initial_scale, softplus_lib.Softplus(), scope=scope, name="scale"
-        )
-        posterior_dist = distribution_fn(
-            concentration=loc, scale=scale, validate_args=validate_args
-        )
-
-        # Ensure the distribution has the desired number of event dimensions.
-        static_event_ndims = tf.get_static_value(event_ndims)
-        if static_event_ndims is None or static_event_ndims > 0:
-            posterior_dist = tfd.Independent(
-                posterior_dist,
-                reinterpreted_batch_ndims=event_ndims,
-                validate_args=validate_args,
-            )
-
-    return posterior_dist
-
-
-def build_trainable_location_scale_distribution(
-    initial_loc,
-    initial_scale,
-    event_ndims,
-    distribution_fn=tfd.Normal,
-    validate_args=False,
-    strategy=None,
-    name=None,
-):
-    """Builds a variational distribution from a location-scale family.
-    Args:
-      initial_loc: Float `Tensor` initial location.
-      initial_scale: Float `Tensor` initial scale.
-      event_ndims: Integer `Tensor` number of event dimensions
-                    in `initial_loc`.
-      distribution_fn: Optional constructor for a `tfd.Distribution` instance
-        in a location-scale family. This should have signature `dist =
-        distribution_fn(loc, scale, validate_args)`.
-        Default value: `tfd.Normal`.
-      validate_args: Python `bool`. Whether to validate input with asserts.
-        This
-        imposes a runtime cost. If `validate_args` is `False`, and the inputs are
-        invalid, correct behavior is not guaranteed.
-        Default value: `False`.
-      name: Python `str` name prefixed to ops created by this function.
-        Default value: `None` (i.e.,
-          'build_trainable_location_scale_distribution').
-    Returns:
-      posterior_dist: A `tfd.Distribution` instance.
-    """
-    scope = (
-        strategy.scope()
-        if strategy is not None
-        else tf.name_scope(
-            name or "build_trainable_location_scale_distribution")
-    )
-    with scope:
-        dtype = dtype_util.common_dtype(
-            [initial_loc, initial_scale], dtype_hint=tf.float32
-        )
-        initial_loc = tf.convert_to_tensor(initial_loc, dtype=dtype)
-        initial_scale = tf.convert_to_tensor(initial_scale, dtype=dtype)
-
-        loc = tf.Variable(initial_value=initial_loc, name="loc")
-        scale = TransformedVariable(
-            initial_scale, softplus_lib.Softplus(), scope=scope, name="scale"
-        )
-        posterior_dist = distribution_fn(
-            loc=loc, scale=scale, validate_args=validate_args
-        )
-
-        # Ensure the distribution has the desired number of event dimensions.
-        static_event_ndims = tf.get_static_value(event_ndims)
-        if static_event_ndims is None or static_event_ndims > 0:
-            posterior_dist = tfd.Independent(
-                posterior_dist,
-                reinterpreted_batch_ndims=event_ndims,
-                validate_args=validate_args,
-            )
-
-    return posterior_dist
-
-
 class TransformedVariable(tfp_util.TransformedVariable):
     def __init__(
         self, initial_value, bijector, dtype=None, scope=None, name=None, **kwargs
@@ -832,202 +691,6 @@ class TransformedVariable(tfp_util.TransformedVariable):
         self._bijector = bijector
 
 
-build_trainable_InverseGamma_dist = functools.partial(
-    build_trainable_concentration_scale_distribution, distribution_fn=tfd.InverseGamma
-)
-
-build_trainable_normal_dist = functools.partial(
-    build_trainable_location_scale_distribution, distribution_fn=tfd.Normal
-)
-
-_reparameterized_elbo = functools.partial(
-    csiszar_divergence.monte_carlo_variational_loss,
-    discrepancy_fn=csiszar_divergence.kl_reverse,
-    gradient_estimator=GradientEstimators.REPARAMETERIZATION,
-)
-
-
-def minibatch_mc_variational_loss(
-    target_log_prob_fn,
-    surrogate_posterior,
-    sample_size=1,
-    discrepancy_fn=tfp.vi.kl_reverse,
-    seed=None,
-    data=None,
-    strategy=None,
-    name=None,
-    **kwargs
-):
-    _target_log_prob_fn = functools.partial(target_log_prob_fn, data=data)
-
-    return tfp.vi.monte_carlo_variational_loss(
-        _target_log_prob_fn,
-        surrogate_posterior,
-        sample_size=sample_size,
-        discrepancy_fn=discrepancy_fn,
-        gradient_estimator=GradientEstimators.REPARAMETERIZATION,
-        seed=seed,
-        name=name,
-    )
-
-
-def fit_surrogate_posterior(
-    target_log_prob_fn,
-    surrogate_posterior,
-    data_factory,
-    num_epochs=1000,
-    convergence_criterion=None,
-    trace_fn=_trace_loss,
-    variational_loss_fn=None,
-    sample_size=1,
-    importance_sample_size=1,
-    check_every=25,
-    decay_rate=0.9,
-    learning_rate=1.0,
-    clip_value=10.0,
-    trainable_variables=None,
-    discrepancy_fn=csiszar_divergence.kl_reverse,
-    jit_compile=None,
-    seed=None,
-    abs_tol=None,
-    rel_tol=None,
-    strategy=None,
-    name=None,
-    **kwargs,
-):
-    if trainable_variables is None:
-        trainable_variables = surrogate_posterior.trainable_variables
-
-    if variational_loss_fn is None:
-        variational_loss_fn = functools.partial(
-            csiszar_divergence.monte_carlo_variational_loss,
-            discrepancy_fn=discrepancy_fn,
-            importance_sample_size=importance_sample_size,
-            # Silent fallback to score-function gradients leads to
-            # difficult-to-debug failures, so force reparameterization gradients by
-            # default.
-            gradient_estimator=(
-                csiszar_divergence.GradientEstimators.REPARAMETERIZATION),
-            )
-        
-    def complete_variational_loss_fn(data=None):
-        """This becomes the loss function called in the
-        optimization loop
-
-        Keyword Arguments:
-            data {tf.data.Datasets batch} -- [description] (default: {None})
-
-        Returns:
-            [type] -- [description]
-        """
-        return minibatch_mc_variational_loss(
-            target_log_prob_fn,
-            surrogate_posterior,
-            sample_size=sample_size,
-            data=data,
-            seed=seed,
-            strategy=strategy,
-            name=name,
-            **kwargs,
-        )
-
-    if strategy is None:
-        return batched_minimize(
-            complete_variational_loss_fn,
-            data_factory=data_factory,
-            num_epochs=num_epochs,
-            trace_fn=trace_fn,
-            learning_rate=learning_rate,
-            trainable_variables=trainable_variables,
-            abs_tol=abs_tol,
-            rel_tol=rel_tol,
-            clip_value=clip_value,
-            decay_rate=decay_rate,
-            check_every=check_every,
-            **kwargs,
-        )
-    else:
-        return minimize_distributed(
-            complete_variational_loss_fn,
-            data_factory=data_factory,
-            num_epochs=num_epochs,
-            trace_fn=trace_fn,
-            learning_rate=learning_rate,
-            trainable_variables=trainable_variables,
-            abs_tol=abs_tol,
-            rel_tol=rel_tol,
-            decay_rate=decay_rate,
-            check_every=check_every,
-            strategy=strategy,
-            **kwargs,
-        )
-
-
-def build_surrogate_posterior(
-    joint_distribution_named,
-    bijectors=None,
-    exclude=[],
-    num_samples=25,
-    initializers={},
-    strategy=None,
-    name=None,
-    gaussian_only=False,
-    dtype=tf.float64,
-):
-
-    prior_sample = joint_distribution_named.sample(int(num_samples))
-    surrogate_dict = {}
-    means = {
-        k: tf.cast(tf.reduce_mean(v, axis=0), dtype=dtype)
-        for k, v in prior_sample.items()
-    }
-
-    prior_sample = joint_distribution_named.sample()
-    bijectors = defaultdict(tfb.Identity) if bijectors is None else bijectors
-    for k, v in joint_distribution_named.model.items():
-        if name is not None:
-            label = f"{name}/{k}"
-        else:
-            label = k
-        if k in exclude:
-            continue
-        if callable(v):
-            test_input = {a: prior_sample[a]
-                          for a in inspect.getfullargspec(v).args}
-            test_distribution = v(**test_input)
-        else:
-            test_distribution = v
-        if (isinstance(
-            test_distribution.distribution, tfd.InverseGamma
-        ) or isinstance(
-            test_distribution.distribution, SqrtInverseGamma
-        )) and not gaussian_only:
-            surrogate_dict[k] = bijectors[k](
-                build_trainable_InverseGamma_dist(
-                    2.0 * tf.ones(test_distribution.event_shape, dtype=dtype),
-                    tf.ones(test_distribution.event_shape, dtype=dtype),
-                    len(test_distribution.event_shape),
-                    strategy=strategy,
-                    name=label,
-                )
-            )
-        else:
-            if k in initializers.keys():
-                loc = initializers[k]
-            else:
-                loc = means[k]
-            surrogate_dict[k] = bijectors[k](
-                build_trainable_normal_dist(
-                    tfb.Invert(bijectors[k])(loc),
-                    1e-2 * tf.ones(test_distribution.event_shape, dtype=dtype),
-                    len(test_distribution.event_shape),
-                    strategy=strategy,
-                    name=label,
-                )
-            )
-    return tfd.JointDistributionNamed(surrogate_dict)
-
-
 def tf_data_cardinality(tf_dataset):
     _have_cardinality = False
     up = tf_dataset
@@ -1051,60 +714,3 @@ def tf_data_cardinality(tf_dataset):
         card = num_elements
     return card
 
-
-def build_trainable_concentration_distribution(
-    initial_concentration,
-    event_ndims,
-    distribution_fn=tfd.Dirichlet,
-    validate_args=False,
-    strategy=None,
-    name=None,
-):
-    """Builds a variational distribution from a location-scale family.
-    Args:
-      initial_concentration: Float `Tensor` initial concentration.
-      event_ndims: Integer `Tensor` number of event dimensions
-        in `initial_concentration`.
-      distribution_fn: Optional constructor for a `tfd.Distribution` instance
-        in a location-scale family. This should have signature `dist =
-        distribution_fn(loc, scale, validate_args)`.
-        Default value: `tfd.Normal`.
-      validate_args: Python `bool`. Whether to validate input with asserts.
-        This imposes a runtime cost. If `validate_args` is `False`, and the
-        inputs are invalid, correct behavior is not guaranteed.
-        Default value: `False`.
-      name: Python `str` name prefixed to ops created by this function.
-        Default value: `None` (i.e.,
-          'build_trainable_location_scale_distribution').
-    Returns:
-      posterior_dist: A `tfd.Distribution` instance.
-    """
-    scope = (
-        strategy.scope()
-        if strategy is not None
-        else tf.name_scope(name or "build_trainable_concentration_distribution")
-    )
-    with scope:
-        dtype = dtype_util.common_dtype(
-            [initial_concentration], dtype_hint=tf.float32)
-
-        loc = TransformedVariable(
-            initial_concentration,
-            softplus_lib.Softplus(),
-            scope=scope,
-            name="concentration",
-        )
-
-        posterior_dist = distribution_fn(
-            concentration=loc, validate_args=validate_args)
-
-        # Ensure the distribution has the desired number of event dimensions.
-        static_event_ndims = tf.get_static_value(event_ndims)
-        if static_event_ndims is None or static_event_ndims > 0:
-            posterior_dist = tfd.Independent(
-                posterior_dist,
-                reinterpreted_batch_ndims=event_ndims,
-                validate_args=validate_args,
-            )
-
-    return posterior_dist
