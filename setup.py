@@ -43,7 +43,7 @@ setuptools.setup(
         'scipy',
         'tensorflow>=2.8.1',
         'tensorflow-probability==0.16.0',
-        'tensorflow-addons==0.16.1',
+        'tensorflow-addons==0.17.0',
         'jax',
         'jaxlib',
         'natsort',
