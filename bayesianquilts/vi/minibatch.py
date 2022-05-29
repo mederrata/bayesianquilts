@@ -36,7 +36,7 @@ def minibatch_mc_variational_loss(
     dataset_size,
     batch_size,
     sample_size=1,
-    importance_weight=True,
+    importance_weight=False,
     seed=None,
     data=None,
     name=None,
@@ -68,8 +68,8 @@ def minibatch_mc_variational_loss(
     elbo_samples = q_lp * batch_size/dataset_size - penalized_like
     if not importance_weight:
         return tf.reduce_mean(elbo_samples)
-    mean_val = tf.reduce_mean(penalized_like-q_lp)
-    weights = tf.exp(penalized_like-q_lp-mean_val)
+    max_val = tf.reduce_mean(penalized_like-q_lp)
+    weights = tf.exp(penalized_like-q_lp-max_val)
     
     weights = weights/tf.reduce_sum(weights)
     elbo = tf.reduce_sum(elbo_samples * weights)
