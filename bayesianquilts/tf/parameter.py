@@ -183,11 +183,11 @@ class Decomposed(object):
     def __init__(
         self,
         interactions,
-        param_shape=[],
+        param_shape=None,
         default_val=None,
+        implicit=True,
         dtype=tf.float32,
         name="",
-        *args,
         **kwargs,
     ) -> None:
 
@@ -201,7 +201,10 @@ class Decomposed(object):
         self._interaction_shape = interactions.shape()
         self._intrinsic_shape = self._interaction_shape + param_shape
         self._dtype = dtype
+        self._implicit = implicit
         self._name = name
+        if param_shape is None:
+            param_shape = []
         self._param_shape = param_shape
         (
             self._tensor_parts,
@@ -270,12 +273,16 @@ class Decomposed(object):
             residual = tf.add_n(broadcast_tensors([residual, -1.0 * value]))
             t_shape = value.shape.as_list()[batch_ndims:]
             tensor_shapes[self._name + "__" + interaction_name] = t_shape
+            interaction_cats = np.prod(t_shape[: (-len(self._param_shape))])
             value = tf.reshape(
                 value,
                 batch_shape
-                + [np.prod(t_shape[: (-len(self._param_shape))])]
+                + [interaction_cats]
                 + self._param_shape,
             )
+            if self._implicit and (interaction_cats > 1):
+                if len(self._param_shape)
+                value = value[..., 1:, :]
             tensors[self._name + "__" + interaction_name] = value
 
         return tensors, tensor_names, tensor_shapes
@@ -481,7 +488,7 @@ class Decomposed(object):
 
     def shape(self):
         return self._intrinsic_shape
-    
+
     def retrieve_indices(self, data):
         return self._interactions.retrieve_indices(data)
 
