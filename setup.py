@@ -32,7 +32,7 @@ setuptools.setup(
     ],
     scripts=[
     ],
-    python_requires='>=3.10',
+    python_requires='>=3.9',
     install_requires=[
         'dill',
         'matplotlib',

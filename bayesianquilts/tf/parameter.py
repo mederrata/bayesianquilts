@@ -204,7 +204,9 @@ class Decomposed(object):
         self._implicit = implicit
         self._name = name
         if param_shape is None:
-            param_shape = []
+            param_shape = [1]
+        if len(param_shape) > 5:
+            raise NotImplementedError("Param dimensions > 5 are not supported")
         self._param_shape = param_shape
         (
             self._tensor_parts,
@@ -281,8 +283,16 @@ class Decomposed(object):
                 + self._param_shape,
             )
             if self._implicit and (interaction_cats > 1):
-                if len(self._param_shape)
-                value = value[..., 1:, :]
+                if len(self._param_shape) == 1:
+                    value = value[..., 1:, :]
+                elif len(self._param_shape) == 2:
+                    value = value[..., 1:, :, :]
+                elif len(self._param_shape) == 3:
+                    value = value[..., 1:, :, :, :]
+                elif len(self._param_shape) == 4:
+                    value = value[..., 1:, :, :, :, :],
+                elif len(self._param_shape) == 5:
+                    value = value[..., 1:, :, :, :, :, :]
             tensors[self._name + "__" + interaction_name] = value
 
         return tensors, tensor_names, tensor_shapes
@@ -375,6 +385,13 @@ class Decomposed(object):
                 continue
             from_shape = batch_shape + self._tensor_part_shapes[k]
             to_shape = batch_shape + self.shape()
+            # pad interaction dimension with leading zeros
+            if self._implicit and (np.prod(part_interact_shape)>1):
+                
+                v = tf.pad(
+                    v, [[0, 0]]*len(batch_shape) + [[1, 0]] +
+                    [[0, 0]]*len(self._param_shape), "CONSTANT"
+                )
             v_ = ravel_broadcast_tile(
                 v, from_shape, to_shape, param_ndims=len(self._param_shape))
             partial_sum += self.scales[k] * v_
@@ -391,7 +408,7 @@ class Decomposed(object):
     def __str__(self):
         out = f"Parameter shape: {self._param_shape} \n"
         out += f"{self._interactions} \n"
-        out += f"Component tensors: {len(self._param_tensors.keys())} \n"
+        out += f"Component tensors: {len(self._tensor_parts.keys())} \n"
         out += f"Effective parameter cardinality: {np.prod(self._intrinsic_shape)} \n"
         out += f"Actual parameter cardinality: {sum([np.prod(t) for t in self._tensor_part_shapes.values()])}\n"
         return out
@@ -527,6 +544,7 @@ def main():
     t, n, s = p.generate_tensors(batch_shape=[4])
     out = p.sum_parts(t)
     r = p.lookup(indices, t)
+    pass
 
 
 if __name__ == "__main__":
