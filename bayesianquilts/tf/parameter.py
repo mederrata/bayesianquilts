@@ -510,7 +510,7 @@ class Decomposed(object):
         return self._interactions.retrieve_indices(data)
 
 
-def main():
+def demo():
 
     v = tf.ones([10, 2, 2])
     from_shape = [10, 1, 1, 1, 1, 1, 1, 2, 2]
@@ -531,7 +531,7 @@ def main():
 
     interact = Interactions(dims, exclusions=exclusions)
     print(interact)
-    p = Decomposed(interactions=interact, param_shape=[100], name="beta")
+    p = Decomposed(interactions=interact, param_shape=[100], name="beta", implicit=True)
     print(p)
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],
@@ -539,13 +539,14 @@ def main():
         [0, 0, 0, 1, 0, 1, 1, 1],
         [0, 0, 13, 1, 0, 1, 1, 0],
         [0, 0, 13, 0, 0, 1, 1, 1],
+        [0, 1, 13, 0, 0, 1, 0, 1],
     ]
 
     t, n, s = p.generate_tensors(batch_shape=[4])
     out = p.sum_parts(t)
     r = p.lookup(indices, t)
-    pass
+    return None
 
 
 if __name__ == "__main__":
-    main()
+    demo()
