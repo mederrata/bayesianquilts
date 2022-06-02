@@ -369,8 +369,8 @@ class BayesianModel(ABC):
             return self.surrogate_distribution.sample()
         return self.surrogate_distribution.sample(batch_shape)
 
-    def to_arviz(self, data=None):
-        sample_stats = self.sample_stats(data=data)
+    def to_arviz(self, data_factory=None):
+        sample_stats = self.sample_stats(data_factory=data_factory)
         params = sample_stats["params"]
 
         idict = {
