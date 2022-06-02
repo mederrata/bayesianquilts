@@ -512,7 +512,8 @@ def batched_minimize(
         """
         cp_status = checkpoint.restore(manager.latest_checkpoint)
         cp_status.assert_consumed()
-        return trace, manager.latest_checkpoint
+        trace.latest_checkpoint = manager.latest_checkpoint
+        return trace
 
 
 def clip_gradients(fn, clip_value, dtype=tf.float64):
