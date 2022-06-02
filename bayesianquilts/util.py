@@ -512,6 +512,7 @@ def batched_minimize(
         """
         cp_status = checkpoint.restore(manager.latest_checkpoint)
         cp_status.assert_consumed()
+        trace.latest_checkpoint = manager.latest_checkpoint
         return trace
 
 

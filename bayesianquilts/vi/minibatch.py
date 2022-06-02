@@ -58,7 +58,7 @@ def minibatch_mc_variational_loss(
     Returns:
         _type_: _description_
     """
-
+    
     q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
         [sample_size], seed=seed)
 
