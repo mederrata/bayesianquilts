@@ -715,3 +715,11 @@ def tf_data_cardinality(tf_dataset):
         card = num_elements
     return card
 
+
+@tf.function
+def split_tensor(tensor, num_parts, axis=0):
+    max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
+    bulk = tensor[:max_divisor*num_parts, ...]
+    remainder = tensor[max_divisor*num_parts:, ...]
+    bulk = tf.split(bulk, num_parts, axis=axis)
+    return bulk + [remainder]
