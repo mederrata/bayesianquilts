@@ -376,7 +376,7 @@ class BayesianModel(ABC):
         idict = {
             "posterior": dict_to_dataset(params),
             "sample_stats": dict_to_dataset(
-                {"log_likelihood": sample_stats["log_likelihood"].numpy().T}
+                {"log_likelihood": sample_stats["log_likelihood"].T}
             ),
         }
 
