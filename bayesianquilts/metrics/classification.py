@@ -1,6 +1,7 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
 
+
 def accuracy(probs, labels, n_thresholds=200):
     thresholds = tf.cast(tf.linspace(0, 1, n_thresholds), probs.dtype)
     decisions = probs[tf.newaxis, :] - thresholds[:, tf.newaxis] > 0
@@ -34,4 +35,4 @@ def accuracy(probs, labels, n_thresholds=200):
 
 
 def auc(x, y):
-    return tfp.math.trapz(x, y)
+    return tfp.math.trapz(x=x, y=y)
