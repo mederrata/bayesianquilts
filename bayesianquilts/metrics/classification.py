@@ -5,12 +5,12 @@ def accuracy(probs, labels, n_thresholds=200):
     thresholds = tf.cast(tf.linspace(0, 1, n_thresholds), probs.dtype)
     decisions = probs[tf.newaxis, :] - thresholds[:, tf.newaxis] > 0
     oneone = (
-        tf.cast(labels == 1, dtype=tf.float32) *
-        tf.cast(decisions, dtype=tf.float32))
+        tf.cast(labels == 1, dtype=probs.dtype) *
+        tf.cast(decisions, dtype=probs.dtype))
 
     onezero = (
-        tf.cast(labels == 1, dtype=tf.float32) *
-        (1-tf.cast(decisions, dtype=tf.float32))
+        tf.cast(labels == 1, dtype=probs.dtype) *
+        (1-tf.cast(decisions, dtypep=probs.dtype))
     )
     TP = tf.reduce_sum(oneone, axis=-1)
     FN = tf.reduce_sum(onezero, axis=-1)
@@ -18,11 +18,11 @@ def accuracy(probs, labels, n_thresholds=200):
     TPR = tf.pad(TPR, [(0, 0), (1, 0)], "CONSTANT")
 
     zeroone = (
-        tf.cast(labels == 0, dtype=tf.float32) *
-        tf.cast(decisions, dtype=tf.float32))
+        tf.cast(labels == 0, dtype=probs.dtype) *
+        tf.cast(decisions, dtype=probs.dtype))
     zerozero = (
-        tf.cast(labels == 0, dtype=tf.float32) *
-        (1-tf.cast(decisions, dtype=tf.float32)))
+        tf.cast(labels == 0, dtype=probs.dtype) *
+        (1-tf.cast(decisions, dtype=probs.dtype)))
 
     FP = tf.reduce_sum(zeroone, axis=-1)
     TN = tf.reduce_sum(zerozero, axis=-1)
