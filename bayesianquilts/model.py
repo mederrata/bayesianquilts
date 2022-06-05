@@ -298,7 +298,7 @@ class BayesianModel(ABC):
         ll = np.concatenate(ll, axis=1)
         ll = np.moveaxis(ll, 0, -1)
         return {
-            "log_likelihood": ll[np.newaxis, ...],
+            "log_likelihood": ll.T[np.newaxis, ...],
             "params": {k: v.numpy()[np.newaxis, ...] for k, v in params.items()},
         }
 
@@ -376,7 +376,7 @@ class BayesianModel(ABC):
         idict = {
             "posterior": dict_to_dataset(params),
             "sample_stats": dict_to_dataset(
-                {"log_likelihood": sample_stats["log_likelihood"].T}
+                {"log_likelihood": sample_stats["log_likelihood"]}
             ),
         }
 
