@@ -432,7 +432,7 @@ def batched_minimize(
                 flush=True
             )
 
-            if (step > 1) and (step % check_every) == 0:
+            if (step > 0) and (step % check_every) == 0:
                 """
                 Check for convergence
                 """

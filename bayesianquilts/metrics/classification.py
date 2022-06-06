@@ -5,6 +5,7 @@ import tensorflow_probability as tfp
 def accuracy(probs, labels, n_thresholds=200):
     thresholds = tf.cast(tf.linspace(0, 1, n_thresholds), probs.dtype)
     decisions = probs[tf.newaxis, :] - thresholds[:, tf.newaxis] > 0
+    labels = tf.squeeze(labels)
     oneone = (
         tf.cast(labels == 1, dtype=probs.dtype) *
         tf.cast(decisions, dtype=probs.dtype))
@@ -31,7 +32,12 @@ def accuracy(probs, labels, n_thresholds=200):
     FPR = tf.pad(FPR, [(0, 0), (1, 0)], "CONSTANT")
     precision = TP/(TP+FP)
     recall = TP/(TP+FN)
-    return {'tpr': TPR, 'fpr': FPR, 'precision': precision, 'recall': recall}
+    auroc = auc(FPR, TPR)
+    auprc = auc(precision, recall)
+    return {
+        'tpr': TPR, 'fpr': FPR, 'precision': precision, 'recall': recall,
+        'auroc': auroc, 'auprc': auprc
+        }
 
 
 def auc(x, y):
