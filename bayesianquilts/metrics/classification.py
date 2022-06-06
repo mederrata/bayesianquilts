@@ -11,7 +11,7 @@ def accuracy(probs, labels, n_thresholds=200):
 
     onezero = (
         tf.cast(labels == 1, dtype=probs.dtype) *
-        (1-tf.cast(decisions, dtypep=probs.dtype))
+        (1-tf.cast(decisions, dtype=probs.dtype))
     )
     TP = tf.reduce_sum(oneone, axis=-1)
     FN = tf.reduce_sum(onezero, axis=-1)
