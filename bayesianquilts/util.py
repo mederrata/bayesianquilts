@@ -285,6 +285,7 @@ def batched_minimize(
     name="minimize",
     check_every=1,
     clip_value=10.0,
+    test_fn=None,
     temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
     **kwargs,
 ):
@@ -431,10 +432,12 @@ def batched_minimize(
                 flush=True
             )
 
-            if (step > 1) and (step % check_every) == 0:
+            if (step > 0) and (step % check_every) == 0:
                 """
                 Check for convergence
                 """
+                if test_fn is not None:
+                    test_fn()
 
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
