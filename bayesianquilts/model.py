@@ -93,6 +93,7 @@ class BayesianModel(ABC):
         sample_size=4,
         trainable_variables=None,
         temp_dir=tempfile.gettempdir(),
+        test_fn=None,
         **kwargs
     ):
         """Calibrate using ADVI
@@ -133,6 +134,7 @@ class BayesianModel(ABC):
                 strategy=self.strategy,
                 trainable_variables=trainable_variables,
                 batched_data_factory=batched_data_factory,
+                test_fn=test_fn
             )
             return losses
 

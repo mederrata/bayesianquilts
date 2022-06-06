@@ -97,6 +97,7 @@ def minibatch_fit_surrogate_posterior(
     rel_tol=None,
     strategy=None,
     name=None,
+    test_fn=None,
     **kwargs,
 ):
     if trainable_variables is None:
@@ -137,6 +138,7 @@ def minibatch_fit_surrogate_posterior(
             clip_value=clip_value,
             decay_rate=decay_rate,
             check_every=check_every,
+            test_fn=test_fn,
             **kwargs,
         )
     else:
@@ -152,5 +154,6 @@ def minibatch_fit_surrogate_posterior(
             decay_rate=decay_rate,
             check_every=check_every,
             strategy=strategy,
+            test_fn=test_fn,
             **kwargs,
         )
