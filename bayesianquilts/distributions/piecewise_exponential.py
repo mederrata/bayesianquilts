@@ -196,9 +196,12 @@ class PiecewiseExponential(tfd.Distribution):
 
         cum_hazard = self.cum_hazards
         if (len(value_batch_shape) > 0) and not (rate_batch_shape[-1] == value_batch_shape[-1]):
-            rates = rates[..., tf.newaxis, :]
-            breakpoints = breakpoints[..., tf.newaxis, :]
-            cum_hazard = cum_hazard[..., tf.newaxis, :]
+            if rate_batch_shape[-1] is None:
+                pass
+            else:
+                rates = rates[..., tf.newaxis, :]
+                breakpoints = breakpoints[..., tf.newaxis, :]
+                cum_hazard = cum_hazard[..., tf.newaxis, :]
 
         if len(rate_batch_shape) + len(breakpoint_batch_shape) > 0:
             value = value[tf.newaxis, ..., tf.newaxis]
