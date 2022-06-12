@@ -167,7 +167,10 @@ class PiecewiseExponential(tfd.Distribution):
         rate_batch_shape = rates.shape.as_list()[:-1]
         breakpoint_batch_shape = breakpoints.shape.as_list()[:-1]
         value = tf.squeeze(tf.convert_to_tensor(value))
-        data_batch_shape = value.shape.as_list()
+        try:
+            data_batch_shape = value.shape.as_list()
+        except ValueError:
+            data_batch_shape = [1]
 
         cond1 = (
             data_batch_shape == breakpoint_batch_shape[-(
@@ -267,7 +270,7 @@ class PiecewiseExponential(tfd.Distribution):
 
         cum_hazard = tf.reduce_sum(
             tf.cast(indicator, self.cum_hazards.dtype)
-            * tf.broadcast_to(self.cum_hazards, indicator.shape),
+            * (self.cum_hazards + tf.zeros_like(tf.cast(indicator, self.cum_hazards.dtype))),
             axis=-1)
 
         cum_hazard += hazards*(value-changepoints)
