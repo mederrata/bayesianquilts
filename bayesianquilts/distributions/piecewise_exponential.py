@@ -69,7 +69,7 @@ class PiecewiseExponential(tfd.Distribution):
                 parameters=parameters,
                 name=name)
 
-        params = self.broadcast_to_params()
+        params = self.broadcast_to_params(tile=True)
         rates = params['rates']
         breakpoints = params['breakpoints']
         # compute cumulative masses
@@ -267,7 +267,7 @@ class PiecewiseExponential(tfd.Distribution):
 
         cum_hazard = tf.reduce_sum(
             tf.cast(indicator, self.cum_hazards.dtype)
-            * tf.expand_dims(self.cum_hazards, -2),
+            * tf.broadcast_to(self.cum_hazards, indicator.shape),
             axis=-1)
 
         cum_hazard += hazards*(value-changepoints)
