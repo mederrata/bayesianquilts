@@ -265,12 +265,15 @@ class PiecewiseExponential(tfd.Distribution):
             breakpoints, [(0, 0)]*(len(breakpoints.shape.as_list())-1) + [(1, 0)])
         changepoints = tf.gather_nd(
             breakpoints,
-            indices[..., tf.newaxis], batch_dims=2
+            indices[..., tf.newaxis],  batch_dims=(len(breakpoints.shape.as_list())-1)
         )
-
+        if len(self.cum_hazards.shape.as_list()) < len(indicator.shape.as_list()):
+            cum_hazard = self.cum_hazards[..., tf.newaxis, :]
+        else:
+            cum_hazard = self.cum_hazards
         cum_hazard = tf.reduce_sum(
-            tf.cast(indicator, self.cum_hazards.dtype)
-            * (self.cum_hazards + tf.zeros_like(tf.cast(indicator, self.cum_hazards.dtype))),
+            tf.cast(indicator, cum_hazard.dtype)
+            * (cum_hazard + tf.zeros_like(tf.cast(indicator, cum_hazard.dtype))),
             axis=-1)
 
         cum_hazard += hazards*(value-changepoints)
