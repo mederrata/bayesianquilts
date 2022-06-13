@@ -267,9 +267,12 @@ class PiecewiseExponential(tfd.Distribution):
             breakpoints,
             indices[..., tf.newaxis],  batch_dims=(len(breakpoints.shape.as_list())-1)
         )
-        if len(self.cum_hazards.shape.as_list()) < len(indicator.shape.as_list()):
-            cum_hazard = self.cum_hazards[..., tf.newaxis, :]
-        else:
+        try:
+            if len(self.cum_hazards.shape.as_list()) < len(indicator.shape.as_list()):
+                cum_hazard = self.cum_hazards[..., tf.newaxis, :]
+            else:
+                cum_hazard = self.cum_hazards
+        except ValueError:
             cum_hazard = self.cum_hazards
         cum_hazard = tf.reduce_sum(
             tf.cast(indicator, cum_hazard.dtype)
