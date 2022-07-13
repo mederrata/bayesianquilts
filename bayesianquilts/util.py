@@ -44,6 +44,10 @@ def flatten(lst):
 def _trace_loss(loss, grads, variables):
     return loss
 
+build_trainable_InverseGamma_dist = None
+build_trainable_normal_dist = None
+build_surrogate_posterior = None
+fit_surrogate_posterior = None
 
 def _trace_variables(loss, grads, variables):
     return loss, variables
