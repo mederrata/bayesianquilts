@@ -162,6 +162,26 @@ class Interactions(object):
         indices = [tf.cast(data[k[0]], tf.int64) for k in self._dimensions]
         return tf.concat(indices, axis=-1)
 
+    def truncate_to_order(self, max_order):
+        onehot = list(
+            filter(
+                lambda x: sum(x) > max_order,
+                product([0, 1], repeat=len(self._dimensions)),
+            )
+        )
+        exclusions = []
+        hot = [
+            set(
+                d[0] for i, d in zip(ind, self._dimensions) if i == 1
+            )
+            for ind in onehot
+        ]
+        exclusions += hot
+        return Interactions(
+            self._dimensions,
+            exclusions=exclusions,
+        )
+
 
 class Decomposed(object):
     """Class for dealing with decomposed parameters
@@ -386,8 +406,8 @@ class Decomposed(object):
             from_shape = batch_shape + self._tensor_part_shapes[k]
             to_shape = batch_shape + self.shape()
             # pad interaction dimension with leading zeros
-            if self._implicit and (np.prod(part_interact_shape)>1):
-                
+            if self._implicit and (np.prod(part_interact_shape) > 1):
+
                 v = tf.pad(
                     v, [[0, 0]]*len(batch_shape) + [[1, 0]] +
                     [[0, 0]]*len(self._param_shape), "CONSTANT"
@@ -531,7 +551,8 @@ def demo():
 
     interact = Interactions(dims, exclusions=exclusions)
     print(interact)
-    p = Decomposed(interactions=interact, param_shape=[100], name="beta", implicit=True)
+    p = Decomposed(interactions=interact, param_shape=[
+                   100], name="beta", implicit=True)
     print(p)
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],
