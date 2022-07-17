@@ -49,6 +49,5 @@ setuptools.setup(
         'jaxlib',
         'natsort',
         'tqdm',
-        'bentoml'
     ]
 )

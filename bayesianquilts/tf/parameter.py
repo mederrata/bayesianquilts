@@ -458,7 +458,6 @@ class Decomposed(object):
         cumulative = 0
         for k, tensor in tensors.items():
             if k not in self._tensor_part_shapes.keys():
-
                 continue
             part_interact_shape = self._tensor_part_shapes[k][
                 : (-len(self._param_shape))
