@@ -313,6 +313,8 @@ class Decomposed(object):
                     value = value[..., 1:, :, :, :, :],
                 elif len(self._param_shape) == 5:
                     value = value[..., 1:, :, :, :, :, :]
+                elif len(self._param_shape) == 6:
+                    value = value[..., 1:, :, :, :, :, :, :]
             tensors[self._name + "__" + interaction_name] = value
 
         return tensors, tensor_names, tensor_shapes
@@ -450,12 +452,71 @@ class Decomposed(object):
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
         )
-
+        batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
+            : (-len(self._param_shape) - 1)
+        ]
+        cumulative = 0
         for k, tensor in tensors.items():
-            pass
+            if k not in self._tensor_part_shapes.keys():
+
+                continue
+            part_interact_shape = self._tensor_part_shapes[k][
+                : (-len(self._param_shape))
+            ]
+            if self._implicit and (np.prod(part_interact_shape) > 1):
+                _tensor = tf.pad(
+                    tensor, [[0, 0]]*len(batch_shape) + [[1, 0]] +
+                    [[0, 0]]*len(self._param_shape), "CONSTANT"
+                )
+            else:
+                _tensor = tensor
+                
+            batch_ndims = len(batch_shape)
+            """
+            # reshape tensor, re-adding the dimensions
+            _tensor = tf.reshape(
+                _tensor, batch_shape + self._tensor_part_shapes[k]
+            )
+            new_rank = len(_tensor.shape.as_list())
+            
+            # transpose the batch dims to the back
+            permutation = list(range(batch_ndims, new_rank)) + \
+                list(range(batch_ndims))
+            _tensor = tf.transpose(_tensor, permutation)
+            # gather
+            """
+            index_select = [1 if k != 1 else 0 for k in part_interact_shape]
+            # move batch back up
+            _indices = interaction_indices * \
+                tf.cast(index_select, interaction_indices.dtype)
+            _indices = tf_ravel_multi_index(
+                tf.transpose(_indices),
+                part_interact_shape
+                )
+            _tensor = tf.transpose(
+                _tensor,
+                list(range(batch_ndims, len(_tensor.shape.as_list()))) +
+                list(range(batch_ndims))
+            )
+            _tensor = tf.gather_nd(_tensor, _indices[:, tf.newaxis])
+            
+            # move batch dims back to front
+            _rank = len(_tensor.shape.as_list())
+            _tensor = tf.transpose(
+                _tensor,
+                list(range(_rank-batch_ndims, _rank)) +
+                list(range(_rank-batch_ndims))
+                )
+            cumulative += _tensor
+            # add to cumulative sum
+        return cumulative
+
+    def dot(self, interaction_indices, y, tensors=None):
+        # y has to have a compatible shape
+        pass
 
     def lookup(self, interaction_indices, tensors=None):
-        return self._lookup_by_sum(interaction_indices, tensors=tensors)
+        return self._lookup_by_parts(interaction_indices, tensors=tensors)
 
     def _lookup_by_sum(self, interaction_indices, tensors=None):
         # flatten the indices
@@ -565,7 +626,10 @@ def demo():
 
     t, n, s = p.generate_tensors(batch_shape=[4])
     out = p.sum_parts(t)
+
     r = p.lookup(indices, t)
+    r1 = p._lookup_by_parts(indices, t)
+    out2 = p.dot(indices)
     return None
 
 
