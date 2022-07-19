@@ -515,7 +515,7 @@ class Decomposed(object):
         pass
 
     def lookup(self, interaction_indices, tensors=None):
-        return self._lookup_by_parts(interaction_indices, tensors=tensors)
+        return self._lookup_by_sum(interaction_indices, tensors=tensors)
 
     def _lookup_by_sum(self, interaction_indices, tensors=None):
         # flatten the indices
