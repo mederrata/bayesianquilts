@@ -247,7 +247,7 @@ class Decomposed(object):
         dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
             dimension_dict[j], list) else [f"{j}={t}" for t in range(dimension_dict[j])] for j in [x[0] for x in self._interactions._dimensions]]
         dimension_labels = [" & ".join(t) for t in product(*dimension_labels)]
-        labels = defaultdict(lambda x: dimension_labels)
+        labels = defaultdict(lambda: dimension_labels)
 
         for k, v in self._tensor_part_interactions.items():
             if len(v) == 0:
@@ -616,24 +616,17 @@ class Decomposed(object):
 
 def demo():
 
-    v = tf.ones([10, 2, 2])
-    from_shape = [10, 1, 1, 1, 1, 1, 1, 2, 2]
-    to_shape = [10, 2, 26, 2, 2, 2, 2, 2, 2]
-
+    interact = Interactions([], exclusions=[])
+    #p = Decomposed(interactions=interact, param_shape=[
+    #               100], name="beta", implicit=True)
     dims = [
         ("planned", ['no', 'yes']),
         ("pre2011", 2),
         ("mdc", 26),
         *[(f"hx_{j}", ['low', 'high']) for j in range(5)],
     ]
-    onehot = list(filter(lambda x: sum(x) > 4,
-                         product([0, 1], repeat=len(dims))))
-    exclusions = [*[(f"hx_{j}",) for j in range(5)]]
-    hot = [set(d[0] for i, d in zip(ind, dims) if i == 1) for ind in onehot]
-    exclusions += hot
-    # get rid of anything higher than 3rd order
 
-    interact = Interactions(dims, exclusions=exclusions)
+    interact = Interactions(dims, exclusions=[]).truncate_to_order(3)
     print(interact)
     p = Decomposed(interactions=interact, param_shape=[
                    100], name="beta", implicit=True)

@@ -300,10 +300,15 @@ class BayesianModel(ABC):
             "params": {k: v.numpy()[np.newaxis, ...] for k, v in params.items()},
         }
 
-    def save(self, filename="model_save.pkl"):
-        with open(filename, "wb") as file:
-            #  dill.dump((self.__class__, self), file)
-            dill.dump(self, file)
+    def save(self, filename="model_save.pkl", gzip="True"):
+        if not gzip:
+            with open(filename, "wb") as file:
+                #  dill.dump((self.__class__, self), file)
+                dill.dump(self, file)
+        else:
+            with gzip.open(filename + ".gz", "wb") as file:
+                #  dill.dump((self.__class__, self), file)
+                dill.dump(self, file)
 
     def __getstate__(self):
         state = self.__dict__.copy()
