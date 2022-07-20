@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from email.policy import default
 import re
 from collections import Counter, defaultdict
 from itertools import product, groupby
@@ -122,7 +123,6 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape, param_ndims=None, batch_n
                 + [int(np.prod(_temp_shape[4:5]))] + param_dims
             )
         )
-        pass
 
     _temp_shape = tensor_.shape.as_list()
     tensor_ = tf.reshape(
@@ -140,7 +140,12 @@ class Interactions(object):
         super().__init__()
         exclusions = [] if exclusions is None else exclusions
         self._dimensions = dimensions
-        self._intrinsic_shape = [x[1] for x in self._dimensions]
+        self._intrinsic_shape = []
+        for x in self._dimensions:
+            try:
+                self._intrinsic_shape += [len(x[1])]
+            except TypeError:
+                self._intrinsic_shape += [x[1]]
         self._exclusions = [set(s) for s in exclusions]
 
     def shape(self):
@@ -234,6 +239,25 @@ class Decomposed(object):
             self._tensor_part_shapes,
         ) = self.generate_tensors()
         self.scales = defaultdict(lambda: 1)
+        self.labels = self.generate_labels()
+
+    def generate_labels(self):
+        # generate a label for each tensor part
+        dimension_dict = dict(self._interactions._dimensions)
+        dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
+            dimension_dict[j], list) else [f"{j}={t}" for t in range(dimension_dict[j])] for j in [x[0] for x in self._interactions._dimensions]]
+        dimension_labels = [" & ".join(t) for t in product(*dimension_labels)]
+        labels = defaultdict(lambda x: dimension_labels)
+
+        for k, v in self._tensor_part_interactions.items():
+            if len(v) == 0:
+                continue
+            dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
+                dimension_dict[j], list) else [f"{j}={t}" for t in range(dimension_dict[j])] for j in v]
+            dimension_labels = [" & ".join(t)
+                                for t in product(*dimension_labels)]
+            labels[k] = dimension_labels
+        return labels
 
     def generate_tensors(self, batch_shape=None, target=None, dtype=None):
         """Generate parameter tensors for the parameter decomposition,
@@ -469,7 +493,7 @@ class Decomposed(object):
                 )
             else:
                 _tensor = tensor
-                
+
             batch_ndims = len(batch_shape)
             """
             # reshape tensor, re-adding the dimensions
@@ -491,21 +515,21 @@ class Decomposed(object):
             _indices = tf_ravel_multi_index(
                 tf.transpose(_indices),
                 part_interact_shape
-                )
+            )
             _tensor = tf.transpose(
                 _tensor,
                 list(range(batch_ndims, len(_tensor.shape.as_list()))) +
                 list(range(batch_ndims))
             )
             _tensor = tf.gather_nd(_tensor, _indices[:, tf.newaxis])
-            
+
             # move batch dims back to front
             _rank = len(_tensor.shape.as_list())
             _tensor = tf.transpose(
                 _tensor,
                 list(range(_rank-batch_ndims, _rank)) +
                 list(range(_rank-batch_ndims))
-                )
+            )
             cumulative += _tensor
             # add to cumulative sum
         return cumulative
@@ -597,10 +621,10 @@ def demo():
     to_shape = [10, 2, 26, 2, 2, 2, 2, 2, 2]
 
     dims = [
-        ("planned", 2),
+        ("planned", ['no', 'yes']),
         ("pre2011", 2),
         ("mdc", 26),
-        *[(f"hx_{j}", 2) for j in range(5)],
+        *[(f"hx_{j}", ['low', 'high']) for j in range(5)],
     ]
     onehot = list(filter(lambda x: sum(x) > 4,
                          product([0, 1], repeat=len(dims))))
@@ -613,6 +637,7 @@ def demo():
     print(interact)
     p = Decomposed(interactions=interact, param_shape=[
                    100], name="beta", implicit=True)
+    print(p.generate_labels())
     print(p)
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],
