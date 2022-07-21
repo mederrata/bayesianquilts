@@ -2,6 +2,7 @@ import inspect
 from itertools import cycle
 import tempfile
 import os
+import gzip
 
 import dill
 import arviz as az
@@ -300,8 +301,8 @@ class BayesianModel(ABC):
             "params": {k: v.numpy()[np.newaxis, ...] for k, v in params.items()},
         }
 
-    def save(self, filename="model_save.pkl", gzip="True"):
-        if not gzip:
+    def save(self, filename="model_save.pkl", gz=True):
+        if not gz:
             with open(filename, "wb") as file:
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
