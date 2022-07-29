@@ -44,10 +44,12 @@ def flatten(lst):
 def _trace_loss(loss, grads, variables):
     return loss
 
+
 build_trainable_InverseGamma_dist = None
 build_trainable_normal_dist = None
 build_surrogate_posterior = None
 fit_surrogate_posterior = None
+
 
 def _trace_variables(loss, grads, variables):
     return loss, variables
@@ -723,10 +725,20 @@ def tf_data_cardinality(tf_dataset):
     return card
 
 
-@tf.function
 def split_tensor(tensor, num_parts, axis=0):
     max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
     bulk = tensor[:max_divisor*num_parts, ...]
     remainder = tensor[max_divisor*num_parts:, ...]
     bulk = tf.split(bulk, num_parts, axis=axis)
     return bulk + [remainder]
+
+
+def split_tensor_factory(num_parts, axis=0):
+    @tf.function
+    def split_tensor(tensor):
+        max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
+        bulk = tensor[:max_divisor*num_parts, ...]
+        remainder = tensor[max_divisor*num_parts:, ...]
+        bulk = tf.split(bulk, num_parts, axis=axis)
+        return bulk + [remainder]
+    return split_tensor

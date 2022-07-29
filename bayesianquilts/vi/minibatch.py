@@ -63,7 +63,7 @@ def minibatch_mc_variational_loss(
         [sample_size], seed=seed)
 
     penalized_like = target_log_prob_fn(
-        data=data, prior_weight=batch_size/dataset_size, **q_samples)
+        data=data, prior_weight=tf.constant(batch_size/dataset_size), **q_samples)
 
     elbo_samples = q_lp * batch_size/dataset_size - penalized_like
     if not importance_weight:

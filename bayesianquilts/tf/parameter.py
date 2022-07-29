@@ -244,10 +244,10 @@ class Decomposed(object):
     def generate_labels(self):
         # generate a label for each tensor part
         dimension_dict = dict(self._interactions._dimensions)
-        dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
+        _dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
             dimension_dict[j], list) else [f"{j}={t}" for t in range(dimension_dict[j])] for j in [x[0] for x in self._interactions._dimensions]]
-        dimension_labels = [" & ".join(t) for t in product(*dimension_labels)]
-        labels = defaultdict(lambda: dimension_labels)
+        _dimension_labels = [" & ".join(t) for t in product(*_dimension_labels)]
+        labels = defaultdict(lambda: _dimension_labels)
 
         for k, v in self._tensor_part_interactions.items():
             if len(v) == 0:
@@ -617,7 +617,7 @@ class Decomposed(object):
 def demo():
 
     interact = Interactions([], exclusions=[])
-    #p = Decomposed(interactions=interact, param_shape=[
+    # p = Decomposed(interactions=interact, param_shape=[
     #               100], name="beta", implicit=True)
     dims = [
         ("planned", ['no', 'yes']),
@@ -630,7 +630,7 @@ def demo():
     print(interact)
     p = Decomposed(interactions=interact, param_shape=[
                    100], name="beta", implicit=True)
-    print(p.generate_labels())
+    print(p.generate_labels()['nono'])
     print(p)
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],

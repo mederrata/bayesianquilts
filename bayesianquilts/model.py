@@ -347,12 +347,12 @@ class BayesianModel(ABC):
         state["strategy"] = None
         return state
 
-    def unormalized_log_prob_list(self, data, params, prior_weight=1):
+    def unormalized_log_prob_list(self, data, params, prior_weight=tf.constant(1)):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
-        return self.unormalized_log_prob(data=data, prior_weight=prior_weight, **dict_params)
+        return self.unormalized_log_prob(data=data, prior_weight=tf.cast(prior_weight, self.dtype), **dict_params)
 
     @abstractmethod
-    def unormalized_log_prob(self, data, prior_weight=1., *args, **kwargs):
+    def unormalized_log_prob(self, data, prior_weight=tf.constant(1), *args, **kwargs):
         """Generic method for the unormalized log probability function"""
         return
 
@@ -395,4 +395,3 @@ class BayesianModel(ABC):
         self.reconstitute(state)
         self.saved_state = state
         self.set_calibration_expectations()
-
