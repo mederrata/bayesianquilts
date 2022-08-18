@@ -246,7 +246,8 @@ class Decomposed(object):
         dimension_dict = dict(self._interactions._dimensions)
         _dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
             dimension_dict[j], list) else [f"{j}={t}" for t in range(dimension_dict[j])] for j in [x[0] for x in self._interactions._dimensions]]
-        _dimension_labels = [" & ".join(t) for t in product(*_dimension_labels)]
+        _dimension_labels = [" & ".join(t)
+                             for t in product(*_dimension_labels)]
         labels = defaultdict(lambda: _dimension_labels)
 
         for k, v in self._tensor_part_interactions.items():
@@ -534,12 +535,82 @@ class Decomposed(object):
             # add to cumulative sum
         return cumulative
 
-    def dot(self, interaction_indices, y, tensors=None):
+    def dot_sum(self, interaction_indices, y, tensors=None, axes=[-1]):
         # y has to have a compatible shape
-        pass
+        """Multi-index mult without summing, then sum on axes
+
+        Args:
+            interaction_indices ([type]): [description]
+            tensors ([type], optional): [description]. Defaults to None.
+        """
+        # flatten the indices
+        interaction_indices = tf.convert_to_tensor(interaction_indices)
+        # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
+
+        interaction_shape = tf.convert_to_tensor(
+            self._interaction_shape, dtype=interaction_indices.dtype
+        )
+        batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
+            : (-len(self._param_shape) - 1)
+        ]
+        cumulative = 0
+        for k, tensor in tensors.items():
+            if k not in self._tensor_part_shapes.keys():
+                continue
+            part_interact_shape = self._tensor_part_shapes[k][
+                : (-len(self._param_shape))
+            ]
+            if self._implicit and (np.prod(part_interact_shape) > 1):
+                _tensor = tf.pad(
+                    tensor, [[0, 0]]*len(batch_shape) + [[1, 0]] +
+                    [[0, 0]]*len(self._param_shape), "CONSTANT"
+                )
+            else:
+                _tensor = tensor
+
+            batch_ndims = len(batch_shape)
+            """
+            # reshape tensor, re-adding the dimensions
+            _tensor = tf.reshape(
+                _tensor, batch_shape + self._tensor_part_shapes[k]
+            )
+            new_rank = len(_tensor.shape.as_list())
+            
+            # transpose the batch dims to the back
+            permutation = list(range(batch_ndims, new_rank)) + \
+                list(range(batch_ndims))
+            _tensor = tf.transpose(_tensor, permutation)
+            # gather
+            """
+            index_select = [1 if k != 1 else 0 for k in part_interact_shape]
+            # move batch back up
+            _indices = interaction_indices * \
+                tf.cast(index_select, interaction_indices.dtype)
+            _indices = tf_ravel_multi_index(
+                tf.transpose(_indices),
+                part_interact_shape
+            )
+            _tensor = tf.transpose(
+                _tensor,
+                list(range(batch_ndims, len(_tensor.shape.as_list()))) +
+                list(range(batch_ndims))
+            )
+            _tensor = tf.gather_nd(_tensor, _indices[:, tf.newaxis])
+
+            # move batch dims back to front
+            _rank = len(_tensor.shape.as_list())
+            _tensor = tf.transpose(
+                _tensor,
+                list(range(_rank-batch_ndims, _rank)) +
+                list(range(_rank-batch_ndims))
+            )
+            part = tf.reduce_sum(_tensor*tf.cast(y, _tensor.dtype), axes)
+            cumulative += part
+            # add to cumulative sum
+        return cumulative
 
     def lookup(self, interaction_indices, tensors=None):
-        return self._lookup_by_sum(interaction_indices, tensors=tensors)
+        return self._lookup_by_parts(interaction_indices, tensors=tensors)
 
     def _lookup_by_sum(self, interaction_indices, tensors=None):
         # flatten the indices
