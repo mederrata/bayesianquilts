@@ -402,7 +402,7 @@ class Decomposed(object):
     def shape(self):
         return self._intrinsic_shape
 
-    def sum_parts(self, tensors=None, unravel=False):
+    def sum_parts(self, tensors=None, unravel=False, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
         raveled_shape = [
             np.prod(self._interaction_shape)
@@ -412,11 +412,12 @@ class Decomposed(object):
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
-        partial_sum = tf.zeros(batch_shape + raveled_shape, self._dtype)
+        partial_sum = tf.zeros(batch_shape + raveled_shape, dtype)
         #  batch
 
         # folded
         for k, v in tensors.items():
+            v = tf.cast(v, dtype)
             # shuffle axes, placing broadcast axes together
             if k not in self._tensor_part_shapes.keys():
                 continue
@@ -463,7 +464,7 @@ class Decomposed(object):
     def tensor_keys(self):
         return sorted(list(self._param_tensors.keys()))
 
-    def _lookup_by_parts(self, interaction_indices, tensors=None):
+    def _lookup_by_parts(self, interaction_indices, tensors=None, dtype=tf.float32):
         """Multi-index lookup without summing
 
         Args:
@@ -482,6 +483,7 @@ class Decomposed(object):
         ]
         cumulative = 0
         for k, tensor in tensors.items():
+            tensor = tf.cast(tensor, dtype)
             if k not in self._tensor_part_shapes.keys():
                 continue
             part_interact_shape = self._tensor_part_shapes[k][
@@ -535,7 +537,7 @@ class Decomposed(object):
             # add to cumulative sum
         return cumulative
 
-    def dot_sum(self, interaction_indices, y, tensors=None, axes=[-1]):
+    def dot_sum(self, interaction_indices, y, tensors=None, axes=[-1], dtype=tf.float32):
         # y has to have a compatible shape
         """Multi-index mult without summing, then sum on axes
 
@@ -555,6 +557,7 @@ class Decomposed(object):
         ]
         cumulative = 0
         for k, tensor in tensors.items():
+            tensor = tf.cast(tensor, dtype)
             if k not in self._tensor_part_shapes.keys():
                 continue
             part_interact_shape = self._tensor_part_shapes[k][
@@ -609,10 +612,10 @@ class Decomposed(object):
             # add to cumulative sum
         return cumulative
 
-    def lookup(self, interaction_indices, tensors=None):
-        return self._lookup_by_parts(interaction_indices, tensors=tensors)
+    def lookup(self, interaction_indices, tensors=None, dtype=tf.float32):
+        return self._lookup_by_parts(interaction_indices, tensors=tensors, dtype=dtype)
 
-    def _lookup_by_sum(self, interaction_indices, tensors=None):
+    def _lookup_by_sum(self, interaction_indices, tensors=None, dtype=tf.float32):
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
@@ -621,7 +624,7 @@ class Decomposed(object):
             self._interaction_shape, dtype=interaction_indices.dtype
         )
 
-        summed = self.sum_parts(tensors)
+        summed = self.sum_parts(tensors, dtype=dtype)
 
         overall_shape = summed.shape.as_list()
         rank = len(overall_shape)
