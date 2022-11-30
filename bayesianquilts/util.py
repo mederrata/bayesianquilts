@@ -554,6 +554,7 @@ def run_chain(
     target_log_prob_fn,
     unconstraining_bijectors,
     num_steps=500,
+    num_leapfrog_steps=10,
     burnin=50,
 ):
     def trace_fn(_, pkr):
@@ -569,10 +570,18 @@ def run_chain(
         inner_kernel=tfp.mcmc.NoUTurnSampler(target_log_prob_fn, step_size=step_size),
         bijector=unconstraining_bijectors,
     )
-
+    kernel = tfp.mcmc.TransformedTransitionKernel(
+        inner_kernel=tfp.mcmc.HamiltonianMonteCarlo(
+            target_log_prob_fn=target_log_prob_fn,
+            num_leapfrog_steps=num_leapfrog_steps,
+            step_size=0.1,
+            state_gradients_are_stopped=True),
+        bijector=unconstraining_bijectors)
+    kernel = tfp.mcmc.SimpleStepSizeAdaptation(
+        inner_kernel=kernel, num_adaptation_steps=int(burnin * 0.8))
     pbar = tfp.experimental.mcmc.ProgressBarReducer(num_steps)
-
-    hmc = tfp.mcmc.DualAveragingStepSizeAdaptation(
+    """
+    kernel = tfp.mcmc.DualAveragingStepSizeAdaptation(
         inner_kernel=kernel,
         num_adaptation_steps=burnin,
         step_size_setter_fn=lambda pkr, new_step_size: pkr._replace(
@@ -581,8 +590,8 @@ def run_chain(
         step_size_getter_fn=lambda pkr: pkr.inner_results.step_size,
         log_accept_prob_getter_fn=lambda pkr: pkr.inner_results.log_accept_ratio,
     )
-
-    hmc = tfp.experimental.mcmc.WithReductions(hmc, pbar)
+    """
+    kernel = tfp.experimental.mcmc.WithReductions(kernel, pbar)
 
 
     # Sampling from the chain.
@@ -590,7 +599,7 @@ def run_chain(
         num_results=num_steps,
         num_burnin_steps=burnin,
         current_state=init_state,
-        kernel=hmc,
+        kernel=kernel,
         trace_fn=trace_fn,
     )
     return chain_state, sampler_stat
