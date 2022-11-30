@@ -165,7 +165,9 @@ class BayesianModel(ABC):
 
     def calibrate_mcmc(
         self,
-        data=None,
+        batched_data_factory,
+        dataset_size,
+        batch_size,
         num_steps=1000,
         burnin=500,
         init_state=None,
@@ -188,31 +190,11 @@ class BayesianModel(ABC):
         initial_list = [init_state[v] for v in self.var_list]
         bijectors = [self.bijectors[k] for k in self.var_list]
 
-        data = self.data if data is None else data
-        # check if data is batched
-        batched = False
-        root = False
-        up = data
-        while (not batched) and (not root):
-            if hasattr(up, "_batch_size"):
-                batch_size = up._batch_size
-                batched = True
-                break
-            if hasattr(up, "_input_dataset"):
-                up = up._input_dataset
-            else:
-                root = True
-
-        if not batched:
-            card = tf.data.experimental.cardinality(data)
-            batch_size = int(np.floor(card / data_batches))
-            data = data.batch(batch_size, drop_remainder=True)
-            # data = data.batch
 
         def energy(*x):
             energies = [
-                tf.reduce_sum(self.unormalized_log_prob_list(batch, x))
-                for batch in iter(data)
+                self.unormalized_log_prob_list(batch, x)
+                for batch in iter(batched_data_factory())
             ]
 
             return tf.add_n(energies)
