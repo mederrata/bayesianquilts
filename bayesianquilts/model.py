@@ -48,7 +48,7 @@ class BayesianModel(ABC):
         strategy=None,
         dtype=tf.float64,
         *args,
-        **kwargs
+        **kwargs,
     ):
         """Instantiate Model object based on tensorflow dataset
         Arguments:
@@ -91,7 +91,7 @@ class BayesianModel(ABC):
         trainable_variables=None,
         temp_dir=tempfile.gettempdir(),
         test_fn=None,
-        **kwargs
+        **kwargs,
     ):
         """Calibrate using ADVI
 
@@ -131,7 +131,7 @@ class BayesianModel(ABC):
                 strategy=self.strategy,
                 trainable_variables=trainable_variables,
                 batched_data_factory=batched_data_factory,
-                test_fn=test_fn
+                test_fn=test_fn,
             )
             return losses
 
@@ -147,8 +147,7 @@ class BayesianModel(ABC):
             mean, var = FactorizedDistributionMoments(
                 self.surrogate_distribution, samples=samples
             )
-            self.calibrated_expectations = {
-                k: tf.Variable(v) for k, v in mean.items()}
+            self.calibrated_expectations = {k: tf.Variable(v) for k, v in mean.items()}
             self.calibrated_sd = {
                 k: tf.Variable(tf.math.sqrt(v)) for k, v in var.items()
             }
@@ -165,13 +164,14 @@ class BayesianModel(ABC):
 
     def calibrate_mcmc(
         self,
-        data=None,
+        batched_data_factory,
+        dataset_size,
+        batch_size,
         num_steps=1000,
         burnin=500,
         init_state=None,
         step_size=1e-1,
         nuts=True,
-        num_leapfrog_steps=10,
         data_batches=10,
         clip=None,
     ):
@@ -188,31 +188,15 @@ class BayesianModel(ABC):
         initial_list = [init_state[v] for v in self.var_list]
         bijectors = [self.bijectors[k] for k in self.var_list]
 
-        data = self.data if data is None else data
-        # check if data is batched
-        batched = False
-        root = False
-        up = data
-        while (not batched) and (not root):
-            if hasattr(up, "_batch_size"):
-                batch_size = up._batch_size
-                batched = True
-                break
-            if hasattr(up, "_input_dataset"):
-                up = up._input_dataset
-            else:
-                root = True
+        dataset = batched_data_factory()
 
-        if not batched:
-            card = tf.data.experimental.cardinality(data)
-            batch_size = int(np.floor(card / data_batches))
-            data = data.batch(batch_size, drop_remainder=True)
-            # data = data.batch
-
+        @tf.function
         def energy(*x):
             energies = [
-                tf.reduce_sum(self.unormalized_log_prob_list(batch, x))
-                for batch in iter(data)
+                self.unormalized_log_prob_list(
+                    batch, x, prior_weight=tf.constant(batch_size / dataset_size)
+                )
+                for batch in dataset
             ]
 
             return tf.add_n(energies)
@@ -226,11 +210,8 @@ class BayesianModel(ABC):
             unconstraining_bijectors=bijectors,
             num_steps=num_steps,
             burnin=burnin,
-            num_leapfrog_steps=num_leapfrog_steps,
-            nuts=nuts,
         )
-        self.surrogate_sample = {k: sample for k,
-                                 sample in zip(self.var_list, samples)}
+        self.surrogate_sample = {k: sample for k, sample in zip(self.var_list, samples)}
         self.set_calibration_expectations()
 
         return samples, sampler_stat
@@ -314,7 +295,7 @@ class BayesianModel(ABC):
     def __getstate__(self):
         state = self.__dict__.copy()
         keys = self.__dict__.keys()
-        state['surrogate_sample'] = None
+        state["surrogate_sample"] = None
         for k in keys:
             # print(k)
             if isinstance(state[k], tf.Tensor) or isinstance(state[k], tf.Variable):
@@ -349,7 +330,9 @@ class BayesianModel(ABC):
 
     def unormalized_log_prob_list(self, data, params, prior_weight=tf.constant(1)):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
-        return self.unormalized_log_prob(data=data, prior_weight=tf.cast(prior_weight, self.dtype), **dict_params)
+        return self.unormalized_log_prob(
+            data=data, prior_weight=tf.cast(prior_weight, self.dtype), **dict_params
+        )
 
     @abstractmethod
     def unormalized_log_prob(self, data, prior_weight=tf.constant(1), *args, **kwargs):

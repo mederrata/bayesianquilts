@@ -13,15 +13,18 @@ import tensorflow_probability as tfp
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import \
-    print_tensors_in_checkpoint_file
+from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
 from tensorflow.python.training import optimizer
 from tensorflow_probability.python import util as tfp_util
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import \
-    TransformedDistribution
-from tensorflow_probability.python.internal import (dtype_util, prefer_static,
-                                                    tensorshape_util)
+from tensorflow_probability.python.distributions.transformed_distribution import (
+    TransformedDistribution,
+)
+from tensorflow_probability.python.internal import (
+    dtype_util,
+    prefer_static,
+    tensorshape_util,
+)
 from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
 
@@ -78,19 +81,17 @@ def minimize_distributed(
     **kwargs,
 ):
 
-    checkpoint_name = str(
-        uuid.uuid4()) if checkpoint_name is None else checkpoint_name
+    checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
 
     with strategy.scope():
 
-        train_dist_dataset = strategy.experimental_distribute_dataset(
-            data_factory())
+        train_dist_dataset = strategy.experimental_distribute_dataset(data_factory())
         iterator = iter(train_dist_dataset)
 
         learning_rate = 1.0 if learning_rate is None else learning_rate
 
         def learning_rate_schedule_fn(step):
-            return learning_rate * decay_rate ** step
+            return learning_rate * decay_rate**step
 
         decay_step = 0
 
@@ -133,8 +134,7 @@ def minimize_distributed(
 
         @tf.function(input_signature=[train_dist_dataset.element_spec])
         def distributed_train_step(data):
-            per_replica_losses = strategy.experimental_run_v2(
-                train_step, args=(data,))
+            per_replica_losses = strategy.experimental_run_v2(train_step, args=(data,))
             return strategy.reduce(
                 tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None
             )
@@ -155,7 +155,7 @@ def minimize_distributed(
         epoch = 1
         save_path = manager.save()
         print(f"Saved an initial checkpoint: {save_path}")
-        for epoch in range(1, num_epochs+1):
+        for epoch in range(1, num_epochs + 1):
             if converged:
                 break
             print(f"Epoch: {epoch}")
@@ -223,8 +223,7 @@ def minimize_distributed(
                         status = "We are in a loss plateau"
                         status += f" learning rate: {optimizer.lr}"
                         print(status)
-                        cp_status = checkpoint.restore(
-                            manager.latest_checkpoint)
+                        cp_status = checkpoint.restore(manager.latest_checkpoint)
                         cp_status.assert_consumed()
 
                         print(status)
@@ -247,8 +246,7 @@ def minimize_distributed(
                         status = "We are in a loss plateau"
                         status += f" learning rate: {optimizer.lr}"
                         print(status)
-                        cp_status = checkpoint.restore(
-                            manager.latest_checkpoint)
+                        cp_status = checkpoint.restore(manager.latest_checkpoint)
                         cp_status.assert_consumed()
 
                         print(status)
@@ -296,12 +294,11 @@ def batched_minimize(
     **kwargs,
 ):
 
-    checkpoint_name = str(
-        uuid.uuid4()) if checkpoint_name is None else checkpoint_name
+    checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
     learning_rate = 1.0 if learning_rate is None else learning_rate
 
     def learning_rate_schedule_fn(step):
-        return learning_rate * decay_rate ** step
+        return learning_rate * decay_rate**step
 
     decay_step = 0
 
@@ -314,9 +311,7 @@ def batched_minimize(
     watched_variables = trainable_variables
 
     checkpoint = tf.train.Checkpoint(
-        optimizer=opt, **{
-            "var_" + str(j): v for j, v in enumerate(watched_variables)
-        }
+        optimizer=opt, **{"var_" + str(j): v for j, v in enumerate(watched_variables)}
     )
     manager = tf.train.CheckpointManager(
         checkpoint,
@@ -360,7 +355,10 @@ def batched_minimize(
     with tf.name_scope(name) as name:
         # Compute the shape of the trace without executing the graph.
         concrete_loop_body = train_loop_body.get_concrete_function(
-            tf.TensorSpec([]), tf.TensorSpec([],)
+            tf.TensorSpec([]),
+            tf.TensorSpec(
+                [],
+            ),
         )  # Inputs ignored.
         if all(
             [
@@ -409,19 +407,16 @@ def batched_minimize(
             for data in batched_data_factory():
                 if processing_fn is not None:
                     data = processing_fn(data)
-                batch_loss, grads = train_loop_body(
-                    state_initializer, step, data)
+                batch_loss, grads = train_loop_body(state_initializer, step, data)
 
                 if np.isfinite(batch_loss.numpy()):
                     batch_losses += [batch_loss.numpy()]
                 else:
                     print("Batch loss NaN", flush=True)
-                    cp_status = checkpoint.restore(
-                        manager.latest_checkpoint)
+                    cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
 
-                    batch_loss = train_loop_body(
-                        state_initializer, step, data)
+                    batch_loss = train_loop_body(state_initializer, step, data)
                     decay_step += 1
                     if decay_step > max_decay_steps:
                         converged = True
@@ -430,12 +425,11 @@ def batched_minimize(
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss.numpy()]
             losses += [loss.numpy()]
-            deviation = np.abs(avg_losses[-1]-min_loss)
+            deviation = np.abs(avg_losses[-1] - min_loss)
             rel = np.abs(deviation / loss)
             print(
-                f"Epoch {step}: average-batch loss:"
-                + f"{loss} rel loss: {rel}",
-                flush=True
+                f"Epoch {step}: average-batch loss:" + f"{loss} rel loss: {rel}",
+                flush=True,
             )
 
             if (step > 0) and (step % check_every) == 0:
@@ -466,15 +460,17 @@ def batched_minimize(
                     print(f"Saved a checkpoint: {save_path}", flush=True)
                     batches_since_checkpoint = 0
                     if (deviation < abs_tol) and (
-                            np.abs((avg_losses[2]-min_loss)) < abs_tol):
+                        np.abs((avg_losses[2] - min_loss)) < abs_tol
+                    ):
                         print(
                             f"Converged in {step} iterations "
                             + "with acceptable absolute tolerance",
-                            flush=True
+                            flush=True,
                         )
                         converged = True
                     elif (rel < rel_tol) and (
-                            (np.abs(avg_losses[2]-min_loss)/loss) < abs_tol):
+                        (np.abs(avg_losses[2] - min_loss) / loss) < abs_tol
+                    ):
                         print(
                             f"Converged in {step} iterations with "
                             + "acceptable relative tolerance"
@@ -495,7 +491,8 @@ def batched_minimize(
                             converged = True
                             print(
                                 f"We have had {batches_since_checkpoint} epochs with no improvement so we give up",
-                                flush=True)
+                                flush=True,
+                            )
                         else:
                             status = "We are in a loss plateau"
                             print(status, flush=True)
@@ -505,8 +502,7 @@ def batched_minimize(
 
             step += 1
             if step > num_epochs:
-                print("Terminating because we are out of iterations",
-                      flush=True)
+                print("Terminating because we are out of iterations", flush=True)
 
         trace = tf.stack(losses)
         """
@@ -537,11 +533,9 @@ def clip_gradients(fn, clip_value, dtype=tf.float64):
                 ret = fn(*new_args, **new_kwargs)
 
             def grad_fn(*dy):
-                flat_grads = tape.gradient(
-                    ret, flat_args_kwargs, output_gradients=dy)
+                flat_grads = tape.gradient(ret, flat_args_kwargs, output_gradients=dy)
                 flat_grads = tf.nest.map_structure(
-                    lambda g: tf.where(tf.math.is_finite(g),
-                                       g, tf.zeros_like(g)),
+                    lambda g: tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)),
                     flat_grads,
                 )
                 return tf.clip_by_global_norm(flat_grads, clip_value)[0]
@@ -553,7 +547,7 @@ def clip_gradients(fn, clip_value, dtype=tf.float64):
     return wrapper
 
 
-@tf.function
+@tf.function(autograph=False, experimental_compile=True)
 def run_chain(
     init_state,
     step_size,
@@ -561,75 +555,44 @@ def run_chain(
     unconstraining_bijectors,
     num_steps=500,
     burnin=50,
-    num_leapfrog_steps=5,
-    nuts=True,
 ):
-    if nuts:
-
-        def trace_fn(_, pkr):
-            return (
-                pkr.inner_results.inner_results.target_log_prob,
-                pkr.inner_results.inner_results.leapfrogs_taken,
-                pkr.inner_results.inner_results.has_divergence,
-                pkr.inner_results.inner_results.energy,
-                pkr.inner_results.inner_results.log_accept_ratio,
-            )
-
-        kernel = tfp.mcmc.TransformedTransitionKernel(
-            inner_kernel=tfp.mcmc.NoUTurnSampler(
-                target_log_prob_fn, step_size=step_size
-            ),
-            bijector=unconstraining_bijectors,
+    def trace_fn(_, pkr):
+        return (
+            pkr.inner_results.inner_results.target_log_prob,
+            pkr.inner_results.inner_results.leapfrogs_taken,
+            pkr.inner_results.inner_results.has_divergence,
+            pkr.inner_results.inner_results.energy,
+            pkr.inner_results.inner_results.log_accept_ratio,
         )
 
-        hmc = tfp.mcmc.DualAveragingStepSizeAdaptation(
-            inner_kernel=kernel,
-            num_adaptation_steps=burnin,
-            step_size_setter_fn=lambda pkr, new_step_size: pkr._replace(
-                inner_results=pkr.inner_results._replace(
-                    step_size=new_step_size)
-            ),
-            step_size_getter_fn=lambda pkr: pkr.inner_results.step_size,
-            log_accept_prob_getter_fn=lambda pkr: (
-                pkr.inner_results.log_accept_ratio),
-        )
+    kernel = tfp.mcmc.TransformedTransitionKernel(
+        inner_kernel=tfp.mcmc.NoUTurnSampler(target_log_prob_fn, step_size=step_size),
+        bijector=unconstraining_bijectors,
+    )
 
-        # Sampling from the chain.
-        chain_state, sampler_stat = tfp.mcmc.sample_chain(
-            num_results=num_steps,
-            num_burnin_steps=burnin,
-            current_state=init_state,
-            kernel=hmc,
-            trace_fn=trace_fn,
-        )
-    else:
+    pbar = tfp.experimental.mcmc.ProgressBarReducer(num_steps)
 
-        def trace_fn_hmc(_, pkr):
-            return (
-                pkr.inner_results.inner_results.is_accepted,
-                pkr.inner_results.inner_results.accepted_results.step_size,
-            )
+    hmc = tfp.mcmc.DualAveragingStepSizeAdaptation(
+        inner_kernel=kernel,
+        num_adaptation_steps=burnin,
+        step_size_setter_fn=lambda pkr, new_step_size: pkr._replace(
+            inner_results=pkr.inner_results._replace(step_size=new_step_size)
+        ),
+        step_size_getter_fn=lambda pkr: pkr.inner_results.step_size,
+        log_accept_prob_getter_fn=lambda pkr: pkr.inner_results.log_accept_ratio,
+    )
 
-        hmc = tfp.mcmc.TransformedTransitionKernel(
-            inner_kernel=tfp.mcmc.HamiltonianMonteCarlo(
-                target_log_prob_fn=target_log_prob_fn,
-                num_leapfrog_steps=num_leapfrog_steps,
-                step_size=step_size,
-                state_gradients_are_stopped=True,
-            ),
-            bijector=unconstraining_bijectors,
-        )
-        kernel = tfp.mcmc.SimpleStepSizeAdaptation(
-            inner_kernel=hmc, num_adaptation_steps=int(0.8 * burnin)
-        )
-        chain_state, sampler_stat = tfp.mcmc.sample_chain(
-            num_results=num_steps,
-            num_burnin_steps=burnin,
-            current_state=init_state,
-            kernel=kernel,
-            trace_fn=trace_fn_hmc,
-        )
+    hmc = tfp.experimental.mcmc.WithReductions(hmc, pbar)
 
+
+    # Sampling from the chain.
+    chain_state, sampler_stat = tfp.mcmc.sample_chain(
+        num_results=num_steps,
+        num_burnin_steps=burnin,
+        current_state=init_state,
+        kernel=hmc,
+        trace_fn=trace_fn,
+    )
     return chain_state, sampler_stat
 
 
@@ -727,8 +690,8 @@ def tf_data_cardinality(tf_dataset):
 
 def split_tensor(tensor, num_parts, axis=0):
     max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
-    bulk = tensor[:max_divisor*num_parts, ...]
-    remainder = tensor[max_divisor*num_parts:, ...]
+    bulk = tensor[: max_divisor * num_parts, ...]
+    remainder = tensor[max_divisor * num_parts :, ...]
     bulk = tf.split(bulk, num_parts, axis=axis)
     return bulk + [remainder]
 
@@ -737,8 +700,9 @@ def split_tensor_factory(num_parts, axis=0):
     @tf.function
     def split_tensor(tensor):
         max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
-        bulk = tensor[:max_divisor*num_parts, ...]
-        remainder = tensor[max_divisor*num_parts:, ...]
+        bulk = tensor[: max_divisor * num_parts, ...]
+        remainder = tensor[max_divisor * num_parts :, ...]
         bulk = tf.split(bulk, num_parts, axis=axis)
         return bulk + [remainder]
+
     return split_tensor
