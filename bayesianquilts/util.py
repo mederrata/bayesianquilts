@@ -547,7 +547,7 @@ def clip_gradients(fn, clip_value, dtype=tf.float64):
     return wrapper
 
 
-@tf.function
+@tf.function(autograph=False, experimental_compile=True)
 def run_chain(
     init_state,
     step_size,
@@ -555,76 +555,44 @@ def run_chain(
     unconstraining_bijectors,
     num_steps=500,
     burnin=50,
-    num_leapfrog_steps=5,
-    nuts=True,
 ):
-    if nuts:
-
-        def trace_fn(_, pkr):
-            return (
-                pkr.inner_results.inner_results.target_log_prob,
-                pkr.inner_results.inner_results.leapfrogs_taken,
-                pkr.inner_results.inner_results.has_divergence,
-                pkr.inner_results.inner_results.energy,
-                pkr.inner_results.inner_results.log_accept_ratio,
-            )
-
-        kernel = tfp.mcmc.TransformedTransitionKernel(
-            inner_kernel=tfp.mcmc.NoUTurnSampler(
-                target_log_prob_fn, step_size=step_size
-            ),
-            bijector=unconstraining_bijectors,
+    def trace_fn(_, pkr):
+        return (
+            pkr.inner_results.inner_results.target_log_prob,
+            pkr.inner_results.inner_results.leapfrogs_taken,
+            pkr.inner_results.inner_results.has_divergence,
+            pkr.inner_results.inner_results.energy,
+            pkr.inner_results.inner_results.log_accept_ratio,
         )
 
-        hmc = tfp.mcmc.DualAveragingStepSizeAdaptation(
-            inner_kernel=kernel,
-            num_adaptation_steps=burnin,
-            step_size_setter_fn=lambda pkr, new_step_size: pkr._replace(
-                inner_results=pkr.inner_results._replace(step_size=new_step_size)
-            ),
-            step_size_getter_fn=lambda pkr: pkr.inner_results.step_size,
-            log_accept_prob_getter_fn=lambda pkr: (pkr.inner_results.log_accept_ratio),
-        )
-        # Sampling from the chain.
-        chain_state, sampler_stat = tfp.mcmc.sample_chain(
-            num_results=num_steps,
-            num_burnin_steps=burnin,
-            current_state=init_state,
-            kernel=hmc,
-            trace_fn=trace_fn,
-        )
-    else:
+    kernel = tfp.mcmc.TransformedTransitionKernel(
+        inner_kernel=tfp.mcmc.NoUTurnSampler(target_log_prob_fn, step_size=step_size),
+        bijector=unconstraining_bijectors,
+    )
 
-        def trace_fn_hmc(_, pkr):
-            return (
-                pkr.inner_results.inner_results.is_accepted,
-                pkr.inner_results.inner_results.accepted_results.step_size,
-            )
+    pbar = tfp.experimental.mcmc.ProgressBarReducer(num_steps)
 
-        hmc = tfp.mcmc.TransformedTransitionKernel(
-            inner_kernel=tfp.mcmc.HamiltonianMonteCarlo(
-                target_log_prob_fn=target_log_prob_fn,
-                num_leapfrog_steps=num_leapfrog_steps,
-                step_size=step_size,
-                state_gradients_are_stopped=True,
-            ),
-            bijector=unconstraining_bijectors,
-        )
-        kernel = tfp.mcmc.SimpleStepSizeAdaptation(
-            inner_kernel=hmc, num_adaptation_steps=int(0.8 * burnin)
-        )
-        out = []
-        for j in tqdm(range(10)):
-            out += [
-                tfp.mcmc.sample_chain(
-                    num_results=int(num_steps/10),
-                    num_burnin_steps=burnin if j==0 else 0,
-                    current_state=init_state,
-                    kernel=kernel,
-                    trace_fn=trace_fn_hmc,
-                )
-            ]
+    hmc = tfp.mcmc.DualAveragingStepSizeAdaptation(
+        inner_kernel=kernel,
+        num_adaptation_steps=burnin,
+        step_size_setter_fn=lambda pkr, new_step_size: pkr._replace(
+            inner_results=pkr.inner_results._replace(step_size=new_step_size)
+        ),
+        step_size_getter_fn=lambda pkr: pkr.inner_results.step_size,
+        log_accept_prob_getter_fn=lambda pkr: pkr.inner_results.log_accept_ratio,
+    )
 
+    hmc = tfp.experimental.mcmc.WithReductions(hmc, pbar)
+
+
+    # Sampling from the chain.
+    chain_state, sampler_stat = tfp.mcmc.sample_chain(
+        num_results=num_steps,
+        num_burnin_steps=burnin,
+        current_state=init_state,
+        kernel=hmc,
+        trace_fn=trace_fn,
+    )
     return chain_state, sampler_stat
 
 
