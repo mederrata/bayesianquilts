@@ -190,7 +190,7 @@ class BayesianModel(ABC):
 
         dataset = batched_data_factory()
 
-        @tf.function
+        @tf.function(autograph=True)
         def energy(*x):
             energies = [
                 self.unormalized_log_prob_list(
