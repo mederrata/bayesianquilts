@@ -36,6 +36,7 @@ def minibatch_mc_variational_loss(
     dataset_size,
     batch_size,
     sample_size=1,
+    sample_batches=1,
     importance_weight=False,
     seed=None,
     data=None,
@@ -58,14 +59,16 @@ def minibatch_mc_variational_loss(
     Returns:
         _type_: _description_
     """
-    
-    q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
-        [sample_size], seed=seed)
+    elbo_samples = []
+    for _ in range(sample_batches):
+        q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
+            [sample_size], seed=seed)
 
-    penalized_like = target_log_prob_fn(
-        data=data, prior_weight=tf.constant(batch_size/dataset_size), **q_samples)
+        penalized_like = target_log_prob_fn(
+            data=data, prior_weight=tf.constant(batch_size/dataset_size), **q_samples)
 
-    elbo_samples = q_lp * batch_size/dataset_size - penalized_like
+        elbo_samples += [q_lp * batch_size/dataset_size - penalized_like]
+    elbo_samples = tf.concat(elbo_samples, axis=0)
     if not importance_weight:
         return tf.reduce_mean(elbo_samples)
     max_val = tf.reduce_mean(penalized_like-q_lp)
@@ -87,6 +90,7 @@ def minibatch_fit_surrogate_posterior(
     num_epochs=1000,
     trace_fn=_trace_loss,
     sample_size=8,
+    sample_batches=1,
     check_every=1,
     decay_rate=0.9,
     learning_rate=1.0,
@@ -117,6 +121,7 @@ def minibatch_fit_surrogate_posterior(
             target_log_prob_fn,
             surrogate_posterior,
             sample_size=sample_size,
+            sample_batches=sample_batches,
             data=data,
             dataset_size=dataset_size,
             batch_size=batch_size,
