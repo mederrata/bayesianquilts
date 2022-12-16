@@ -29,7 +29,7 @@ from tensorflow_probability.python.vi import GradientEstimators
 from bayesianquilts.util import batched_minimize, TransformedVariable, minimize_distributed
 from bayesianquilts.util import _trace_variables, _trace_loss
 
-
+@tf.function
 def minibatch_mc_variational_loss(
     target_log_prob_fn,
     surrogate_posterior,
