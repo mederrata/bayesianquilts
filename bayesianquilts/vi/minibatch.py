@@ -37,7 +37,7 @@ from bayesianquilts.util import (
 from bayesianquilts.util import _trace_variables, _trace_loss
 
 
-@tf.function
+# @tf.function(autograph=False)
 def minibatch_mc_variational_loss(
     target_log_prob_fn,
     surrogate_posterior,
@@ -45,7 +45,6 @@ def minibatch_mc_variational_loss(
     batch_size,
     sample_size=1,
     sample_batches=1,
-    importance_weight=False,
     seed=None,
     data=None,
     name=None,
@@ -67,33 +66,31 @@ def minibatch_mc_variational_loss(
     Returns:
         _type_: _description_
     """
-    elbo_samples = [tf.zeros(sample_size, tf.float64)] * sample_batches
-    q_lp = [tf.zeros(sample_size, tf.float64)] * sample_batches
-    penalized_like = [tf.zeros(sample_size, tf.float64)] * sample_batches
-    for n in range(sample_batches):
-        q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
-            [sample_size], seed=seed
-        )
 
-        penalized_like[n] += target_log_prob_fn(
-            data=data, prior_weight=tf.constant(batch_size / dataset_size), **q_samples
-        )
-        q_lp[n] += q_lp_
-        elbo_samples[n] += q_lp[n] * batch_size / dataset_size - penalized_like[n]
+    @tf.function
+    def sample_expected_elbo(sample_size, sample_batches):
+        expected_elbo = tf.zeros(1, tf.float64)
+        for _ in tf.range(sample_batches):
+            q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
+                sample_size, seed=seed
+            )
 
-    q_lp__ = tf.concat(q_lp, axis=0)
-    penalized_like__ = tf.concat(penalized_like, axis=0)
-    elbo_samples__ = tf.concat(elbo_samples, axis=0)
-    if not importance_weight:
-        return tf.reduce_mean(elbo_samples__)
-    max_val = tf.reduce_mean(penalized_like__ - q_lp__)
-    weights = tf.exp(penalized_like__ - q_lp__ - max_val)
+            penalized_ll = target_log_prob_fn(
+                data=data,
+                prior_weight=tf.constant(batch_size / dataset_size),
+                **q_samples,
+            )
+            expected_elbo += tf.cast(
+                tf.reduce_mean(q_lp_ * batch_size / dataset_size - penalized_ll),
+                expected_elbo.dtype)
+        expected_elbo /= tf.cast(sample_batches, expected_elbo.dtype)
+        return expected_elbo
 
-    weights = weights / tf.reduce_sum(weights)
-    elbo = tf.reduce_sum(elbo_samples__ * weights)
+    expceted_elbo = sample_expected_elbo(
+        tf.constant(sample_size), tf.constant(sample_batches)
+    )
 
-    # @TODO compute importance weights
-    return elbo
+    return expceted_elbo
 
 
 def minibatch_fit_surrogate_posterior(
