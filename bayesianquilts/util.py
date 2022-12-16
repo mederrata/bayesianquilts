@@ -302,7 +302,7 @@ def batched_minimize(
 
     decay_step = 0
 
-    optimizer = tf.keras.optimizers.legacy.Adam(
+    optimizer = tf.optimizers.Adam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step)
     )
 
