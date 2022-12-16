@@ -703,7 +703,7 @@ def split_tensor(tensor, num_parts, axis=0):
 
 
 def split_tensor_factory(num_parts, axis=0):
-    @tf.function(experimental_relax_shapes=True)
+    @tf.function(reduce_retracing=True)
     def split_tensor(tensor):
         max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
         bulk = tensor[: max_divisor * num_parts, ...]
