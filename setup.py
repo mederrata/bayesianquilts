@@ -44,7 +44,7 @@ setuptools.setup(
         'protobuf~=3.19.0',
         'tensorflow==2.10.1',
         'tensorflow-probability==0.18.0',
-        'tensorflow-addons',
+        'tensorflow-addons==0.18.0',
         'jax',
         'natsort',
         'tqdm',
