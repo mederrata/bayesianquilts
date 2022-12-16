@@ -62,7 +62,7 @@ def minibatch_mc_variational_loss(
     elbo_samples = []
     q_lp = []
     penalized_like = []
-    for _ in range(sample_batches):
+    for _ in tf.range(sample_batches):
         q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
             [sample_size], seed=seed)
 
