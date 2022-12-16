@@ -71,7 +71,7 @@ def minibatch_mc_variational_loss(
         q_lp += [q_lp_]
         penalized_like += [penalized_like_]
 
-        elbo_samples += [q_lp * batch_size/dataset_size - penalized_like]
+        elbo_samples += [q_lp_ * batch_size/dataset_size - penalized_like_]
 
     q_lp = tf.concat(q_lp, axis=0)
     penalized_like = tf.concat(penalized_like, axis=0)
