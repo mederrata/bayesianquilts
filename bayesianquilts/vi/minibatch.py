@@ -13,21 +13,29 @@ import tensorflow_probability as tfp
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import \
-    print_tensors_in_checkpoint_file
+from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
 from tensorflow.python.training import optimizer
 from tensorflow_probability.python import util as tfp_util
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import \
-    TransformedDistribution
-from tensorflow_probability.python.internal import (dtype_util, prefer_static,
-                                                    tensorshape_util)
+from tensorflow_probability.python.distributions.transformed_distribution import (
+    TransformedDistribution,
+)
+from tensorflow_probability.python.internal import (
+    dtype_util,
+    prefer_static,
+    tensorshape_util,
+)
 from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
 
 from tensorflow_probability.python.vi import GradientEstimators
-from bayesianquilts.util import batched_minimize, TransformedVariable, minimize_distributed
+from bayesianquilts.util import (
+    batched_minimize,
+    TransformedVariable,
+    minimize_distributed,
+)
 from bayesianquilts.util import _trace_variables, _trace_loss
+
 
 @tf.function
 def minibatch_mc_variational_loss(
@@ -41,7 +49,7 @@ def minibatch_mc_variational_loss(
     seed=None,
     data=None,
     name=None,
-    **kwargs
+    **kwargs,
 ):
     """The minibatch variational loss
 
@@ -59,29 +67,29 @@ def minibatch_mc_variational_loss(
     Returns:
         _type_: _description_
     """
-    elbo_samples = []
-    q_lp = []
-    penalized_like = []
-    for _ in tf.range(sample_batches):
+    elbo_samples = [tf.zeros(sample_size, tf.float64)] * sample_batches
+    q_lp = [tf.zeros(sample_size, tf.float64)] * sample_batches
+    penalized_like = [tf.zeros(sample_size, tf.float64)] * sample_batches
+    for n in range(sample_batches):
         q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
-            [sample_size], seed=seed)
+            [sample_size], seed=seed
+        )
 
-        penalized_like_ = target_log_prob_fn(
-            data=data, prior_weight=tf.constant(batch_size/dataset_size), **q_samples)
-        q_lp += [q_lp_]
-        penalized_like += [penalized_like_]
-
-        elbo_samples += [q_lp_ * batch_size/dataset_size - penalized_like_]
+        penalized_like[n] += target_log_prob_fn(
+            data=data, prior_weight=tf.constant(batch_size / dataset_size), **q_samples
+        )
+        q_lp[n] += q_lp_
+        elbo_samples[n] += q_lp[n] * batch_size / dataset_size - penalized_like[n]
 
     q_lp__ = tf.concat(q_lp, axis=0)
     penalized_like__ = tf.concat(penalized_like, axis=0)
     elbo_samples__ = tf.concat(elbo_samples, axis=0)
     if not importance_weight:
         return tf.reduce_mean(elbo_samples__)
-    max_val = tf.reduce_mean(penalized_like__-q_lp__)
-    weights = tf.exp(penalized_like__-q_lp__-max_val)
-    
-    weights = weights/tf.reduce_sum(weights)
+    max_val = tf.reduce_mean(penalized_like__ - q_lp__)
+    weights = tf.exp(penalized_like__ - q_lp__ - max_val)
+
+    weights = weights / tf.reduce_sum(weights)
     elbo = tf.reduce_sum(elbo_samples__ * weights)
 
     # @TODO compute importance weights
