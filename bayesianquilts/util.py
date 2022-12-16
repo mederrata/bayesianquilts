@@ -698,7 +698,7 @@ def tf_data_cardinality(tf_dataset):
 
 
 def split_tensor(tensor, num_parts, axis=0):
-    fn = split_tensor_factory(num_parts=num_parts, axis=axis)
+    fn = split_tensor_factory(num_parts=tf.constant(num_parts), axis=axis)
     return fn(tensor)
 
 

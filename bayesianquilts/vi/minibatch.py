@@ -67,10 +67,10 @@ def minibatch_mc_variational_loss(
         _type_: _description_
     """
 
-    @tf.function
+    #@tf.function
     def sample_expected_elbo(sample_size, sample_batches):
         expected_elbo = tf.zeros(1, tf.float64)
-        for _ in tf.range(sample_batches):
+        for _ in range(sample_batches):
             q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
                 sample_size, seed=seed
             )
@@ -87,7 +87,7 @@ def minibatch_mc_variational_loss(
         return expected_elbo
 
     expceted_elbo = sample_expected_elbo(
-        tf.constant(sample_size), tf.constant(sample_batches)
+        sample_size, sample_batches
     )
 
     return expceted_elbo
