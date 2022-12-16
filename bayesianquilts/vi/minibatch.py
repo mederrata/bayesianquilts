@@ -60,14 +60,21 @@ def minibatch_mc_variational_loss(
         _type_: _description_
     """
     elbo_samples = []
+    q_lp = []
+    penalized_like = []
     for _ in range(sample_batches):
-        q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
+        q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
             [sample_size], seed=seed)
 
-        penalized_like = target_log_prob_fn(
+        penalized_like_ = target_log_prob_fn(
             data=data, prior_weight=tf.constant(batch_size/dataset_size), **q_samples)
+        q_lp += [q_lp_]
+        penalized_like += [penalized_like_]
 
         elbo_samples += [q_lp * batch_size/dataset_size - penalized_like]
+
+    q_lp = tf.concat(q_lp, axis=0)
+    penalized_like = tf.concat(penalized_like, axis=0)
     elbo_samples = tf.concat(elbo_samples, axis=0)
     if not importance_weight:
         return tf.reduce_mean(elbo_samples)
