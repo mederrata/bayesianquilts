@@ -66,7 +66,7 @@ def minibatch_mc_variational_loss(
     Returns:
         _type_: _description_
     """
-    @tf.function(autograph=False)
+    @tf.function
     def sample_elbo():
         q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
                         sample_size, seed=seed
