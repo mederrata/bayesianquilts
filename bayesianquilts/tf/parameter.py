@@ -472,6 +472,8 @@ class Decomposed(object):
             tensors ([type], optional): [description]. Defaults to None.
         """
         # flatten the indices
+        tensors = self._tensor_parts if tensors is None else tensors
+
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
 
@@ -545,6 +547,8 @@ class Decomposed(object):
             interaction_indices ([type]): [description]
             tensors ([type], optional): [description]. Defaults to None.
         """
+        tensors = self._tensor_parts if tensors is None else tensors
+
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
