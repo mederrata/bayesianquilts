@@ -474,6 +474,7 @@ class Decomposed(object):
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
+        tensors = self._tensor_parts if tensors is None else tensors
 
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
@@ -548,6 +549,7 @@ class Decomposed(object):
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
+        tensors = self._tensor_parts if tensors is None else tensors
 
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
@@ -619,6 +621,7 @@ class Decomposed(object):
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
+        tensors = self._tensor_parts if tensors is None else tensors
 
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
