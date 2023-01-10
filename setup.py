@@ -42,9 +42,9 @@ setuptools.setup(
         # We need to check for direct depends or we can delete scipy.
         'scipy',
         'protobuf~=3.19.0',
-        'tensorflow>=2.10.1',
+        'tensorflow==2.10.1',
         'tensorflow-probability==0.18.0',
-        'tensorflow-addons',
+        'tensorflow-addons==0.18.0',
         'jax',
         'natsort',
         'tqdm',

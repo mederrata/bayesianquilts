@@ -698,15 +698,12 @@ def tf_data_cardinality(tf_dataset):
 
 
 def split_tensor(tensor, num_parts, axis=0):
-    max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
-    bulk = tensor[: max_divisor * num_parts, ...]
-    remainder = tensor[max_divisor * num_parts :, ...]
-    bulk = tf.split(bulk, num_parts, axis=axis)
-    return bulk + [remainder]
+    fn = split_tensor_factory(num_parts=tf.constant(num_parts), axis=axis)
+    return fn(tensor)
 
 
 def split_tensor_factory(num_parts, axis=0):
-    @tf.function
+    @tf.function(experimental_relax_shapes=True)
     def split_tensor(tensor):
         max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
         bulk = tensor[: max_divisor * num_parts, ...]

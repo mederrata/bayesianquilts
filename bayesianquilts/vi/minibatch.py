@@ -13,34 +13,42 @@ import tensorflow_probability as tfp
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import \
-    print_tensors_in_checkpoint_file
+from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
 from tensorflow.python.training import optimizer
 from tensorflow_probability.python import util as tfp_util
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import \
-    TransformedDistribution
-from tensorflow_probability.python.internal import (dtype_util, prefer_static,
-                                                    tensorshape_util)
+from tensorflow_probability.python.distributions.transformed_distribution import (
+    TransformedDistribution,
+)
+from tensorflow_probability.python.internal import (
+    dtype_util,
+    prefer_static,
+    tensorshape_util,
+)
 from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
 
 from tensorflow_probability.python.vi import GradientEstimators
-from bayesianquilts.util import batched_minimize, TransformedVariable, minimize_distributed
+from bayesianquilts.util import (
+    batched_minimize,
+    TransformedVariable,
+    minimize_distributed,
+)
 from bayesianquilts.util import _trace_variables, _trace_loss
 
 
+# @tf.function(autograph=False)
 def minibatch_mc_variational_loss(
     target_log_prob_fn,
     surrogate_posterior,
     dataset_size,
     batch_size,
     sample_size=1,
-    importance_weight=False,
+    sample_batches=1,
     seed=None,
     data=None,
     name=None,
-    **kwargs
+    **kwargs,
 ):
     """The minibatch variational loss
 
@@ -58,24 +66,35 @@ def minibatch_mc_variational_loss(
     Returns:
         _type_: _description_
     """
-    
-    q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
-        [sample_size], seed=seed)
+    @tf.function(autograph=False)
+    def sample_elbo():
+        q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
+                        sample_size, seed=seed
+                    )
+        return q_samples, q_lp_
 
-    penalized_like = target_log_prob_fn(
-        data=data, prior_weight=tf.constant(batch_size/dataset_size), **q_samples)
+    @tf.function
+    def sample_expected_elbo(sample_batches):
+        expected_elbo = tf.zeros(1, tf.float64)
+        for _ in tf.range(sample_batches):
+            q_samples, q_lp_ = sample_elbo()
 
-    elbo_samples = q_lp * batch_size/dataset_size - penalized_like
-    if not importance_weight:
-        return tf.reduce_mean(elbo_samples)
-    max_val = tf.reduce_mean(penalized_like-q_lp)
-    weights = tf.exp(penalized_like-q_lp-max_val)
-    
-    weights = weights/tf.reduce_sum(weights)
-    elbo = tf.reduce_sum(elbo_samples * weights)
+            penalized_ll = target_log_prob_fn(
+                data=data,
+                prior_weight=tf.constant(batch_size / dataset_size),
+                **q_samples,
+            )
+            expected_elbo += tf.cast(
+                tf.reduce_mean(q_lp_ * batch_size / dataset_size - penalized_ll),
+                expected_elbo.dtype)
+        expected_elbo /= tf.cast(sample_batches, expected_elbo.dtype)
+        return expected_elbo
 
-    # @TODO compute importance weights
-    return elbo
+    expected_elbo = sample_expected_elbo(
+        tf.constant(sample_batches)
+    )
+
+    return expected_elbo
 
 
 def minibatch_fit_surrogate_posterior(
@@ -87,6 +106,7 @@ def minibatch_fit_surrogate_posterior(
     num_epochs=1000,
     trace_fn=_trace_loss,
     sample_size=8,
+    sample_batches=1,
     check_every=1,
     decay_rate=0.9,
     learning_rate=1.0,
@@ -117,6 +137,7 @@ def minibatch_fit_surrogate_posterior(
             target_log_prob_fn,
             surrogate_posterior,
             sample_size=sample_size,
+            sample_batches=sample_batches,
             data=data,
             dataset_size=dataset_size,
             batch_size=batch_size,
