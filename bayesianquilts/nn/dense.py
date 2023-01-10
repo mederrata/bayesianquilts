@@ -14,16 +14,16 @@ from bayesianquilts.metastrings import (
 from bayesianquilts.util import (
     clip_gradients,
     run_chain,
-
 )
 from bayesianquilts.distributions import SqrtInverseGamma
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.metastrings import horseshoe_code, horseshoe_lambda_code
-from bayesianquilts.vi.advi import  (
+from bayesianquilts.vi.advi import (
     build_trainable_InverseGamma_dist,
     build_trainable_normal_dist,
     build_surrogate_posterior,
 )
+
 tfd = tfp.distributions
 
 
@@ -45,10 +45,8 @@ class Dense(object):
         self.dtype = dtype
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
-        self.activation_fn = tf.nn.relu if (
-            activation_fn is None) else activation_fn
-        self.weight_tensors = self.sample_initial_nn_params(
-            input_size, layer_sizes)
+        self.activation_fn = tf.nn.relu if (activation_fn is None) else activation_fn
+        self.weight_tensors = self.sample_initial_nn_params(input_size, layer_sizes)
 
     def dense(self, X, W, b, activation):
         return activation(
@@ -61,7 +59,9 @@ class Dense(object):
 
     def eval(self, input, weight_tensors=None, activation=None):
         activation = self.activation_fn if (activation is None) else activation
-        weight_tensors = weight_tensors if weight_tensors is not None else self.weight_tensors
+        weight_tensors = (
+            weight_tensors if weight_tensors is not None else self.weight_tensors
+        )
 
         net = input
         net = tf.cast(net, self.dtype)
@@ -72,8 +72,12 @@ class Dense(object):
             net = self.dense(
                 net, self.weight_scale * weights, self.bias_scale * biases, activation
             )
-        net = self.dense(net, self.weight_scale *
-                         weights_list[-1], self.bias_scale * biases_list[-1], tf.identity)
+        net = self.dense(
+            net,
+            self.weight_scale * weights_list[-1],
+            self.bias_scale * biases_list[-1],
+            tf.identity,
+        )
         return net
 
     def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
@@ -87,8 +91,7 @@ class Dense(object):
         if priors is None:
             for j, layer_size in enumerate(layer_sizes[1:]):
                 weights = tfd.Normal(
-                    loc=tf.zeros(
-                        (layer_sizes[j], layer_size), dtype=self.dtype),
+                    loc=tf.zeros((layer_sizes[j], layer_size), dtype=self.dtype),
                     scale=1e-1,
                 ).sample()
                 biases = tfd.Normal(
@@ -170,9 +173,13 @@ class DenseHorseshoe(BayesianModel):
         self.nn = Dense(
             input_size=input_size,
             layer_sizes=layer_sizes,
-            weight_scale=weight_scale, bias_scale=bias_scale,
-            activation_fn=activation_fn, dtype=dtype)
+            weight_scale=weight_scale,
+            bias_scale=bias_scale,
+            activation_fn=activation_fn,
+            dtype=dtype,
+        )
         self.decay = decay  # dimensional decay
+        self.input_size = input_size
 
         self.create_distributions()
 
@@ -214,14 +221,20 @@ class DenseHorseshoe(BayesianModel):
             distribution_dict[f"w_{j}"] = tfd.Independent(
                 tfd.Horseshoe(
                     scale=tf.ones(
-                        [self.layer_sizes[j], self.layer_sizes[j+1]], dtype=self.dtype)
-                ), reinterpreted_batch_ndims=2)
+                        [self.layer_sizes[j], self.layer_sizes[j + 1]], dtype=self.dtype
+                    )
+                ),
+                reinterpreted_batch_ndims=2,
+            )
 
             initial[f"w_{j}"] = tf.convert_to_tensor(
-                1e-3*np.random.normal(
-                    np.zeros([self.layer_sizes[j], self.layer_sizes[j+1]]),
-                    np.ones([self.layer_sizes[j], self.layer_sizes[j+1]])
-                ), self.dtype)
+                1e-3
+                * np.random.normal(
+                    np.zeros([self.layer_sizes[j], self.layer_sizes[j + 1]]),
+                    np.ones([self.layer_sizes[j], self.layer_sizes[j + 1]]),
+                ),
+                self.dtype,
+            )
             """
             distribution_dict[f"w_{j}"] = eval(
                 horseshoe_lambda_code.format(
@@ -241,8 +254,14 @@ class DenseHorseshoe(BayesianModel):
 
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Horseshoe(
-                    scale=tf.ones([self.layer_sizes[j+1], ], dtype=self.dtype)
-                ), reinterpreted_batch_ndims=1
+                    scale=tf.ones(
+                        [
+                            self.layer_sizes[j + 1],
+                        ],
+                        dtype=self.dtype,
+                    )
+                ),
+                reinterpreted_batch_ndims=1,
             )
 
             """
