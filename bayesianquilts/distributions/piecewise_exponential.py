@@ -53,32 +53,30 @@ class PiecewiseExponential(tfd.Distribution):
 
         parameters = dict(locals())
         with tf.name_scope(name) as name:
-            dtype = dtype_util.common_dtype(
-                [rates, breakpoints], dtype_hint=tf.float32)
+            dtype = dtype_util.common_dtype([rates, breakpoints], dtype_hint=tf.float32)
             self._rates = tensor_util.convert_nonref_to_tensor(
-                rates, dtype=dtype, name='rates')
+                rates, dtype=dtype, name="rates"
+            )
             self._breakpoints = tensor_util.convert_nonref_to_tensor(
-                breakpoints, dtype=dtype, name='breakpoints')
+                breakpoints, dtype=dtype, name="breakpoints"
+            )
             super(PiecewiseExponential, self).__init__(
                 dtype=dtype,
                 validate_args=validate_args,
                 allow_nan_stats=allow_nan_stats,
-                reparameterization_type=(
-                    reparameterization.FULLY_REPARAMETERIZED
-                ),
+                reparameterization_type=(reparameterization.FULLY_REPARAMETERIZED),
                 parameters=parameters,
-                name=name)
+                name=name,
+            )
 
         params = self.broadcast_to_params(tile=True)
-        rates = params['rates']
-        breakpoints = params['breakpoints']
+        rates = params["rates"]
+        breakpoints = params["breakpoints"]
         # compute cumulative masses
-        time_gaps = (
-            breakpoints[..., 1:] - breakpoints[..., :-1]
-        )
+        time_gaps = breakpoints[..., 1:] - breakpoints[..., :-1]
         time_gaps = tf.concat(
-            [breakpoints[..., 0][..., tf.newaxis], time_gaps],
-            axis=-1)
+            [breakpoints[..., 0][..., tf.newaxis], time_gaps], axis=-1
+        )
         masses = rates[..., :-1] * time_gaps
         self.cum_hazards = tf.cumsum(masses, axis=-1)
 
@@ -96,10 +94,14 @@ class PiecewiseExponential(tfd.Distribution):
         return dict(
             rates=parameter_properties.ParameterProperties(
                 default_constraining_bijector_fn=(
-                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))),
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype))
+                )
+            ),
             breakpoints=parameter_properties.ParameterProperties(
                 default_constraining_bijector_fn=(
-                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype)))),
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype))
+                )
+            ),
         )
 
     def broadcast_to_params(self, value=None, tile=False):
@@ -130,8 +132,9 @@ class PiecewiseExponential(tfd.Distribution):
             rates = rates[rank_diff * (tf.newaxis,) + (...,)]
         elif len(breakpoint_batch_shape) < len(rate_batch_shape):
             rates = self.rates
-            rank_diff = len(self.rates.shape.as_list()) - \
-                len(self._breakpoints.shape.as_list())
+            rank_diff = len(self.rates.shape.as_list()) - len(
+                self._breakpoints.shape.as_list()
+            )
             breakpoints = self._breakpoints[rank_diff * (tf.newaxis,) + (...,)]
 
         else:
@@ -151,18 +154,18 @@ class PiecewiseExponential(tfd.Distribution):
                     breakpoint_tile += [1]
                 else:
                     if r >= d:
-                        breakpoint_tile += [int(r/d)]
+                        breakpoint_tile += [int(r / d)]
                         rate_tile += [1]
                     else:
                         breakpoint_tile += [1]
-                        rate_tile += [int(d/r)]
+                        rate_tile += [int(d / r)]
             rate_tile += [1]
             breakpoint_tile += [1]
             rates = tf.tile(rates, rate_tile)
             breakpoints = tf.tile(breakpoints, breakpoint_tile)
 
         if value is None:
-            return {'rates': rates, 'breakpoints': breakpoints}
+            return {"rates": rates, "breakpoints": breakpoints}
 
         rate_batch_shape = rates.shape.as_list()[:-1]
         breakpoint_batch_shape = breakpoints.shape.as_list()[:-1]
@@ -172,14 +175,8 @@ class PiecewiseExponential(tfd.Distribution):
         except ValueError:
             data_batch_shape = [1]
 
-        cond1 = (
-            data_batch_shape == breakpoint_batch_shape[-(
-                len(data_batch_shape)):]
-        )
-        cond2 = (
-            data_batch_shape == rate_batch_shape[-(
-                len(data_batch_shape)):]
-        )
+        cond1 = data_batch_shape == breakpoint_batch_shape[-(len(data_batch_shape)) :]
+        cond2 = data_batch_shape == rate_batch_shape[-(len(data_batch_shape)) :]
         if cond1 or cond2:
             # we are possibly overlapping already so we'll broadcast as is
             pass
@@ -190,17 +187,18 @@ class PiecewiseExponential(tfd.Distribution):
             permutation.remove(len(rate_batch_shape))
             permutation.append(len(rate_batch_shape))
             rates = tf.transpose(rates, permutation)
-            breakpoints = breakpoints[(...,) +
-                                      len(data_batch_shape) * (tf.newaxis,)]
+            breakpoints = breakpoints[(...,) + len(data_batch_shape) * (tf.newaxis,)]
             breakpoints = tf.transpose(breakpoints, permutation)
 
             if tile:
                 rates = tf.tile(
-                    rates, [1]*len(rate_batch_shape) + data_batch_shape + [1])
+                    rates, [1] * len(rate_batch_shape) + data_batch_shape + [1]
+                )
                 breakpoints = tf.tile(
-                    breakpoints, [1]*len(rate_batch_shape) + data_batch_shape + [1])
+                    breakpoints, [1] * len(rate_batch_shape) + data_batch_shape + [1]
+                )
 
-        return {'value': value, 'rates': rates, 'breakpoints': breakpoints}
+        return {"value": value, "rates": rates, "breakpoints": breakpoints}
 
     def hazard(self, value, **kwargs):
         """Query self.rates to determine the hazard. This function
@@ -220,16 +218,16 @@ class PiecewiseExponential(tfd.Distribution):
 
         """
         reshaped = self.broadcast_to_params(value, tile=True)
-        value = reshaped['value']
-        rates = reshaped['rates']
-        breakpoints = reshaped['breakpoints']
+        value = reshaped["value"]
+        rates = reshaped["rates"]
+        breakpoints = reshaped["breakpoints"]
 
         indices = tf.reduce_sum(
-            tf.cast(value[..., tf.newaxis] >= breakpoints, tf.int32),
-            axis=-1)
+            tf.cast(value[..., tf.newaxis] >= breakpoints, tf.int32), axis=-1
+        )
         hazards = tf.gather_nd(
-            rates,
-            indices[..., tf.newaxis], batch_dims=(len(rates.shape.as_list())-1))
+            rates, indices[..., tf.newaxis], batch_dims=(len(rates.shape.as_list()) - 1)
+        )
         return hazards
 
     def cumulative_hazard(self, value, ret_hazard=False, **kwargs):
@@ -249,23 +247,23 @@ class PiecewiseExponential(tfd.Distribution):
 
         """
         reshaped = self.broadcast_to_params(value, tile=True)
-        value = reshaped['value']
-        rates = reshaped['rates']
-        breakpoints = reshaped['breakpoints']
+        value = reshaped["value"]
+        rates = reshaped["rates"]
+        breakpoints = reshaped["breakpoints"]
         indicator = tf.cast(value[..., tf.newaxis] > breakpoints, tf.int32)
-        indices = tf.reduce_sum(
-            indicator,
-            axis=-1)
+        indices = tf.reduce_sum(indicator, axis=-1)
         hazards = tf.gather_nd(
-            rates,
-            indices[..., tf.newaxis], batch_dims=(len(rates.shape.as_list())-1))
+            rates, indices[..., tf.newaxis], batch_dims=(len(rates.shape.as_list()) - 1)
+        )
         # @TODO Fix this
 
         breakpoints = tf.pad(
-            breakpoints, [(0, 0)]*(len(breakpoints.shape.as_list())-1) + [(1, 0)])
+            breakpoints, [(0, 0)] * (len(breakpoints.shape.as_list()) - 1) + [(1, 0)]
+        )
         changepoints = tf.gather_nd(
             breakpoints,
-            indices[..., tf.newaxis],  batch_dims=(len(breakpoints.shape.as_list())-1)
+            indices[..., tf.newaxis],
+            batch_dims=(len(breakpoints.shape.as_list()) - 1),
         )
         try:
             if len(self.cum_hazards.shape.as_list()) < len(indicator.shape.as_list()):
@@ -277,9 +275,10 @@ class PiecewiseExponential(tfd.Distribution):
         cum_hazard = tf.reduce_sum(
             tf.cast(indicator, cum_hazard.dtype)
             * (cum_hazard + tf.zeros_like(tf.cast(indicator, cum_hazard.dtype))),
-            axis=-1)
+            axis=-1,
+        )
 
-        cum_hazard += hazards*(value-changepoints)
+        cum_hazard += hazards * (value - changepoints)
         if ret_hazard:
             return cum_hazard, hazards
         return cum_hazard
@@ -292,14 +291,308 @@ class PiecewiseExponential(tfd.Distribution):
 
         return tf.math.log(haz) - cum
 
-    def _cdf(self, value, name='cdf', **kwargs):
+    def _cdf(self, value, name="cdf", **kwargs):
         return 1.0 - tf.math.exp(self._log_survival_function(value))
 
 
+class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
+    def __init__(
+        self,
+        rates,
+        breakpoints,
+        validate_args=False,
+        allow_nan_stats=True,
+        name="PiecewiseExponentialRaggedBreaks",
+    ):
+
+        parameters = dict(locals())
+        with tf.name_scope(name) as name:
+            dtype = dtype_util.common_dtype([rates, breakpoints], dtype_hint=tf.float32)
+            self._rates = tf.ragged.constant(rates, dtype=dtype, name="rates")
+            self._breakpoints = tf.ragged.constant(
+                breakpoints, dtype=dtype, name="breakpoints"
+            )
+            super(PiecewiseExponential, self).__init__(
+                dtype=dtype,
+                validate_args=validate_args,
+                allow_nan_stats=allow_nan_stats,
+                reparameterization_type=(reparameterization.FULLY_REPARAMETERIZED),
+                parameters=parameters,
+                name=name,
+            )
+        params = self.broadcast_to_params(tile=True)
+        rates = params["rates"]
+        breakpoints = params["breakpoints"]
+        # compute cumulative masses
+        time_gaps = tf.map_fn(
+            lambda x: tf.concat(
+                [x[..., 0][..., tf.newaxis], x[..., 1:] - x[..., :-1]], axis=-1
+            ),
+            breakpoints,
+            dtype=breakpoints.dtype,
+            fn_output_signature=tf.RaggedTensorSpec(
+                shape=[None], dtype=breakpoints.dtype
+            ),
+        )
+
+        masses = rates[..., :-1] * time_gaps
+
+        self.cum_hazards = tf.map_fn(
+            lambda x: tf.cumsum(x, axis=-1),
+            masses,
+            dtype=masses.dtype,
+            fn_output_signature=tf.RaggedTensorSpec(shape=[None], dtype=masses.dtype),
+        )
+        return
+
+    @classmethod
+    def _parameter_properties(cls, dtype, num_classes=None):
+        # pylint: disable=g-long-lambda
+        return dict(
+            rates=parameter_properties.ParameterProperties(
+                default_constraining_bijector_fn=(
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype))
+                )
+            ),
+            breakpoints=parameter_properties.ParameterProperties(
+                default_constraining_bijector_fn=(
+                    lambda: softplus_bijector.Softplus(low=dtype_util.eps(dtype))
+                )
+            ),
+        )
+
+    def hazard(self, value, **kwargs):
+        """Query self.rates to determine the hazard. This function
+        takes care of broadcasting between
+
+        self._breakpoints is of shape param_batch_shape x n_breaks
+        self._rates is of shape param_batch_shape x (n_breaks - 1)
+            param_batch_shape might also have an axis common with value
+
+        Args:
+            value (tf.Tensor): Tensor of shape data_batch_shape
+
+        Returns:
+            hazard (tf.Tensor): Tensor of shape
+                param_batch_shape x data_batch_shape
+
+
+        """
+
+        reshaped = self.broadcast_to_params(value, tile=True)
+        value = reshaped["value"]
+        rates = reshaped["rates"]
+        breakpoints = reshaped["breakpoints"]
+        indices = tf.map_fn(
+            lambda x: tf.reduce_sum(
+                tf.cast(x[0][..., tf.newaxis] >= x[1], tf.int32), axis=-1
+            ),
+            (value, breakpoints),
+            dtype=(value.dtype, breakpoints.dtype),
+            fn_output_signature=tf.TensorSpec(shape=[None], dtype=tf.int32),
+        )
+
+        hazards = tf.gather(
+            rates, indices[..., tf.newaxis], batch_dims=(len(rates.shape.as_list()) - 1)
+        )
+        return hazards
+
+    def cumulative_hazard(self, value, ret_hazard=False, **kwargs):
+        """Get the cumulative hazard. This function
+        takes care of broadcasting between
+
+        self._breakpoints is of shape param_batch_shape x n_breaks
+        self._rates is of shape param_batch_shape x (n_breaks - 1)
+
+        Args:
+            value (tf.Tensor): Tensor of shape data_batch_shape
+
+        Returns:
+            hazard (tf.Tensor): Tensor of shape
+                param_batch_shape x data_batch_shape
+
+
+        """
+        reshaped = self.broadcast_to_params(value, tile=True)
+        value = reshaped["value"]
+        rates = reshaped["rates"]
+        breakpoints = reshaped["breakpoints"]
+
+        indicator = tf.map_fn(
+            lambda x: tf.cast(x[0][..., tf.newaxis] >= x[1], tf.int32),
+            (value, breakpoints),
+            dtype=(value.dtype, breakpoints.dtype),
+            fn_output_signature=tf.RaggedTensorSpec(
+                shape=breakpoints.shape.as_list()[1:], dtype=tf.int32
+            ),
+        )
+        indices = tf.reduce_sum(indicator, axis=-1)
+        hazards = tf.gather(rates, indices, batch_dims=(len(rates.shape.as_list()) - 1))
+        hazards = hazards.to_tensor()
+
+        flat = tf.RaggedTensor.from_row_starts(
+            breakpoints.flat_values, breakpoints.values.row_starts()
+        )
+        flat = tf.map_fn(
+            lambda x: tf.pad(x, [[1, 0]]),
+            flat,
+            flat.dtype,
+            fn_output_signature=tf.RaggedTensorSpec(shape=[None], dtype=tf.float32),
+        )
+        changepoints = tf.gather(
+            flat,
+            indices.flat_values,
+            batch_dims=(len(flat.shape.as_list()) - 1),
+        )
+
+        changepoints = tf.reshape(changepoints, indices.shape)
+        try:
+            if len(self.cum_hazards.shape.as_list()) < len(indicator.shape.as_list()):
+                cum_hazard = self.cum_hazards[tf.newaxis, ...]
+            else:
+                cum_hazard = self.cum_hazards
+        except ValueError:
+            cum_hazard = self.cum_hazards
+        cum_hazard = tf.reduce_sum(
+            tf.cast(indicator, cum_hazard.dtype)
+            * (cum_hazard + tf.zeros_like(tf.cast(indicator, cum_hazard.dtype))),
+            axis=-1,
+        )
+        cum_hazard = cum_hazard.to_tensor()
+
+        cum_hazard += hazards * (value[..., tf.newaxis] - changepoints)
+        if ret_hazard:
+            return cum_hazard, hazards
+        return cum_hazard
+
+    def broadcast_to_params(self, value=None, tile=False):
+        breakpoint_batch_shape = self._breakpoints.shape.as_list()[:-1]
+        rate_batch_shape = self.rates.shape.as_list()[:-1]
+        if len(breakpoint_batch_shape) > len(rate_batch_shape):
+            breakpoints = self._breakpoints
+            rank_diff = len(breakpoint_batch_shape) - len(rate_batch_shape)
+            rates = tf.map_fn(
+                lambda x: x[rank_diff * (tf.newaxis,) + (...,)],
+                rates,
+                dtype=rates.dtype,
+                fn_output_signature=tf.RaggedTensorSpec(
+                    shape=[None], dtype=rates.dtype
+                ),
+            )
+        elif len(breakpoint_batch_shape) < len(rate_batch_shape):
+            rates = self.rates
+            rank_diff = len(self.rates.shape.as_list()) - len(
+                self._breakpoints.shape.as_list()
+            )
+            breakpoints = self._breakpoints[rank_diff * (tf.newaxis,) + (...,)]
+
+        else:
+            breakpoints = self._breakpoints
+            rates = self.rates
+
+        rate_batch_shape = rates.shape.as_list()[:-1]
+        breakpoint_batch_shape = breakpoints.shape.as_list()[:-1]
+
+        # tile rates and breakpoints so they have the same batch shape
+
+        if tile:
+            rate_tile = []
+            breakpoint_tile = []
+            for r, d in zip(rate_batch_shape, breakpoint_batch_shape):
+                if r is None or d is None:
+                    rate_tile += [1]
+                    breakpoint_tile += [1]
+                else:
+                    if r >= d:
+                        breakpoint_tile += [int(r / d)]
+                        rate_tile += [1]
+                    else:
+                        breakpoint_tile += [1]
+                        rate_tile += [int(d / r)]
+            if not (rate_tile == [1] and breakpoint_tile == [1]):
+                rate_tile += [1]
+                breakpoint_tile += [1]
+                rates = tf.map_fn(
+                    lambda x: tf.tile(x, rate_tile),
+                    rates,
+                    dtype=rates.dtype,
+                    fn_output_signature=tf.RaggedTensorSpec(
+                        shape=[None], dtype=rates.dtype
+                    ),
+                )
+                breakpoints = tf.map_fn(
+                    lambda x: tf.tile(x, breakpoint_tile),
+                    breakpoints,
+                    dtype=breakpoints.dtype,
+                    fn_output_signature=tf.RaggedTensorSpec(
+                        shape=[None], dtype=rates.dtype
+                    ),
+                )
+
+        if value is None:
+            return {"rates": rates, "breakpoints": breakpoints}
+
+        rate_batch_shape = rates.shape.as_list()[:-1]
+        breakpoint_batch_shape = breakpoints.shape.as_list()[:-1]
+        value = tf.squeeze(tf.convert_to_tensor(value))
+        try:
+            data_batch_shape = value.shape.as_list()
+        except ValueError:
+            data_batch_shape = [1]
+
+        cond1 = data_batch_shape == breakpoint_batch_shape[-(len(data_batch_shape)) :]
+        cond2 = data_batch_shape == rate_batch_shape[-(len(data_batch_shape)) :]
+        if cond1 or cond2:
+            # we are possibly overlapping already so we'll broadcast as is
+            pass
+        else:
+            # need to insert dimensions for broadcasting
+            # rates = rates[(...,) + len(data_batch_shape) * (tf.newaxis,)]
+            # rates = rates[len(data_batch_shape) * (tf.newaxis,) + (...,)]
+            # permutation = list(range(len(rates.shape.as_list())))
+            # permutation.remove(len(rate_batch_shape))
+            # permutation.append(len(rate_batch_shape))
+            # rates = tf.transpose(rates, permutation)
+            # breakpoints = breakpoints[(...,) + len(data_batch_shape) * (tf.newaxis,)]
+            # breakpoints = breakpoints[len(data_batch_shape) * (tf.newaxis,) + (...,)]
+            # breakpoints = tf.transpose(breakpoints, permutation)
+
+            if tile:
+                rates = tf.map_fn(
+                    lambda x: rates,
+                    value,
+                    dtype=value.dtype,
+                    fn_output_signature=tf.RaggedTensorSpec(
+                        shape=rates.shape, dtype=value.dtype
+                    ),
+                )
+                breakpoints = tf.map_fn(
+                    lambda x: breakpoints,
+                    value,
+                    dtype=value.dtype,
+                    fn_output_signature=tf.RaggedTensorSpec(
+                        shape=breakpoints.shape, dtype=value.dtype
+                    ),
+                )
+        return {"value": value, "rates": rates, "breakpoints": breakpoints}
+
+
 def demo():
+
+    print("Demo: one set of breakpoints for each rate")
+    pe = PiecewiseExponentialRaggedBreaks(
+        rates=[[1, 2, 1, 3], [1, 3, 1]], breakpoints=[[2, 8, 10], [3, 8]]
+    )
+    h = pe.hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
+    print(h)
+    ch = pe.cumulative_hazard([1, 2.5, 10, 4.5])
+    print(ch)
+    pr = pe.log_prob([1, 2.5, 10, 4.5])
+    print(pr)
+
+
     print("Demo: one set of breakpoints to broadcast")
-    pe = PiecewiseExponential(
-        rates=[[1, 2, 1], [1, 3, 1]], breakpoints=[[2, 8]])
+    pe = PiecewiseExponential(rates=[[1, 2, 1], [1, 3, 1]], breakpoints=[[2, 8]])
     h = pe.hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
     print(h)
     ch = pe.cumulative_hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
@@ -309,13 +602,15 @@ def demo():
 
     print("Demo: one set of breakpoints for each rate")
     pe = PiecewiseExponential(
-        rates=[[1, 2, 1], [1, 3, 1]], breakpoints=[[2, 8], [3, 8]])
+        rates=[[1, 2, 1], [1, 3, 1]], breakpoints=[[2, 8], [3, 8]]
+    )
     h = pe.hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
     print(h)
     ch = pe.cumulative_hazard([1, 2.5, 10, 4.5])
     print(ch)
     pr = pe.log_prob([1, 2.5, 10, 4.5])
     print(pr)
+
 
     batched_rates = [[[1, 2, 1], [1, 3, 1]], [[1, 2, 1], [1, 3, 1]]]
     # @TODO make this class batch-safe
