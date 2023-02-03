@@ -87,7 +87,7 @@ class BayesianModel(ABC):
         lr_decay_factor=0.99,
         check_every=1,
         set_expectations=True,
-        sample_size=4,
+        sample_size=24,
         sample_batches=1,
         trainable_variables=None,
         temp_dir=tempfile.gettempdir(),
