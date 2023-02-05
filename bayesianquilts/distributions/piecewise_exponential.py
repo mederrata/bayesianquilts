@@ -18,7 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-
+import numpy as np
 import tensorflow.compat.v2 as tf
 import tensorflow_probability as tfp
 
@@ -307,11 +307,22 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
 
         parameters = dict(locals())
         with tf.name_scope(name) as name:
-            dtype = dtype_util.common_dtype([rates, breakpoints], dtype_hint=tf.float32)
-            self._rates = tf.ragged.constant(rates, dtype=dtype, name="rates")
-            self._breakpoints = tf.ragged.constant(
-                breakpoints, dtype=dtype, name="breakpoints"
-            )
+            try:
+                dtype = dtype_util.common_dtype(
+                    [rates, breakpoints], dtype_hint=tf.float32
+                )
+            except TypeError:
+                dtype = rates.dtype
+            if isinstance(rates, tf.RaggedTensor):
+                self._rates = rates
+            else:
+                self._rates = tf.ragged.constant(rates, dtype=dtype, name="rates")
+            if isinstance(breakpoints, tf.RaggedTensor):
+                self._breakpoints = breakpoints
+            else:
+                self._breakpoints = tf.ragged.constant(
+                    breakpoints, dtype=dtype, name="breakpoints"
+                )
             super(PiecewiseExponential, self).__init__(
                 dtype=dtype,
                 validate_args=validate_args,
@@ -320,29 +331,34 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
                 parameters=parameters,
                 name=name,
             )
-        params = self.broadcast_to_params(tile=True)
-        rates = params["rates"]
+        try:
+            params = self.broadcast_to_params(tile=True)
+            rates = params["rates"]
+        except ValueError:
+            pass
         breakpoints = params["breakpoints"]
+
+        def get_cumhazards(x):
+            b = x[0].to_tensor()
+            r = x[1].to_tensor()
+            b = tf.concat(
+                [b[..., 0][..., tf.newaxis], b[..., 1:] - b[..., :-1]], axis=-1
+            )
+            masses = r[..., :-1] * tf.cast(b, rates.dtype)
+            hazards = tf.cumsum(masses, axis=-1)
+            hazards = tf.RaggedTensor.from_tensor(hazards, ragged_rank=1)
+            return hazards
+
         # compute cumulative masses
-        time_gaps = tf.map_fn(
-            lambda x: tf.concat(
-                [x[..., 0][..., tf.newaxis], x[..., 1:] - x[..., :-1]], axis=-1
-            ),
-            breakpoints,
-            dtype=breakpoints.dtype,
-            fn_output_signature=tf.RaggedTensorSpec(
-                shape=[None], dtype=breakpoints.dtype
-            ),
-        )
-
-        masses = rates[..., :-1] * time_gaps
-
         self.cum_hazards = tf.map_fn(
-            lambda x: tf.cumsum(x, axis=-1),
-            masses,
-            dtype=masses.dtype,
-            fn_output_signature=tf.RaggedTensorSpec(shape=[None], dtype=masses.dtype),
+            get_cumhazards,
+            (breakpoints, rates),
+            dtype=(breakpoints.dtype, rates.dtype),
+            fn_output_signature=tf.RaggedTensorSpec(
+                shape=breakpoints.shape.as_list()[1:], dtype=rates.dtype
+            ),
         )
+
         return
 
     @classmethod
@@ -379,22 +395,31 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
 
         """
 
-        reshaped = self.broadcast_to_params(value, tile=True)
-        value = reshaped["value"]
-        rates = reshaped["rates"]
-        breakpoints = reshaped["breakpoints"]
-        indices = tf.map_fn(
-            lambda x: tf.reduce_sum(
-                tf.cast(x[0][..., tf.newaxis] >= x[1], tf.int32), axis=-1
-            ),
-            (value, breakpoints),
-            dtype=(value.dtype, breakpoints.dtype),
-            fn_output_signature=tf.TensorSpec(shape=[None], dtype=tf.int32),
+        rates = self.rates
+        breakpoints = self.breakpoints
+
+        batch_shape = rates.shape.as_list()[1:-1]
+
+        # x = (value[0], breakpoints[0], rates[0])
+        def get_hazard(x):
+            v, b, r = x
+            if isinstance(v, tf.RaggedTensor):
+                v = v.to_tensor()
+            if isinstance(b, tf.RaggedTensor):
+                b = b.to_tensor()
+            indices = tf.reduce_sum(
+                tf.cast(v[..., tf.newaxis] >= b, tf.int32), axis=-1
+            )
+            hazards = tf.gather(tf.transpose(r.to_tensor()), indices)[0, ...]
+            return hazards
+
+        hazards = tf.map_fn(
+            get_hazard,
+            (value, breakpoints, rates),
+            dtype=(value.dtype, breakpoints.dtype, rates.dtype),
+            fn_output_signature=tf.TensorSpec(shape=batch_shape, dtype=rates.dtype),
         )
 
-        hazards = tf.gather(
-            rates, indices[..., tf.newaxis], batch_dims=(len(rates.shape.as_list()) - 1)
-        )
         return hazards
 
     def cumulative_hazard(self, value, ret_hazard=False, **kwargs):
@@ -414,7 +439,6 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
 
         """
         reshaped = self.broadcast_to_params(value, tile=True)
-        value = reshaped["value"]
         rates = reshaped["rates"]
         breakpoints = reshaped["breakpoints"]
 
@@ -437,7 +461,7 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
             lambda x: tf.pad(x, [[1, 0]]),
             flat,
             flat.dtype,
-            fn_output_signature=tf.RaggedTensorSpec(shape=[None], dtype=tf.float32),
+            fn_output_signature=tf.RaggedTensorSpec(shape=[None], dtype=flat.dtype),
         )
         changepoints = tf.gather(
             flat,
@@ -509,28 +533,30 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
                     else:
                         breakpoint_tile += [1]
                         rate_tile += [int(d / r)]
-            if not (rate_tile == [1] and breakpoint_tile == [1]):
+            if not (np.prod(rate_tile) == 1 and np.prod(breakpoint_tile) == 1):
                 rate_tile += [1]
                 breakpoint_tile += [1]
-                rates = tf.map_fn(
-                    lambda x: tf.tile(x, rate_tile),
-                    rates,
-                    dtype=rates.dtype,
-                    fn_output_signature=tf.RaggedTensorSpec(
-                        shape=[None], dtype=rates.dtype
-                    ),
-                )
-                breakpoints = tf.map_fn(
-                    lambda x: tf.tile(x, breakpoint_tile),
-                    breakpoints,
-                    dtype=breakpoints.dtype,
-                    fn_output_signature=tf.RaggedTensorSpec(
-                        shape=[None], dtype=rates.dtype
-                    ),
-                )
+                if np.prod(rate_tile) != 1:
+                    rates = tf.map_fn(
+                        lambda x: tf.tile(x, rate_tile),
+                        rates,
+                        dtype=rates.dtype,
+                        fn_output_signature=tf.RaggedTensorSpec(
+                            shape=[None], dtype=rates.dtype
+                        ),
+                    )
+                if np.prod(breakpoint_tile) != 1:
+                    breakpoints = tf.map_fn(
+                        lambda x: tf.tile(x, breakpoint_tile[1:]),
+                        breakpoints,
+                        dtype=breakpoints.dtype,
+                        fn_output_signature=tf.RaggedTensorSpec(
+                            shape=breakpoint_tile[1:2] + [None], dtype=breakpoints.dtype
+                        ),
+                    )
 
-        if value is None:
-            return {"rates": rates, "breakpoints": breakpoints}
+        # if value is None:
+        return {"rates": rates, "breakpoints": breakpoints}
 
         rate_batch_shape = rates.shape.as_list()[:-1]
         breakpoint_batch_shape = breakpoints.shape.as_list()[:-1]
@@ -590,7 +616,6 @@ def demo():
     pr = pe.log_prob([1, 2.5, 10, 4.5])
     print(pr)
 
-
     print("Demo: one set of breakpoints to broadcast")
     pe = PiecewiseExponential(rates=[[1, 2, 1], [1, 3, 1]], breakpoints=[[2, 8]])
     h = pe.hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
@@ -610,7 +635,6 @@ def demo():
     print(ch)
     pr = pe.log_prob([1, 2.5, 10, 4.5])
     print(pr)
-
 
     batched_rates = [[[1, 2, 1], [1, 3, 1]], [[1, 2, 1], [1, 3, 1]]]
     # @TODO make this class batch-safe
