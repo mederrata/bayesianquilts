@@ -90,6 +90,7 @@ class BayesianModel(ABC):
         sample_size=24,
         sample_batches=1,
         trainable_variables=None,
+        unormalized_log_prob_fn=None,
         temp_dir=tempfile.gettempdir(),
         test_fn=None,
         **kwargs,
@@ -116,7 +117,9 @@ class BayesianModel(ABC):
 
         def run_approximation(num_epochs):
             losses = minibatch_fit_surrogate_posterior(
-                target_log_prob_fn=self.unormalized_log_prob,
+                target_log_prob_fn=unormalized_log_prob_fn
+                if unormalized_log_prob_fn is not None
+                else self.unormalized_log_prob,
                 surrogate_posterior=self.surrogate_distribution,
                 dataset_size=dataset_size,
                 batch_size=batch_size,
