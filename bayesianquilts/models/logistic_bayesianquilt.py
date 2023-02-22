@@ -22,11 +22,9 @@ from tensorflow.python.ops.math_ops import _bucketize as bucketize
 import tensorflow_probability as tfp
 
 from bayesianquilts.model import BayesianModel
-from mederrata_spmf import PoissonFactorization
 from bayesianquilts.tf.parameter import Interactions, Decomposed
 from bayesianquilts.vi.advi import build_surrogate_posterior
 from bayesianquilts.util import flatten, split_tensor
-from tensorflow_probability.python.vi import csiszar_divergence
 from bayesianquilts.metrics.classification import accuracy, auc
 
 from tensorflow.python.ops import math_ops
