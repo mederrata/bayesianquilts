@@ -290,6 +290,7 @@ def batched_minimize(
     check_every=1,
     clip_value=10.0,
     test_fn=None,
+    verbose=False,
     temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
     **kwargs,
 ):
@@ -408,7 +409,9 @@ def batched_minimize(
                 if processing_fn is not None:
                     data = processing_fn(data)
                 batch_loss, grads = train_loop_body(state_initializer, step, data)
-
+                if verbose:
+                    for g, v in zip(grads, watched_variables):
+                        tf.print(v.name, tf.reduce_max(g))
                 if np.isfinite(batch_loss.numpy()):
                     batch_losses += [batch_loss.numpy()]
                 else:
@@ -421,6 +424,11 @@ def batched_minimize(
                     if decay_step > max_decay_steps:
                         converged = True
                         continue
+                if verbose:
+                    if batch_losses[-1] < 0:
+                        pass
+                    else:
+                        pass
 
             loss = tf.reduce_mean(batch_losses)
             avg_losses += [loss.numpy()]
@@ -575,10 +583,13 @@ def run_chain(
             target_log_prob_fn=target_log_prob_fn,
             num_leapfrog_steps=num_leapfrog_steps,
             step_size=0.1,
-            state_gradients_are_stopped=True),
-        bijector=unconstraining_bijectors)
+            state_gradients_are_stopped=True,
+        ),
+        bijector=unconstraining_bijectors,
+    )
     kernel = tfp.mcmc.SimpleStepSizeAdaptation(
-        inner_kernel=kernel, num_adaptation_steps=int(burnin * 0.8))
+        inner_kernel=kernel, num_adaptation_steps=int(burnin * 0.8)
+    )
     pbar = tfp.experimental.mcmc.ProgressBarReducer(num_steps)
     """
     kernel = tfp.mcmc.DualAveragingStepSizeAdaptation(
@@ -592,7 +603,6 @@ def run_chain(
     )
     """
     kernel = tfp.experimental.mcmc.WithReductions(kernel, pbar)
-
 
     # Sampling from the chain.
     chain_state, sampler_stat = tfp.mcmc.sample_chain(
