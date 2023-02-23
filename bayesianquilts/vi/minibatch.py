@@ -84,6 +84,19 @@ def minibatch_mc_variational_loss(
                 prior_weight=tf.constant(batch_size / dataset_size),
                 **q_samples,
             )
+            finite_portion = tf.where(
+                tf.math.is_finite(penalized_ll),
+                penalized_ll,
+                tf.zeros_like(penalized_ll),
+            )
+
+            min_val = tf.reduce_min(finite_portion) - 10
+            max_val = tf.reduce_max(finite_portion) + 10
+            penalized_ll = tf.where(
+                tf.isfinite(penalized_ll),
+                penalized_ll,
+                min_val * tf.ones_like(penalized_ll),
+            )
             expected_elbo += tf.cast(
                 tf.reduce_mean(q_lp_ * batch_size / dataset_size - penalized_ll),
                 expected_elbo.dtype,
@@ -110,7 +123,7 @@ def minibatch_fit_surrogate_posterior(
     decay_rate=0.9,
     learning_rate=1.0,
     clip_value=10.0,
-    clip_by='norm',
+    clip_by="norm",
     trainable_variables=None,
     jit_compile=None,
     abs_tol=None,

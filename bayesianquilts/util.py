@@ -438,6 +438,7 @@ def batched_minimize(
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
                     decay_step += 1
+                    print(f"New learning rate: {optimizer.lr}", flush=True)
                     if decay_step > max_decay_steps:
                         converged = True
                         continue
