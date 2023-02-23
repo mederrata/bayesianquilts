@@ -359,7 +359,7 @@ def batched_minimize(
                         )
                         for t in flat_grads
                     ],
-                ),
+                )
             )
         train_op = opt.apply_gradients(zip(adjusted, watched_variables))
         with tf.control_dependencies([train_op]):
