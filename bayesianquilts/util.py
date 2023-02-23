@@ -335,13 +335,14 @@ def batched_minimize(
             loss = loss_fn(data=data)
         watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, watched_variables)
+        flat_grads = tf.nest.flatten(grads)
         if clip_by == "norm":
             adjusted = tf.nest.pack_sequence_as(
                 grads,
                 tf.clip_by_global_norm(
                     [
                         tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
-                        for t in tf.nest.flatten(grads)
+                        for t in flat_grads
                     ],
                     clip_value,
                 )[0],
@@ -356,7 +357,7 @@ def batched_minimize(
                             -clip_value,
                             clip_value,
                         )
-                        for t in tf.nest.flatten(grads)
+                        for t in flat_grads
                     ],
                 ),
             )
@@ -364,10 +365,10 @@ def batched_minimize(
         with tf.control_dependencies([train_op]):
             state = trace_fn(
                 tf.identity(loss),
-                [tf.identity(g) for g in grads],
+                [tf.identity(g) for g in adjusted],
                 [tf.identity(v) for v in watched_variables],
             )
-        return state, grads
+        return state, adjusted
 
     with tf.name_scope(name) as name:
         # Compute the shape of the trace without executing the graph.
