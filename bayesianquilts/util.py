@@ -434,11 +434,9 @@ def batched_minimize(
                 if np.isfinite(batch_loss.numpy()):
                     batch_losses += [batch_loss.numpy()]
                 else:
-                    print("Batch loss NaN", flush=True)
+                    print("Batch loss NaN, skipping it for this epoch", flush=True)
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
-
-                    batch_loss = train_loop_body(state_initializer, step, data)
                     decay_step += 1
                     if decay_step > max_decay_steps:
                         converged = True
