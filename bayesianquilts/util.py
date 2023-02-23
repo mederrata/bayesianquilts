@@ -545,6 +545,58 @@ def batched_minimize(
         return trace
 
 
+def clip_gradients(fn, clip_value, clip_by="norm", dtype=tf.float64):
+    def wrapper(*args, **kwargs):
+        @tf.custom_gradient
+        def grad_wrapper(*flat_args_kwargs):
+            with tf.GradientTape() as tape:
+                tape.watch(flat_args_kwargs)
+                new_args, new_kwargs = tf.nest.pack_sequence_as(
+                    (args, kwargs), flat_args_kwargs
+                )
+                ret = fn(*new_args, **new_kwargs)
+
+            def grad_fn(*dy):
+                flat_grads = tape.gradient(ret, flat_args_kwargs, output_gradients=dy)
+
+                if clip_by == "norm":
+                    adjusted = tf.nest.pack_sequence_as(
+                        flat_grads,
+                        tf.clip_by_global_norm(
+                            [
+                                tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
+                                for t in tf.nest.flatten(flat_grads)
+                            ],
+                            clip_value,
+                        )[0],
+                    )
+                else:
+                    adjusted = (
+                        tf.nest.pack_sequence_as(
+                            flat_grads,
+                            [
+                                tf.clip_by_value(
+                                    tf.where(tf.math.is_finite(t), t, tf.zeros_like(t)),
+                                    -clip_value,
+                                    clip_value,
+                                )
+                                for t in tf.nest.flatten(flat_grads)
+                            ],
+                        ),
+                    )
+                flat_grads = tf.nest.map_structure(
+                    lambda g: tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)),
+                    flat_grads,
+                )
+                return adjusted
+
+            return ret, grad_fn
+
+        return grad_wrapper(*[tf.nest.flatten((args, kwargs))])
+
+    return wrapper
+
+
 @tf.function(autograph=False, experimental_compile=True)
 def run_chain(
     init_state,
