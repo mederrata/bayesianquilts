@@ -420,6 +420,8 @@ def batched_minimize(
         batches_since_plateau = 0
         accepted_batches = 0
         num_resets = 0
+        save_path = manager.save()
+        print(f"Saved a checkpoint: {save_path}", flush=True)
         while (step < num_epochs) and not converged:
             batch_losses = []
             for data in batched_data_factory():
