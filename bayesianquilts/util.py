@@ -288,7 +288,7 @@ def batched_minimize(
     processing_fn=None,
     name="minimize",
     check_every=1,
-    clip_by='norm',
+    clip_by="norm",
     clip_value=10.0,
     test_fn=None,
     verbose=False,
@@ -347,15 +347,18 @@ def batched_minimize(
                 )[0],
             )
         else:
-            adjusted = tf.nest.pack_sequence_as(
-                grads,
-                tf.clip_by_value(
+            adjusted = (
+                tf.nest.pack_sequence_as(
+                    grads,
                     [
-                        tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
+                        tf.clip_by_value(
+                            tf.where(tf.math.is_finite(t), t, tf.zeros_like(t)),
+                            -clip_value,
+                            clip_value,
+                        )
                         for t in tf.nest.flatten(grads)
                     ],
-                    -clip_value, clip_value,
-                )[0],
+                ),
             )
         train_op = opt.apply_gradients(zip(adjusted, watched_variables))
         with tf.control_dependencies([train_op]):
@@ -540,35 +543,6 @@ def batched_minimize(
         cp_status.assert_consumed()
         trace.latest_checkpoint = manager.latest_checkpoint
         return trace
-
-
-def clip_gradients(fn, clip_value, clip_by='norm', dtype=tf.float64):
-    def wrapper(*args, **kwargs):
-        @tf.custom_gradient
-        def grad_wrapper(*flat_args_kwargs):
-            with tf.GradientTape() as tape:
-                tape.watch(flat_args_kwargs)
-                new_args, new_kwargs = tf.nest.pack_sequence_as(
-                    (args, kwargs), flat_args_kwargs
-                )
-                ret = fn(*new_args, **new_kwargs)
-
-            def grad_fn(*dy):
-                flat_grads = tape.gradient(ret, flat_args_kwargs, output_gradients=dy)
-                flat_grads = tf.nest.map_structure(
-                    lambda g: tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)),
-                    flat_grads,
-                )
-                if clip_by == "norm":
-                    return tf.clip_by_global_norm(flat_grads, clip_value)[0]
-                else:
-                    return tf.clip_by_value(flat_grads, -clip_value, clip_value)[0]
-
-            return ret, grad_fn
-
-        return grad_wrapper(*[tf.nest.flatten((args, kwargs))])
-
-    return wrapper
 
 
 @tf.function(autograph=False, experimental_compile=True)
