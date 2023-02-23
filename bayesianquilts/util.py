@@ -354,7 +354,7 @@ def batched_minimize(
                         tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
                         for t in tf.nest.flatten(grads)
                     ],
-                    clip_value,
+                    -clip_value, clip_value,
                 )[0],
             )
         train_op = opt.apply_gradients(zip(adjusted, watched_variables))
@@ -562,7 +562,7 @@ def clip_gradients(fn, clip_value, clip_by='norm' dtype=tf.float64):
                 if clip_by == "norm":
                     return tf.clip_by_global_norm(flat_grads, clip_value)[0]
                 else:
-                    return tf.clip_by_value(flat_grads, clip_value)[0]
+                    return tf.clip_by_value(flat_grads, -clip_value, clip_value)[0]
 
             return ret, grad_fn
 
