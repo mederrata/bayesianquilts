@@ -93,7 +93,7 @@ def minibatch_mc_variational_loss(
             min_val = tf.reduce_min(finite_portion) - 10
             max_val = tf.reduce_max(finite_portion) + 10
             penalized_ll = tf.where(
-                tf.isfinite(penalized_ll),
+                tf.math.is_finite(penalized_ll),
                 penalized_ll,
                 min_val * tf.ones_like(penalized_ll),
             )
