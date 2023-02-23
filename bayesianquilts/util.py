@@ -542,7 +542,7 @@ def batched_minimize(
         return trace
 
 
-def clip_gradients(fn, clip_value, clip_by='norm' dtype=tf.float64):
+def clip_gradients(fn, clip_value, clip_by='norm', dtype=tf.float64):
     def wrapper(*args, **kwargs):
         @tf.custom_gradient
         def grad_wrapper(*flat_args_kwargs):
