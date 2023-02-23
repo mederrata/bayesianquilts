@@ -288,6 +288,7 @@ def batched_minimize(
     processing_fn=None,
     name="minimize",
     check_every=1,
+    clip_by='norm',
     clip_value=10.0,
     test_fn=None,
     verbose=False,
@@ -334,16 +335,28 @@ def batched_minimize(
             loss = loss_fn(data=data)
         watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, watched_variables)
-        adjusted = tf.nest.pack_sequence_as(
-            grads,
-            tf.clip_by_global_norm(
-                [
-                    tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
-                    for t in tf.nest.flatten(grads)
-                ],
-                clip_value,
-            )[0],
-        )
+        if clip_by == "norm":
+            adjusted = tf.nest.pack_sequence_as(
+                grads,
+                tf.clip_by_global_norm(
+                    [
+                        tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
+                        for t in tf.nest.flatten(grads)
+                    ],
+                    clip_value,
+                )[0],
+            )
+        else:
+            adjusted = tf.nest.pack_sequence_as(
+                grads,
+                tf.clip_by_value(
+                    [
+                        tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
+                        for t in tf.nest.flatten(grads)
+                    ],
+                    clip_value,
+                )[0],
+            )
         train_op = opt.apply_gradients(zip(adjusted, watched_variables))
         with tf.control_dependencies([train_op]):
             state = trace_fn(
@@ -529,7 +542,7 @@ def batched_minimize(
         return trace
 
 
-def clip_gradients(fn, clip_value, dtype=tf.float64):
+def clip_gradients(fn, clip_value, clip_by='norm' dtype=tf.float64):
     def wrapper(*args, **kwargs):
         @tf.custom_gradient
         def grad_wrapper(*flat_args_kwargs):
@@ -546,7 +559,10 @@ def clip_gradients(fn, clip_value, dtype=tf.float64):
                     lambda g: tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)),
                     flat_grads,
                 )
-                return tf.clip_by_global_norm(flat_grads, clip_value)[0]
+                if clip_by == "norm":
+                    return tf.clip_by_global_norm(flat_grads, clip_value)[0]
+                else:
+                    return tf.clip_by_value(flat_grads, clip_value)[0]
 
             return ret, grad_fn
 
