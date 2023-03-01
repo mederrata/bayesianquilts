@@ -151,7 +151,7 @@ class BayesianModel(ABC):
                 self.set_calibration_expectations()
         return losses
 
-    def set_calibration_expectations(self, samples=50, variational=True):
+    def set_calibration_expectations(self, samples=24, variational=True):
         if variational:
             mean, var = FactorizedDistributionMoments(
                 self.surrogate_distribution, samples=samples
@@ -351,7 +351,7 @@ class BayesianModel(ABC):
     def reconstitute(self, state):
         self.create_distributions()
         try:
-            for j, value in enumerate(state["surrogate_vars"]):
+            for j, value in tqdm(enumerate(state["surrogate_vars"])):
                 self.surrogate_distribution.trainable_variables[j].assign(
                     tf.cast(value, self.dtype)
                 )
