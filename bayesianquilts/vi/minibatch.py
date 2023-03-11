@@ -25,10 +25,12 @@ from tensorflow_probability.python.internal import (
     prefer_static,
     tensorshape_util,
 )
-from tensorflow_probability.python.vi import csiszar_divergence
+from tensorflow_probability.python.vi import csiszar_divergence, kl_reverse
 from tqdm import tqdm
 
 from tensorflow_probability.python.vi import GradientEstimators
+from tensorflow_probability.python import monte_carlo
+
 from bayesianquilts.util import (
     batched_minimize,
     TransformedVariable,
@@ -43,11 +45,15 @@ def minibatch_mc_variational_loss(
     surrogate_posterior,
     dataset_size,
     batch_size,
+    data,
     sample_size=1,
     sample_batches=1,
+    importance_sample_size=1,
+    discrepancy_fn=kl_reverse,
+    use_reparameterization=None,
+    gradient_estimator=None,
+    stopped_surrogate_posterior=None,
     seed=None,
-    data=None,
-    name=None,
     **kwargs,
 ):
     """The minibatch variational loss
@@ -68,45 +74,45 @@ def minibatch_mc_variational_loss(
     """
     # @tf.function
     def sample_elbo():
-        q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
+        q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
             sample_size, seed=seed
         )
-        return q_samples, q_lp_
+        return q_samples, q_lp
 
     # @tf.function(autograph=False)
-    def sample_expected_elbo(sample_batches):
-        expected_elbo = tf.zeros(1, tf.float64)
-        for _ in range(sample_batches):
-            q_samples, q_lp_ = sample_elbo()
+    batch_expectations = []
 
-            penalized_ll = target_log_prob_fn(
-                data=data,
-                prior_weight=tf.constant(batch_size / dataset_size),
-                **q_samples,
-            )
-            finite_portion = tf.where(
-                tf.math.is_finite(penalized_ll),
-                penalized_ll,
-                tf.zeros_like(penalized_ll),
-            )
+    reweighted = functools.partial(
+        target_log_prob_fn,
+        data=data,
+        prior_weight=tf.cast(batch_size / dataset_size, tf.float64),
+    )
 
-            min_val = tf.reduce_min(finite_portion) - 10
-            max_val = tf.reduce_max(finite_portion) + 10
-            penalized_ll = tf.where(
-                tf.math.is_finite(penalized_ll),
-                penalized_ll,
-                min_val * tf.ones_like(penalized_ll),
-            )
-            expected_elbo += tf.cast(
-                tf.reduce_mean(q_lp_ * batch_size / dataset_size - penalized_ll),
-                expected_elbo.dtype,
-            )
-        expected_elbo /= tf.cast(sample_batches, expected_elbo.dtype)
-        return expected_elbo
+    for _ in range(sample_batches):
+        q_samples, q_lp = sample_elbo()
 
-    expected_elbo = sample_expected_elbo(sample_batches)
-
-    return expected_elbo
+        batch_expectations += [
+            monte_carlo.expectation(
+                f=csiszar_divergence._make_importance_weighted_divergence_fn(
+                    reweighted,
+                    surrogate_posterior=surrogate_posterior,
+                    discrepancy_fn=discrepancy_fn,
+                    precomputed_surrogate_log_prob=q_lp,
+                    importance_sample_size=importance_sample_size,
+                    gradient_estimator=gradient_estimator,
+                    stopped_surrogate_posterior=(stopped_surrogate_posterior),
+                ),
+                samples=q_samples,
+                # Log-prob is only used if `gradient_estimator == SCORE_FUNCTION`.
+                log_prob=surrogate_posterior.log_prob,
+                use_reparameterization=(
+                    gradient_estimator != GradientEstimators.SCORE_FUNCTION
+                ),
+            )
+        ]
+    batch_expectations = tf.concat(batch_expectations, axis=0)
+    batch_expectations = tf.reduce_mean(batch_expectations, axis=0)
+    return batch_expectations
 
 
 def minibatch_fit_surrogate_posterior(

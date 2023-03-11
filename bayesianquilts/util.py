@@ -326,7 +326,7 @@ def batched_minimize(
     )
 
     @tf.function(autograph=False)
-    def train_loop_body(old_result, step, data=None):
+    def train_loop_body(step, data=None):
         """Run a single optimization step."""
         if data is None:
             data = next(iter(batched_data_factory()))
@@ -372,9 +372,7 @@ def batched_minimize(
         return state, adjusted
 
     @tf.function(autograph=False)
-    def train_loop_body_fullbatch(
-        old_result, step, data, gradient_accumulation, num_batches
-    ):
+    def train_loop_body_fullbatch(step, data, gradient_accumulation, num_batches):
         """Run a single optimization step."""
         """Run a single optimization step."""
         if data is None:
@@ -416,13 +414,14 @@ def batched_minimize(
 
         def _apply():
             train_op = opt.apply_gradients(zip(adjusted, watched_variables))
+            return train_op
 
         _ = tf.cond(
-            tf.equal(tf.math.floormod(step, num_batches), 0),
+            tf.equal(tf.math.floormod(step + 1, num_batches), 0),
             lambda: _apply(),
             lambda: None,
         )
-        _ = opt.apply_gradients(zip(gradient_accumulation, watched_variables))
+        # _ = opt.apply_gradients(zip(gradient_accumulation, watched_variables))
 
         state = trace_fn(
             tf.identity(loss),
@@ -432,30 +431,6 @@ def batched_minimize(
         return state, adjusted
 
     with tf.name_scope(name) as name:
-        # Compute the shape of the trace without executing the graph.
-        concrete_loop_body = train_loop_body.get_concrete_function(
-            tf.TensorSpec([]),
-            tf.TensorSpec(
-                [],
-            ),
-        )  # Inputs ignored.
-        if all(
-            [
-                tensorshape_util.is_fully_defined(shape)
-                for shape in tf.nest.flatten(concrete_loop_body.output_shapes)
-            ]
-        ):
-            state_initializer = tf.nest.map_structure(
-                lambda shape, dtype: tf.zeros(shape, dtype=dtype),
-                concrete_loop_body.output_shapes,
-                concrete_loop_body.output_dtypes,
-            )
-            initial_trace_step = None
-        else:
-            state_initializer = concrete_loop_body(
-                tf.convert_to_tensor(0.0), tf.convert_to_tensor(0.0)
-            )
-            initial_trace_step = state_initializer
 
         converged = False
         losses = []
@@ -507,7 +482,6 @@ def batched_minimize(
                     data = processing_fn(data)
                 if _acumulate_this_epoch:
                     batch_loss, grads = train_loop_body_fullbatch(
-                        state_initializer,
                         step,
                         data,
                         gradient_accumulation,
@@ -519,7 +493,7 @@ def batched_minimize(
                         lambda: batches_per_epoch,
                         lambda: batches_per_epoch + 1,
                     )
-                    batch_loss, grads = train_loop_body(state_initializer, step, data)
+                    batch_loss, grads = train_loop_body(step, data)
 
                 if verbose:
                     for g, v in zip(grads, watched_variables):
