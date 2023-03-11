@@ -110,7 +110,6 @@ def minibatch_mc_variational_loss(
                 ),
             )
         ]
-    batch_expectations = tf.concat(batch_expectations, axis=0)
     batch_expectations = tf.reduce_mean(batch_expectations, axis=0)
     return batch_expectations
 
