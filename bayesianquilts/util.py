@@ -367,18 +367,18 @@ def batched_minimize(
             _ = opt.apply_gradients(zip(adjusted, watched_variables))
             return None
 
-        train_op = tf.cond(
+        _ = tf.cond(
             tf.math.is_finite(tf.reduce_sum(loss)),
             lambda: _apply(),
             lambda: None,
         )
         # train_op = opt.apply_gradients(zip(adjusted, watched_variables))
-        with tf.control_dependencies([train_op]):
-            state = trace_fn(
-                tf.identity(loss),
-                [tf.identity(g) for g in adjusted],
-                [tf.identity(v) for v in watched_variables],
-            )
+
+        state = trace_fn(
+            tf.identity(loss),
+            [tf.identity(g) for g in adjusted],
+            [tf.identity(v) for v in watched_variables],
+        )
         return state, adjusted
 
     @tf.function(autograph=False)
