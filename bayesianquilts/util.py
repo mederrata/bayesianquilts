@@ -368,7 +368,7 @@ def batched_minimize(
             return None
 
         train_op = tf.cond(
-            tf.math.isfinite(tf.reduce_sum(loss)),
+            tf.math.is_finite(tf.reduce_sum(loss)),
             lambda: _apply(),
             lambda: None,
         )
