@@ -374,7 +374,6 @@ def batched_minimize(
     @tf.function(autograph=False)
     def train_loop_body_fullbatch(step, data, gradient_accumulation, num_batches):
         """Run a single optimization step."""
-        """Run a single optimization step."""
         if data is None:
             data = next(iter(batched_data_factory()))
         with tf.GradientTape(
@@ -413,8 +412,9 @@ def batched_minimize(
             gradient_accumulation[i].assign_add(t, read_value=False)
 
         def _apply():
-            train_op = opt.apply_gradients(zip(adjusted, watched_variables))
-            return train_op
+            print("Applying accumulated grad", flush=True)
+            _ = opt.apply_gradients(zip(adjusted, watched_variables))
+            return None
 
         _ = tf.cond(
             tf.equal(tf.math.floormod(step + 1, num_batches), 0),
@@ -477,12 +477,12 @@ def batched_minimize(
                     for i, v in enumerate(watched_variables)
                 ]
                 _acumulate_this_epoch = True
-            for data in tqdm(batched_data_factory()):
+            for j, data in tqdm(enumerate(batched_data_factory())):
                 if processing_fn is not None:
                     data = processing_fn(data)
                 if _acumulate_this_epoch:
                     batch_loss, grads = train_loop_body_fullbatch(
-                        step,
+                        j,
                         data,
                         gradient_accumulation,
                         batches_per_epoch,
