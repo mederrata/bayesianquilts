@@ -457,7 +457,7 @@ def batched_minimize(
         while (step < num_epochs) and not converged:
             batch_losses = []
             _acumulate_this_epoch = False
-            if accumulate_batches and (batches_per_epoch.numpy() > 0):
+            if accumulate_batches:
                 if gradient_accumulation is not None:
                     _ = apply_grads(
                         gradient_accumulation, watched_variables
@@ -480,6 +480,8 @@ def batched_minimize(
                     batch_loss, grads = accumulate_grads(
                         data, gradient_accumulation, watched_variables
                     )
+                    if np.isfinite(batch_loss.numpy()):
+                        batch_losses += [batch_loss.numpy()]
                 else:
                     batches_per_epoch = tf.cond(
                         tf.math.greater(step, 0),
@@ -487,22 +489,22 @@ def batched_minimize(
                         lambda: batches_per_epoch + 1,
                     )
                     batch_loss, grads = compute_grads(watched_variables, data)
-
+                    if np.isfinite(batch_loss.numpy()):
+                        batch_losses += [batch_loss.numpy()]
+                        _ = apply_grads(grads, watched_variables)
+                    else:
+                        print("Batch loss NaN, skipping it for this epoch", flush=True)
+                        # cp_status = checkpoint.restore(manager.latest_checkpoint)
+                        # cp_status.assert_consumed()
+                        # decay_step += 1
+                        # print(f"New learning rate: {optimizer.lr}", flush=True)
+                        # if decay_step > max_decay_steps:
+                        #    converged = True
+                        #    continue
                 if verbose:
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
-                if np.isfinite(batch_loss.numpy()):
-                    batch_losses += [batch_loss.numpy()]
-                    _ = apply_grads(grads, watched_variables)
-                else:
-                    print("Batch loss NaN, skipping it for this epoch", flush=True)
-                    # cp_status = checkpoint.restore(manager.latest_checkpoint)
-                    # cp_status.assert_consumed()
-                    # decay_step += 1
-                    # print(f"New learning rate: {optimizer.lr}", flush=True)
-                    # if decay_step > max_decay_steps:
-                    #    converged = True
-                    #    continue
+
                 if verbose:
                     if batch_losses[-1] < 0:
                         pass
