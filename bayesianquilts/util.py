@@ -362,6 +362,7 @@ def batched_minimize(
                     for t in flat_grads
                 ],
             )
+
         def _apply():
             print("Applying accumulated grad", flush=True)
             _ = opt.apply_gradients(zip(adjusted, watched_variables))
@@ -422,7 +423,7 @@ def batched_minimize(
             gradient_accumulation[i].assign_add(t, read_value=False)
 
         def _apply():
-            print("Applying accumulated grad", flush=True)
+            tf.print("Applying accumulated grad")
             _ = opt.apply_gradients(zip(adjusted, watched_variables))
             return None
 
