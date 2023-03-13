@@ -326,7 +326,7 @@ def batched_minimize(
     )
 
     @tf.function(autograph=False)
-    def train_loop_body(step, data=None):
+    def train_loop_body(watched_variables, data=None):
         """Run a single optimization step."""
         if data is None:
             data = next(iter(batched_data_factory()))
@@ -383,7 +383,7 @@ def batched_minimize(
         return state, adjusted
 
     @tf.function(autograph=False)
-    def train_loop_body_fullbatch(step, data, gradient_accumulation, num_batches):
+    def accumulate_grads(data, gradient_accumulation, trainable_variables):
         """Run a single optimization step."""
         if data is None:
             data = next(iter(batched_data_factory()))
@@ -420,19 +420,9 @@ def batched_minimize(
                 ],
             )
         for i, t in enumerate(adjusted):
-            gradient_accumulation[i].assign_add(t, read_value=False)
-
-        def _apply():
-            tf.print("Applying accumulated grad")
-            _ = opt.apply_gradients(zip(adjusted, watched_variables))
-            return None
-
-        _ = tf.cond(
-            tf.equal(tf.math.floormod(step + 1, num_batches), 0),
-            lambda: _apply(),
-            lambda: None,
-        )
-        # _ = opt.apply_gradients(zip(gradient_accumulation, watched_variables))
+            gradient_accumulation[i].assign_add(
+                t / tf.cast(batches_per_epoch, t.dtype), read_value=False
+            )
 
         state = trace_fn(
             tf.identity(loss),
@@ -440,6 +430,9 @@ def batched_minimize(
             [tf.identity(v) for v in watched_variables],
         )
         return state, adjusted
+
+    def apply_accumulated_grads(gradient_accumulation, trainable_variables):
+        return opt.apply_gradients(zip(gradient_accumulation, trainable_variables))
 
     with tf.name_scope(name) as name:
 
@@ -466,17 +459,21 @@ def batched_minimize(
         batches_since_checkpoint = 0
         batches_since_plateau = 0
         accepted_batches = 0
-        num_resets = 0
         save_path = manager.save()
         if batches_per_epoch is None:
             batches_per_epoch = tf.cast(0, tf.int32)
         else:
             batches_per_epoch = tf.cast(batches_per_epoch, tf.int32)
         print(f"Saved a checkpoint: {save_path}", flush=True)
+        gradient_accumulation = None
         while (step < num_epochs) and not converged:
             batch_losses = []
             _acumulate_this_epoch = False
             if accumulate_batches and (batches_per_epoch.numpy() > 0):
+                if gradient_accumulation is not None:
+                    _ = apply_accumulated_grads(
+                        gradient_accumulation, watched_variables
+                    )
                 gradient_accumulation = [
                     tf.Variable(
                         tf.zeros_like(v),
@@ -492,11 +489,8 @@ def batched_minimize(
                 if processing_fn is not None:
                     data = processing_fn(data)
                 if _acumulate_this_epoch:
-                    batch_loss, grads = train_loop_body_fullbatch(
-                        j,
-                        data,
-                        gradient_accumulation,
-                        batches_per_epoch,
+                    batch_loss, grads = accumulate_grads(
+                        data, gradient_accumulation, watched_variables
                     )
                 else:
                     batches_per_epoch = tf.cond(
@@ -504,7 +498,7 @@ def batched_minimize(
                         lambda: batches_per_epoch,
                         lambda: batches_per_epoch + 1,
                     )
-                    batch_loss, grads = train_loop_body(step, data)
+                    batch_loss, grads = train_loop_body(watched_variables, data)
 
                 if verbose:
                     for g, v in zip(grads, watched_variables):
@@ -608,18 +602,10 @@ def batched_minimize(
             step += 1
             if step > num_epochs:
                 print("Terminating because we are out of iterations", flush=True)
+                _ = apply_accumulated_grads(gradient_accumulation, watched_variables)
 
         trace = tf.stack(losses)
-        """
-        if initial_trace_step is not None:
-            trace = tf.nest.map_structure(
-                lambda a, b: tf.concat(
-                    [a[tf.newaxis, ...], tf.cast(b, a.dtype)], axis=0
-                ),
-                initial_trace_step,
-                trace,
-            )
-        """
+
         cp_status = checkpoint.restore(manager.latest_checkpoint)
         cp_status.assert_consumed()
         trace.latest_checkpoint = manager.latest_checkpoint
