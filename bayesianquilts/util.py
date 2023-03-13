@@ -591,7 +591,7 @@ def batched_minimize(
             step += 1
             if step > num_epochs:
                 print("Terminating because we are out of iterations", flush=True)
-                _ = apply_accumulated_grads(gradient_accumulation, watched_variables)
+                _ = apply_grads(gradient_accumulation, watched_variables)
 
         trace = tf.stack(losses)
 
