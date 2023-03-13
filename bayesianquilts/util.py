@@ -362,13 +362,24 @@ def batched_minimize(
                     for t in flat_grads
                 ],
             )
-        train_op = opt.apply_gradients(zip(adjusted, watched_variables))
-        with tf.control_dependencies([train_op]):
-            state = trace_fn(
-                tf.identity(loss),
-                [tf.identity(g) for g in adjusted],
-                [tf.identity(v) for v in watched_variables],
-            )
+
+        def _apply():
+            print("Applying accumulated grad", flush=True)
+            _ = opt.apply_gradients(zip(adjusted, watched_variables))
+            return None
+
+        _ = tf.cond(
+            tf.math.is_finite(tf.reduce_sum(loss)),
+            lambda: _apply(),
+            lambda: None,
+        )
+        # train_op = opt.apply_gradients(zip(adjusted, watched_variables))
+
+        state = trace_fn(
+            tf.identity(loss),
+            [tf.identity(g) for g in adjusted],
+            [tf.identity(v) for v in watched_variables],
+        )
         return state, adjusted
 
     @tf.function(autograph=False)
@@ -412,7 +423,7 @@ def batched_minimize(
             gradient_accumulation[i].assign_add(t, read_value=False)
 
         def _apply():
-            print("Applying accumulated grad", flush=True)
+            tf.print("Applying accumulated grad")
             _ = opt.apply_gradients(zip(adjusted, watched_variables))
             return None
 
@@ -502,8 +513,8 @@ def batched_minimize(
                     batch_losses += [batch_loss.numpy()]
                 else:
                     print("Batch loss NaN, skipping it for this epoch", flush=True)
-                    cp_status = checkpoint.restore(manager.latest_checkpoint)
-                    cp_status.assert_consumed()
+                    # cp_status = checkpoint.restore(manager.latest_checkpoint)
+                    # cp_status.assert_consumed()
                     decay_step += 1
                     print(f"New learning rate: {optimizer.lr}", flush=True)
                     if decay_step > max_decay_steps:
