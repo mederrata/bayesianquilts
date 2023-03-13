@@ -480,16 +480,17 @@ def batched_minimize(
                     batch_loss, grads = accumulate_grads(
                         data, gradient_accumulation, watched_variables
                     )
-                    if np.isfinite(batch_loss.numpy()):
-                        batch_losses += [batch_loss.numpy()]
-                    else:
-                        pass
-                else:
                     batches_per_epoch = tf.cond(
                         tf.math.greater(step, 0),
                         lambda: batches_per_epoch,
                         lambda: batches_per_epoch + 1,
                     )
+                    if np.isfinite(batch_loss.numpy()):
+                        batch_losses += [batch_loss.numpy()]
+                    else:
+                        pass
+                else:
+
                     batch_loss, grads = compute_grads(watched_variables, data)
                     if np.isfinite(batch_loss.numpy()):
                         batch_losses += [batch_loss.numpy()]
