@@ -362,19 +362,7 @@ def batched_minimize(
                     for t in flat_grads
                 ],
             )
-
-        def _apply():
-            print("Applying accumulated grad", flush=True)
-            _ = opt.apply_gradients(zip(adjusted, watched_variables))
-            return None
-
-        _ = tf.cond(
-            tf.math.is_finite(tf.reduce_sum(loss)),
-            lambda: _apply(),
-            lambda: None,
-        )
-        # train_op = opt.apply_gradients(zip(adjusted, watched_variables))
-
+        train_op = opt.apply_gradients(zip(adjusted, watched_variables))
         state = trace_fn(
             tf.identity(loss),
             [tf.identity(g) for g in adjusted],
