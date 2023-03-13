@@ -408,9 +408,7 @@ def batched_minimize(
                 ],
             )
         for i, t in enumerate(adjusted):
-            gradient_accumulation[i].assign_add(
-                t / tf.cast(batches_per_epoch, t.dtype), read_value=False
-            )
+            gradient_accumulation[i].assign_add(t, read_value=False)
 
         state = trace_fn(
             tf.identity(loss),
@@ -459,9 +457,11 @@ def batched_minimize(
             _acumulate_this_epoch = False
             if accumulate_batches:
                 if gradient_accumulation is not None:
-                    _ = apply_grads(
-                        gradient_accumulation, watched_variables
-                    )
+                    gradient_accumulation = [
+                        g / tf.cast(batches_per_epoch, g.dtype)
+                        for g in gradient_accumulation
+                    ]
+                    _ = apply_grads(gradient_accumulation, watched_variables)
                 gradient_accumulation = [
                     tf.Variable(
                         tf.zeros_like(v),
@@ -482,6 +482,8 @@ def batched_minimize(
                     )
                     if np.isfinite(batch_loss.numpy()):
                         batch_losses += [batch_loss.numpy()]
+                    else:
+                        pass
                 else:
                     batches_per_epoch = tf.cond(
                         tf.math.greater(step, 0),
