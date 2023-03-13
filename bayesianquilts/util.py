@@ -515,11 +515,11 @@ def batched_minimize(
                     print("Batch loss NaN, skipping it for this epoch", flush=True)
                     # cp_status = checkpoint.restore(manager.latest_checkpoint)
                     # cp_status.assert_consumed()
-                    decay_step += 1
-                    print(f"New learning rate: {optimizer.lr}", flush=True)
-                    if decay_step > max_decay_steps:
-                        converged = True
-                        continue
+                    # decay_step += 1
+                    # print(f"New learning rate: {optimizer.lr}", flush=True)
+                    # if decay_step > max_decay_steps:
+                    #    converged = True
+                    #    continue
                 if verbose:
                     if batch_losses[-1] < 0:
                         pass
