@@ -331,12 +331,12 @@ def batched_minimize(
         if data is None:
             data = next(iter(batched_data_factory()))
         with tf.GradientTape(
-            watch_accessed_variables=trainable_variables is None
+            watch_accessed_variables=watched_variables is None
         ) as tape:
-            for v in trainable_variables or []:
+            for v in watched_variables or []:
                 tape.watch(v)
             loss = loss_fn(data=data)
-        watched_variables = tape.watched_variables()
+
         grads = tape.gradient(loss, watched_variables)
         flat_grads = tf.nest.flatten(grads)
         if clip_by == "norm":
