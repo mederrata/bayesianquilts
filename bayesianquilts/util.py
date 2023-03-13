@@ -326,7 +326,7 @@ def batched_minimize(
     )
 
     @tf.function(autograph=False)
-    def train_loop_body(watched_variables, data=None):
+    def compute_grads(watched_variables, data=None):
         """Run a single optimization step."""
         if data is None:
             data = next(iter(batched_data_factory()))
@@ -362,7 +362,7 @@ def batched_minimize(
                     for t in flat_grads
                 ],
             )
-        train_op = opt.apply_gradients(zip(adjusted, watched_variables))
+        # train_op = opt.apply_gradients(zip(adjusted, watched_variables))
         state = trace_fn(
             tf.identity(loss),
             [tf.identity(g) for g in adjusted],
@@ -419,7 +419,7 @@ def batched_minimize(
         )
         return state, adjusted
 
-    def apply_accumulated_grads(gradient_accumulation, trainable_variables):
+    def apply_grads(gradient_accumulation, trainable_variables):
         return opt.apply_gradients(zip(gradient_accumulation, trainable_variables))
 
     with tf.name_scope(name) as name:
@@ -459,7 +459,7 @@ def batched_minimize(
             _acumulate_this_epoch = False
             if accumulate_batches and (batches_per_epoch.numpy() > 0):
                 if gradient_accumulation is not None:
-                    _ = apply_accumulated_grads(
+                    _ = apply_grads(
                         gradient_accumulation, watched_variables
                     )
                 gradient_accumulation = [
@@ -486,13 +486,14 @@ def batched_minimize(
                         lambda: batches_per_epoch,
                         lambda: batches_per_epoch + 1,
                     )
-                    batch_loss, grads = train_loop_body(watched_variables, data)
+                    batch_loss, grads = compute_grads(watched_variables, data)
 
                 if verbose:
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
                 if np.isfinite(batch_loss.numpy()):
                     batch_losses += [batch_loss.numpy()]
+                    _ = apply_grads(grads, watched_variables)
                 else:
                     print("Batch loss NaN, skipping it for this epoch", flush=True)
                     # cp_status = checkpoint.restore(manager.latest_checkpoint)
