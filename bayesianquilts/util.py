@@ -505,12 +505,6 @@ def batched_minimize(
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
 
-                if verbose:
-                    if batch_losses[-1] < 0:
-                        pass
-                    else:
-                        pass
-
             loss = tf.reduce_mean(batch_losses)
 
             avg_losses += [loss.numpy()]
