@@ -377,7 +377,7 @@ def batched_minimize(
         grads = tape.gradient(loss, trainable_variables)
         flat_grads = tf.nest.flatten(grads)
         flat_grads = [
-            tf.cond(tf.math.is_finite(loss), t, tf.zeros_like(t)) for t in flat_grads
+            tf.cond(tf.math.is_finite(loss), lambda: t, lambda: tf.zeros_like(t)) for t in flat_grads
         ]
 
         for i, t in enumerate(flat_grads):
@@ -419,6 +419,7 @@ def batched_minimize(
         batches_since_plateau = 0
         accepted_batches = 0
         save_path = manager.save()
+        batch_losses = []
         if batches_per_epoch is None:
             batches_per_epoch = tf.cast(0, tf.int32)
         else:
@@ -426,7 +427,7 @@ def batched_minimize(
         print(f"Saved a checkpoint: {save_path}", flush=True)
         gradient_accumulation = None
         while (step < num_epochs) and not converged:
-            batch_losses = []
+            batch_losses += []
             _acumulate_this_epoch = False
             if accumulate_batches:
                 if gradient_accumulation is not None:
@@ -459,14 +460,14 @@ def batched_minimize(
                         lambda: batches_per_epoch + 1,
                     )
                     if np.isfinite(batch_loss.numpy()):
-                        batch_losses += [batch_loss.numpy()]
+                        batch_losses[-1] += [batch_loss.numpy()]
                     else:
                         pass
                 else:
 
                     batch_loss, grads = compute_grads(watched_variables, data)
                     if np.isfinite(batch_loss.numpy()):
-                        batch_losses += [batch_loss.numpy()]
+                        batch_losses[-1] += [batch_loss.numpy()]
                         _ = apply_grads(grads, watched_variables)
                     else:
                         print("Batch loss NaN, skipping it for this epoch", flush=True)
@@ -481,7 +482,7 @@ def batched_minimize(
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
 
-            loss = tf.reduce_mean(batch_losses)
+            loss = tf.reduce_mean(batch_losses[-1])
 
             avg_losses += [loss.numpy()]
             losses += [loss.numpy()]
