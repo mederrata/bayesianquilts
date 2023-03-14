@@ -427,7 +427,7 @@ def batched_minimize(
         print(f"Saved a checkpoint: {save_path}", flush=True)
         gradient_accumulation = None
         while (step < num_epochs) and not converged:
-            batch_losses += []
+            batch_losses += [[]]
             _acumulate_this_epoch = False
             if accumulate_batches:
                 if gradient_accumulation is not None:
