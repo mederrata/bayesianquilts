@@ -75,6 +75,7 @@ def minimize_distributed(
     checkpoint_name=None,
     max_initialization_steps=1000,
     clip_value=5.0,
+    clip_norm=1.0,
     training_order=None,
     accumulate_batches=False,
     name="minimize",
@@ -97,7 +98,9 @@ def minimize_distributed(
         decay_step = 0
 
         optimizer = tf.optimizers.Adam(
-            learning_rate=lambda: learning_rate_schedule_fn(decay_step)
+            learning_rate=lambda: learning_rate_schedule_fn(decay_step),
+            clip_value=clip_value,
+            clip_norm=clip_norm,
         )
         opt = tfa.optimizers.Lookahead(optimizer)
 
@@ -289,8 +292,8 @@ def batched_minimize(
     processing_fn=None,
     name="minimize",
     check_every=1,
-    clip_by="norm",
     clip_value=10.0,
+    clip_norm=1.0,
     test_fn=None,
     batches_per_epoch=None,
     verbose=False,
@@ -308,7 +311,9 @@ def batched_minimize(
     decay_step = 0
 
     optimizer = tf.optimizers.Adam(
-        learning_rate=lambda: learning_rate_schedule_fn(decay_step)
+        learning_rate=lambda: learning_rate_schedule_fn(decay_step),
+        clipvalue=clip_value,
+        global_clipnorm=clip_norm,
     )
 
     opt = tfa.optimizers.Lookahead(optimizer)
@@ -326,61 +331,36 @@ def batched_minimize(
     )
 
     @tf.function(autograph=False)
-    def train_loop_body(watched_variables, data=None):
+    def compute_grads(watched_variables, data=None):
         """Run a single optimization step."""
         if data is None:
             data = next(iter(batched_data_factory()))
         with tf.GradientTape(
-            watch_accessed_variables=trainable_variables is None
+            watch_accessed_variables=watched_variables is None
         ) as tape:
-            for v in trainable_variables or []:
+            for v in watched_variables or []:
                 tape.watch(v)
             loss = loss_fn(data=data)
-        watched_variables = tape.watched_variables()
+
         grads = tape.gradient(loss, watched_variables)
-        flat_grads = tf.nest.flatten(grads)
-        if clip_by == "norm":
-            adjusted = tf.nest.pack_sequence_as(
-                grads,
-                tf.clip_by_global_norm(
-                    [
-                        tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
-                        for t in flat_grads
-                    ],
+        grads = tf.nest.pack_sequence_as(
+            grads,
+            [
+                tf.clip_by_value(
+                    tf.where(tf.math.is_finite(t), t, tf.zeros_like(t)),
+                    -clip_value,
                     clip_value,
-                )[0],
-            )
-        else:
-            adjusted = tf.nest.pack_sequence_as(
-                grads,
-                [
-                    tf.clip_by_value(
-                        tf.where(tf.math.is_finite(t), t, tf.zeros_like(t)),
-                        -clip_value,
-                        clip_value,
-                    )
-                    for t in flat_grads
-                ],
-            )
-
-        def _apply():
-            print("Applying accumulated grad", flush=True)
-            _ = opt.apply_gradients(zip(adjusted, watched_variables))
-            return None
-
-        _ = tf.cond(
-            tf.math.is_finite(tf.reduce_sum(loss)),
-            lambda: _apply(),
-            lambda: None,
+                )
+                for t in tf.nest.flatten(grads)
+            ],
         )
         # train_op = opt.apply_gradients(zip(adjusted, watched_variables))
-
         state = trace_fn(
             tf.identity(loss),
-            [tf.identity(g) for g in adjusted],
+            [tf.identity(g) for g in grads],
             [tf.identity(v) for v in watched_variables],
         )
-        return state, adjusted
+        return state, grads
 
     @tf.function(autograph=False)
     def accumulate_grads(data, gradient_accumulation, trainable_variables):
@@ -396,42 +376,21 @@ def batched_minimize(
         # watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, trainable_variables)
         flat_grads = tf.nest.flatten(grads)
-        if clip_by == "norm":
-            adjusted = tf.nest.pack_sequence_as(
-                grads,
-                tf.clip_by_global_norm(
-                    [
-                        tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
-                        for t in flat_grads
-                    ],
-                    clip_value,
-                )[0],
-            )
-        else:
-            adjusted = tf.nest.pack_sequence_as(
-                grads,
-                [
-                    tf.clip_by_value(
-                        tf.where(tf.math.is_finite(t), t, tf.zeros_like(t)),
-                        -clip_value,
-                        clip_value,
-                    )
-                    for t in flat_grads
-                ],
-            )
-        for i, t in enumerate(adjusted):
-            gradient_accumulation[i].assign_add(
-                t / tf.cast(batches_per_epoch, t.dtype), read_value=False
-            )
+        flat_grads = [
+            tf.cond(tf.math.is_finite(loss), lambda: t, lambda: tf.zeros_like(t)) for t in flat_grads
+        ]
+
+        for i, t in enumerate(flat_grads):
+            gradient_accumulation[i].assign_add(t, read_value=False)
 
         state = trace_fn(
             tf.identity(loss),
-            [tf.identity(g) for g in adjusted],
+            [tf.identity(g) for g in flat_grads],
             [tf.identity(v) for v in watched_variables],
         )
-        return state, adjusted
+        return state, flat_grads
 
-    def apply_accumulated_grads(gradient_accumulation, trainable_variables):
+    def apply_grads(gradient_accumulation, trainable_variables):
         return opt.apply_gradients(zip(gradient_accumulation, trainable_variables))
 
     with tf.name_scope(name) as name:
@@ -460,6 +419,7 @@ def batched_minimize(
         batches_since_plateau = 0
         accepted_batches = 0
         save_path = manager.save()
+        batch_losses = []
         if batches_per_epoch is None:
             batches_per_epoch = tf.cast(0, tf.int32)
         else:
@@ -467,13 +427,15 @@ def batched_minimize(
         print(f"Saved a checkpoint: {save_path}", flush=True)
         gradient_accumulation = None
         while (step < num_epochs) and not converged:
-            batch_losses = []
+            batch_losses += [[]]
             _acumulate_this_epoch = False
-            if accumulate_batches and (batches_per_epoch.numpy() > 0):
+            if accumulate_batches:
                 if gradient_accumulation is not None:
-                    _ = apply_accumulated_grads(
-                        gradient_accumulation, watched_variables
-                    )
+                    gradient_accumulation = [
+                        g / tf.cast(batches_per_epoch, g.dtype)
+                        for g in gradient_accumulation
+                    ]
+                    _ = apply_grads(gradient_accumulation, watched_variables)
                 gradient_accumulation = [
                     tf.Variable(
                         tf.zeros_like(v),
@@ -492,35 +454,35 @@ def batched_minimize(
                     batch_loss, grads = accumulate_grads(
                         data, gradient_accumulation, watched_variables
                     )
-                else:
                     batches_per_epoch = tf.cond(
                         tf.math.greater(step, 0),
                         lambda: batches_per_epoch,
                         lambda: batches_per_epoch + 1,
                     )
-                    batch_loss, grads = train_loop_body(watched_variables, data)
+                    if np.isfinite(batch_loss.numpy()):
+                        batch_losses[-1] += [batch_loss.numpy()]
+                    else:
+                        pass
+                else:
 
+                    batch_loss, grads = compute_grads(watched_variables, data)
+                    if np.isfinite(batch_loss.numpy()):
+                        batch_losses[-1] += [batch_loss.numpy()]
+                        _ = apply_grads(grads, watched_variables)
+                    else:
+                        print("Batch loss NaN, skipping it for this epoch", flush=True)
+                        # cp_status = checkpoint.restore(manager.latest_checkpoint)
+                        # cp_status.assert_consumed()
+                        # decay_step += 1
+                        # print(f"New learning rate: {optimizer.lr}", flush=True)
+                        # if decay_step > max_decay_steps:
+                        #    converged = True
+                        #    continue
                 if verbose:
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
-                if np.isfinite(batch_loss.numpy()):
-                    batch_losses += [batch_loss.numpy()]
-                else:
-                    print("Batch loss NaN, skipping it for this epoch", flush=True)
-                    # cp_status = checkpoint.restore(manager.latest_checkpoint)
-                    # cp_status.assert_consumed()
-                    # decay_step += 1
-                    # print(f"New learning rate: {optimizer.lr}", flush=True)
-                    # if decay_step > max_decay_steps:
-                    #    converged = True
-                    #    continue
-                if verbose:
-                    if batch_losses[-1] < 0:
-                        pass
-                    else:
-                        pass
 
-            loss = tf.reduce_mean(batch_losses)
+            loss = tf.reduce_mean(batch_losses[-1])
 
             avg_losses += [loss.numpy()]
             losses += [loss.numpy()]
@@ -602,7 +564,7 @@ def batched_minimize(
             step += 1
             if step > num_epochs:
                 print("Terminating because we are out of iterations", flush=True)
-                _ = apply_accumulated_grads(gradient_accumulation, watched_variables)
+                _ = apply_grads(gradient_accumulation, watched_variables)
 
         trace = tf.stack(losses)
 
