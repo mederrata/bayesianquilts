@@ -196,7 +196,6 @@ def minimize_distributed(
                             converged = True
                             continue
 
-                    epoch += 1
                     cp_status.assert_consumed()
                     print(f" new learning rate: {optimizer.lr}")
                 avg_losses += [avg_loss]
