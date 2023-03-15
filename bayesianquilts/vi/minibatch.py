@@ -54,6 +54,7 @@ def minibatch_mc_variational_loss(
     gradient_estimator=None,
     stopped_surrogate_posterior=None,
     seed=None,
+    cost="reweighted",
     **kwargs,
 ):
     """The minibatch variational loss
@@ -88,28 +89,41 @@ def minibatch_mc_variational_loss(
         prior_weight=tf.cast(batch_size / dataset_size, tf.float64),
     )
 
+    def sample_expected_elbo(q_samples, q_lp):
+
+        penalized_ll = target_log_prob_fn(
+            data=data,
+            prior_weight=tf.constant(batch_size / dataset_size),
+            **q_samples,
+        )
+        expected_elbo = tf.reduce_mean(q_lp * batch_size / dataset_size - penalized_ll)
+
+        return expected_elbo
+
     for _ in range(sample_batches):
         q_samples, q_lp = sample_elbo()
-
-        batch_expectations += [
-            monte_carlo.expectation(
-                f=csiszar_divergence._make_importance_weighted_divergence_fn(
-                    reweighted,
-                    surrogate_posterior=surrogate_posterior,
-                    discrepancy_fn=discrepancy_fn,
-                    precomputed_surrogate_log_prob=q_lp,
-                    importance_sample_size=importance_sample_size,
-                    gradient_estimator=gradient_estimator,
-                    stopped_surrogate_posterior=(stopped_surrogate_posterior),
-                ),
-                samples=q_samples,
-                # Log-prob is only used if `gradient_estimator == SCORE_FUNCTION`.
-                log_prob=surrogate_posterior.log_prob,
-                use_reparameterization=(
-                    gradient_estimator != GradientEstimators.SCORE_FUNCTION
-                ),
-            )
-        ]
+        if cost == "tfp":
+            batch_expectations += [
+                monte_carlo.expectation(
+                    f=csiszar_divergence._make_importance_weighted_divergence_fn(
+                        reweighted,
+                        surrogate_posterior=surrogate_posterior,
+                        discrepancy_fn=discrepancy_fn,
+                        precomputed_surrogate_log_prob=q_lp,
+                        importance_sample_size=importance_sample_size,
+                        gradient_estimator=gradient_estimator,
+                        stopped_surrogate_posterior=(stopped_surrogate_posterior),
+                    ),
+                    samples=q_samples,
+                    # Log-prob is only used if `gradient_estimator == SCORE_FUNCTION`.
+                    log_prob=surrogate_posterior.log_prob,
+                    use_reparameterization=(
+                        gradient_estimator != GradientEstimators.SCORE_FUNCTION
+                    ),
+                )
+            ]
+        else:
+            batch_expectations += [sample_expected_elbo(q_samples, q_lp)]
     batch_expectations = tf.reduce_mean(batch_expectations, axis=0)
     return batch_expectations
 

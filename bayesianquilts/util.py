@@ -82,11 +82,9 @@ def minimize_distributed(
     dtype=tf.float64,
     **kwargs,
 ):
-
     checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
 
     with strategy.scope():
-
         train_dist_dataset = strategy.experimental_distribute_dataset(data_factory())
         iterator = iter(train_dist_dataset)
 
@@ -147,7 +145,6 @@ def minimize_distributed(
         results = []
         losses = []
         avg_losses = [1e10] * 3
-        deviations = [1e10] * 3
         min_loss = 1e10
         min_state = None
 
@@ -199,13 +196,11 @@ def minimize_distributed(
                             converged = True
                             continue
 
-                    epoch += 1
                     cp_status.assert_consumed()
                     print(f" new learning rate: {optimizer.lr}")
                 avg_losses += [avg_loss]
                 # deviation = tf.math.reduce_std(recent_losses).numpy()
                 deviation = np.abs(avg_losses[-1] - avg_losses[-2])
-                deviations += [deviation]
                 rel = np.abs(deviation / avg_loss)
                 status = f"Iteration {epoch} -- loss: {losses[-1].numpy()}, "
                 status += f"abs_err: {deviation}, rel_err: {rel}"
@@ -279,6 +274,7 @@ def minimize_distributed(
 def batched_minimize(
     loss_fn,
     batched_data_factory,
+    batches_per_epoch=1,
     num_epochs=1000,
     max_plateau_epochs=10,
     abs_tol=1e-4,
@@ -295,13 +291,10 @@ def batched_minimize(
     clip_value=10.0,
     clip_norm=1.0,
     test_fn=None,
-    batches_per_epoch=None,
     verbose=False,
-    accumulate_batches=False,
     temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
     **kwargs,
 ):
-
     checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
     learning_rate = 1.0 if learning_rate is None else learning_rate
 
@@ -377,7 +370,8 @@ def batched_minimize(
         grads = tape.gradient(loss, trainable_variables)
         flat_grads = tf.nest.flatten(grads)
         flat_grads = [
-            tf.cond(tf.math.is_finite(loss), lambda: t, lambda: tf.zeros_like(t)) for t in flat_grads
+            tf.cond(tf.math.is_finite(loss), lambda: t, lambda: tf.zeros_like(t))
+            for t in flat_grads
         ]
 
         for i, t in enumerate(flat_grads):
@@ -394,11 +388,9 @@ def batched_minimize(
         return opt.apply_gradients(zip(gradient_accumulation, trainable_variables))
 
     with tf.name_scope(name) as name:
-
         converged = False
         losses = []
-        avg_losses = [1e308] * 3
-        deviations = [1e308] * 3
+        avg_losses = [1e308] * 2
         min_loss = 1e308
 
         """
@@ -414,28 +406,31 @@ def batched_minimize(
             print(f"Initial loss: {loss}", flush=True)
         """
 
-        step = tf.cast(0, tf.int32)
         batches_since_checkpoint = 0
         batches_since_plateau = 0
         accepted_batches = 0
         save_path = manager.save()
         batch_losses = []
-        if batches_per_epoch is None:
-            batches_per_epoch = tf.cast(0, tf.int32)
-        else:
-            batches_per_epoch = tf.cast(batches_per_epoch, tf.int32)
         print(f"Saved a checkpoint: {save_path}", flush=True)
         gradient_accumulation = None
-        while (step < num_epochs) and not converged:
-            batch_losses += [[]]
-            _acumulate_this_epoch = False
-            if accumulate_batches:
+        data_factory = batched_data_factory()
+        data_factory = data_factory.repeat()
+        pbar_outer = tqdm(total=num_epochs, position=0)
+        pbar = None
+        epoch = 0
+        for n_batch, data in enumerate(data_factory):
+
+            if n_batch % batches_per_epoch == 0:
+                # this batch is the start of a new epoch
+
+                #  apply the grad
                 if gradient_accumulation is not None:
-                    gradient_accumulation = [
-                        g / tf.cast(batches_per_epoch, g.dtype)
-                        for g in gradient_accumulation
-                    ]
                     _ = apply_grads(gradient_accumulation, watched_variables)
+                    pbar_outer.update(1)
+                epoch += 1
+                pbar = tqdm(total=batches_per_epoch, leave=False, position=1)
+                batch_losses += [[]]
+
                 gradient_accumulation = [
                     tf.Variable(
                         tf.zeros_like(v),
@@ -446,64 +441,51 @@ def batched_minimize(
                     )
                     for i, v in enumerate(watched_variables)
                 ]
-                _acumulate_this_epoch = True
-            for j, data in tqdm(enumerate(batched_data_factory())):
-                if processing_fn is not None:
-                    data = processing_fn(data)
-                if _acumulate_this_epoch:
-                    batch_loss, grads = accumulate_grads(
-                        data, gradient_accumulation, watched_variables
-                    )
-                    batches_per_epoch = tf.cond(
-                        tf.math.greater(step, 0),
-                        lambda: batches_per_epoch,
-                        lambda: batches_per_epoch + 1,
-                    )
-                    if np.isfinite(batch_loss.numpy()):
-                        batch_losses[-1] += [batch_loss.numpy()]
-                    else:
-                        pass
-                else:
+                if (epoch > num_epochs) or converged:
+                    print("Terminating because we are out of iterations", flush=True)
+                    break
+            pbar.update(1)
 
-                    batch_loss, grads = compute_grads(watched_variables, data)
-                    if np.isfinite(batch_loss.numpy()):
-                        batch_losses[-1] += [batch_loss.numpy()]
-                        _ = apply_grads(grads, watched_variables)
-                    else:
-                        print("Batch loss NaN, skipping it for this epoch", flush=True)
-                        # cp_status = checkpoint.restore(manager.latest_checkpoint)
-                        # cp_status.assert_consumed()
-                        # decay_step += 1
-                        # print(f"New learning rate: {optimizer.lr}", flush=True)
-                        # if decay_step > max_decay_steps:
-                        #    converged = True
-                        #    continue
+            if processing_fn is not None:
+                data = processing_fn(data)
+
+            batch_loss, grads = accumulate_grads(
+                data, gradient_accumulation, watched_variables
+            )
+
+            if np.isfinite(batch_loss.numpy()):
+                batch_losses[-1] += [batch_loss.numpy()]
+            else:
                 if verbose:
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
 
             loss = tf.reduce_mean(batch_losses[-1])
-
             avg_losses += [loss.numpy()]
             losses += [loss.numpy()]
             deviation = np.abs(avg_losses[-1] - min_loss)
             rel = np.abs(deviation / loss)
-            print(
-                f"Epoch {step}: average-batch loss:" + f"{loss} rel loss: {rel}",
-                flush=True,
-            )
 
-            if (step > 0) and (step % check_every) == 0:
+            if (
+                (epoch > 0)
+                and (n_batch % batches_per_epoch == batches_per_epoch - 1)
+                and (epoch % check_every) == 0
+            ):
                 """
                 Check for convergence
                 """
+
+                print(
+                    f"\nEpoch {epoch}: average-batch loss:" + f"{loss} rel loss: {rel}",
+                    flush=True,
+                )
                 if test_fn is not None:
                     test_fn()
 
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
-                    print("Epoch loss NaN, restoring a checkpoint", flush=True)
+                    print("\nEpoch loss NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
 
                     if decay_step > max_decay_steps:
@@ -524,7 +506,7 @@ def batched_minimize(
                         np.abs((avg_losses[2] - min_loss)) < abs_tol
                     ):
                         print(
-                            f"Converged in {step} iterations "
+                            f"Converged in {epoch} iterations "
                             + "with acceptable absolute tolerance",
                             flush=True,
                         )
@@ -533,7 +515,7 @@ def batched_minimize(
                         (np.abs(avg_losses[2] - min_loss) / loss) < abs_tol
                     ):
                         print(
-                            f"Converged in {step} iterations with "
+                            f"Converged in {epoch} iterations with "
                             + "acceptable relative tolerance"
                         )
                         converged = True
@@ -561,16 +543,14 @@ def batched_minimize(
                             print(status, flush=True)
                             batches_since_plateau = 0
 
-            step += 1
-            if step > num_epochs:
-                print("Terminating because we are out of iterations", flush=True)
-                _ = apply_grads(gradient_accumulation, watched_variables)
-
         trace = tf.stack(losses)
-
-        cp_status = checkpoint.restore(manager.latest_checkpoint)
-        cp_status.assert_consumed()
-        trace.latest_checkpoint = manager.latest_checkpoint
+        try:
+            if np.isnan(losses[-1]):
+                cp_status = checkpoint.restore(manager.latest_checkpoint)
+                cp_status.assert_consumed()
+                trace.latest_checkpoint = manager.latest_checkpoint
+        except AssertionError:
+            pass
         return trace
 
 
