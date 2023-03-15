@@ -546,7 +546,7 @@ def batched_minimize(
 
         trace = tf.stack(losses)
         try:
-            if np.isnan(batch_losses[-1][-1]):
+            if np.isnan(losses[-1]):
                 cp_status = checkpoint.restore(manager.latest_checkpoint)
                 cp_status.assert_consumed()
                 trace.latest_checkpoint = manager.latest_checkpoint
