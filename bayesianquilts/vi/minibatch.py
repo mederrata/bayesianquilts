@@ -96,10 +96,7 @@ def minibatch_mc_variational_loss(
             prior_weight=tf.constant(batch_size / dataset_size),
             **q_samples,
         )
-        expected_elbo = tf.cast(
-            tf.reduce_mean(q_lp * batch_size / dataset_size - penalized_ll),
-            expected_elbo.dtype,
-        )
+        expected_elbo = tf.reduce_mean(q_lp * batch_size / dataset_size - penalized_ll)
 
         return expected_elbo
 
