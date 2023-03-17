@@ -109,7 +109,7 @@ def minibatch_mc_variational_loss(
                         reweighted,
                         surrogate_posterior=surrogate_posterior,
                         discrepancy_fn=discrepancy_fn,
-                        precomputed_surrogate_log_prob=q_lp,
+                        precomputed_surrogate_log_prob=q_lp * batch_size / dataset_size,
                         importance_sample_size=importance_sample_size,
                         gradient_estimator=gradient_estimator,
                         stopped_surrogate_posterior=(stopped_surrogate_posterior),
