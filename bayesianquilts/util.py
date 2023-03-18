@@ -197,7 +197,7 @@ def minimize_distributed(
                             continue
 
                     cp_status.assert_consumed()
-                    print(f" new learning rate: {optimizer.lr}")
+                    print(f" new learning rate: {opt.lr}")
                 avg_losses += [avg_loss]
                 # deviation = tf.math.reduce_std(recent_losses).numpy()
                 deviation = np.abs(avg_losses[-1] - avg_losses[-2])
@@ -220,7 +220,7 @@ def minimize_distributed(
                         print(f"We have reset {num_resets} times so quitting")
                     else:
                         status = "We are in a loss plateau"
-                        status += f" learning rate: {optimizer.lr}"
+                        status += f" learning rate: {opt.lr}"
                         print(status)
                         cp_status = checkpoint.restore(manager.latest_checkpoint)
                         cp_status.assert_consumed()
@@ -243,7 +243,7 @@ def minimize_distributed(
                         batches_since_checkpoint += 1
                         decay_step += 1
                         status = "We are in a loss plateau"
-                        status += f" learning rate: {optimizer.lr}"
+                        status += f" learning rate: {opt.lr}"
                         print(status)
                         cp_status = checkpoint.restore(manager.latest_checkpoint)
                         cp_status.assert_consumed()
@@ -491,7 +491,7 @@ def batched_minimize(
                     if decay_step > max_decay_steps:
                         converged = True
                         continue
-                    print(f"New learning rate: {optimizer.lr}", flush=True)
+                    print(f"New learning rate: {opt.lr}", flush=True)
                     continue
                 if losses[-1] < min_loss:
                     """
@@ -527,7 +527,7 @@ def batched_minimize(
                         converged = True
                         continue
                     batches_since_plateau = 0
-                    print(f"New learning rate: {optimizer.lr}", flush=True)
+                    print(f"New learning rate: {opt.lr}", flush=True)
 
                     if batches_since_checkpoint >= 2:
                         if batches_since_checkpoint >= max_plateau_epochs:
