@@ -303,13 +303,13 @@ def batched_minimize(
 
     decay_step = 0
 
-    optimizer = tf.optimizers.Adam(
+    opt = tf.optimizers.Adam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step),
         clipvalue=clip_value,
         global_clipnorm=clip_norm,
     )
 
-    opt = tfa.optimizers.Lookahead(optimizer)
+    # opt = tfa.optimizers.Lookahead(opt)
 
     watched_variables = trainable_variables
 
