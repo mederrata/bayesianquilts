@@ -10,27 +10,14 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
 import tensorflow_probability as tfp
-from tensorflow.python.data.ops.dataset_ops import BatchDataset
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
-from tensorflow.python.training import optimizer
 from tensorflow_probability.python import util as tfp_util
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import (
-    TransformedDistribution,
-)
 from tensorflow_probability.python.internal import (
     dtype_util,
     prefer_static,
     tensorshape_util,
 )
-from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
-
-from tensorflow_probability.python.vi import GradientEstimators
-
-from bayesianquilts.distributions import SqrtInverseGamma
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
@@ -54,10 +41,6 @@ build_surrogate_posterior = None
 fit_surrogate_posterior = None
 
 
-def _trace_variables(loss, grads, variables):
-    return loss, variables
-
-
 def batched_minimize(
     loss_fn,
     batched_data_factory,
@@ -79,6 +62,7 @@ def batched_minimize(
     clip_norm=1.0,
     test_fn=None,
     verbose=False,
+    debug=False,
     temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
     **kwargs,
 ):
@@ -110,7 +94,6 @@ def batched_minimize(
         max_to_keep=3,
     )
 
-
     @tf.function(autograph=False)
     def accumulate_grads(data, gradient_accumulation, trainable_variables):
         """Run a single optimization step."""
@@ -131,6 +114,11 @@ def batched_minimize(
         ]
 
         for i, t in enumerate(flat_grads):
+            t = tf.where(
+                tf.math.is_finite(t),
+                t,
+                tf.zeros_like(t)
+            )
             gradient_accumulation[i].assign_add(t, read_value=False)
 
         state = trace_fn(
@@ -180,7 +168,9 @@ def batched_minimize(
                 # this batch is the start of a new epoch
 
                 #  apply the grad
-                if gradient_accumulation is not None:
+                if (gradient_accumulation is not None) and (
+                    np.isfinite(loss)
+                ):
                     _ = apply_grads(gradient_accumulation, watched_variables)
                     pbar_outer.update(1)
                 epoch += 1
@@ -215,10 +205,12 @@ def batched_minimize(
                 if verbose:
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
+                test = loss_fn(data=data)
+                continue
 
-            loss = tf.reduce_mean(batch_losses[-1])
-            avg_losses += [loss.numpy()]
-            losses += [loss.numpy()]
+            loss = np.mean(batch_losses[-1])
+            avg_losses += [loss]
+            losses += [loss]
             deviation = np.abs(avg_losses[-1] - min_loss)
             rel = np.abs(deviation / loss)
 
