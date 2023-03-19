@@ -10,27 +10,14 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
 import tensorflow_probability as tfp
-from tensorflow.python.data.ops.dataset_ops import BatchDataset
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
-from tensorflow.python.training import optimizer
 from tensorflow_probability.python import util as tfp_util
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import (
-    TransformedDistribution,
-)
 from tensorflow_probability.python.internal import (
     dtype_util,
     prefer_static,
     tensorshape_util,
 )
-from tensorflow_probability.python.vi import csiszar_divergence
 from tqdm import tqdm
-
-from tensorflow_probability.python.vi import GradientEstimators
-
-from bayesianquilts.distributions import SqrtInverseGamma
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
@@ -54,223 +41,6 @@ build_surrogate_posterior = None
 fit_surrogate_posterior = None
 
 
-def _trace_variables(loss, grads, variables):
-    return loss, variables
-
-
-def minimize_distributed(
-    loss_fn,
-    data_factory,
-    strategy,
-    trainable_variables,
-    num_epochs=100000,
-    max_plateau_epochs=3,
-    abs_tol=1e-4,
-    rel_tol=1e-4,
-    trace_fn=_trace_loss,
-    max_decay_steps=8,
-    learning_rate=1.0,
-    check_every=25,
-    decay_rate=0.95,
-    checkpoint_name=None,
-    max_initialization_steps=1000,
-    clip_value=5.0,
-    clip_norm=1.0,
-    training_order=None,
-    accumulate_batches=False,
-    name="minimize",
-    dtype=tf.float64,
-    **kwargs,
-):
-    checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
-
-    with strategy.scope():
-        train_dist_dataset = strategy.experimental_distribute_dataset(data_factory())
-        iterator = iter(train_dist_dataset)
-
-        learning_rate = 1.0 if learning_rate is None else learning_rate
-
-        def learning_rate_schedule_fn(step):
-            return learning_rate * decay_rate**step
-
-        decay_step = 0
-
-        optimizer = tf.optimizers.Adam(
-            learning_rate=lambda: learning_rate_schedule_fn(decay_step),
-            clip_value=clip_value,
-            clip_norm=clip_norm,
-        )
-        opt = tfa.optimizers.Lookahead(optimizer)
-
-        checkpoint = tf.train.Checkpoint(
-            optimizer=opt,
-            **{"var_" + str(j): v for j, v in enumerate(trainable_variables)},
-        )
-        manager = tf.train.CheckpointManager(
-            checkpoint,
-            f"./.tf_ckpts/{checkpoint_name}/",
-            checkpoint_name=checkpoint_name,
-            max_to_keep=3,
-        )
-        save_path = manager.save()
-
-        @tf.function
-        def train_step(data):
-            with tf.GradientTape() as tape:
-                loss = loss_fn(data=data)
-                gradients = tape.gradient(loss, trainable_variables)
-                gradients = tf.nest.pack_sequence_as(
-                    gradients,
-                    tf.clip_by_global_norm(
-                        [
-                            tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
-                            for t in tf.nest.flatten(gradients)
-                        ],
-                        clip_value,
-                    )[0],
-                )
-                opt.apply_gradients(zip(gradients, trainable_variables))
-                return loss
-
-    with strategy.scope():
-
-        @tf.function(input_signature=[train_dist_dataset.element_spec])
-        def distributed_train_step(data):
-            per_replica_losses = strategy.experimental_run_v2(train_step, args=(data,))
-            return strategy.reduce(
-                tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None
-            )
-
-        converged = False
-        results = []
-        losses = []
-        avg_losses = [1e10] * 3
-        min_loss = 1e10
-        min_state = None
-
-        batches_since_checkpoint = 0
-        batches_since_plateau = 0
-        accepted_batches = 0
-        num_resets = 0
-        converged = False
-        epoch = 1
-        save_path = manager.save()
-        print(f"Saved an initial checkpoint: {save_path}")
-        for epoch in range(1, num_epochs + 1):
-            if converged:
-                break
-            print(f"Epoch: {epoch}")
-            total_loss = 0.0
-            num_batches = 0
-
-            for data in train_dist_dataset:
-                total_loss += distributed_train_step(data)
-                num_batches += 1
-            train_loss = total_loss / num_batches
-            losses += [train_loss]
-
-            if epoch % check_every == 0:
-                recent_losses = tf.convert_to_tensor(losses[-check_every:])
-                avg_loss = tf.reduce_mean(recent_losses).numpy()
-
-                if not np.isfinite(avg_loss):
-                    status = "Backtracking"
-                    print(status)
-                    cp_status = checkpoint.restore(manager.latest_checkpoint)
-                    cp_status.assert_consumed()
-
-                    if accepted_batches == 0:
-                        if epoch > max_initialization_steps:
-                            converged = True
-                            decay_step += 1
-                            print(
-                                "Failed to initialize within"
-                                + f" {max_initialization_steps} steps"
-                            )
-                        if decay_step > max_decay_steps:
-                            converged = True
-                            continue
-                    else:
-                        decay_step += 1
-                        if decay_step > max_decay_steps:
-                            converged = True
-                            continue
-
-                    cp_status.assert_consumed()
-                    print(f" new learning rate: {optimizer.lr}")
-                avg_losses += [avg_loss]
-                # deviation = tf.math.reduce_std(recent_losses).numpy()
-                deviation = np.abs(avg_losses[-1] - avg_losses[-2])
-                rel = np.abs(deviation / avg_loss)
-                status = f"Iteration {epoch} -- loss: {losses[-1].numpy()}, "
-                status += f"abs_err: {deviation}, rel_err: {rel}"
-                print(status, flush=True)
-                """Check for plateau
-                """
-                if (
-                    (
-                        (avg_losses[-1] > avg_losses[-3])
-                        and (avg_losses[-1] > avg_losses[-2])
-                    )
-                    or batches_since_checkpoint > 4
-                ) and batches_since_plateau > 2:
-                    decay_step += 1
-                    if batches_since_plateau >= max_plateau_epochs:
-                        converged = True
-                        print(f"We have reset {num_resets} times so quitting")
-                    else:
-                        status = "We are in a loss plateau"
-                        status += f" learning rate: {optimizer.lr}"
-                        print(status)
-                        cp_status = checkpoint.restore(manager.latest_checkpoint)
-                        cp_status.assert_consumed()
-
-                        print(status)
-                        batches_since_checkpoint += 1
-                        batches_since_plateau = 0
-                        num_resets += 1
-                else:
-                    if losses[-1] - min_loss < 0.0:
-                        """
-                        Save a checkpoint
-                        """
-                        min_loss = losses[-1]
-                        save_path = manager.save()
-                        accepted_batches += 1
-                        print(f"Saved a checkpoint: {save_path}")
-                        batches_since_checkpoint = 0
-                    else:
-                        batches_since_checkpoint += 1
-                        decay_step += 1
-                        status = "We are in a loss plateau"
-                        status += f" learning rate: {optimizer.lr}"
-                        print(status)
-                        cp_status = checkpoint.restore(manager.latest_checkpoint)
-                        cp_status.assert_consumed()
-
-                        print(status)
-                        batches_since_plateau = 0
-
-                    if deviation < abs_tol:
-                        print(
-                            f"Converged in {epoch} iterations "
-                            + "with acceptable absolute tolerance "
-                            + f"{round(deviation, 3)}"
-                        )
-                        converged = True
-                    elif rel < rel_tol:
-                        print(
-                            f"Converged in {epoch} iterations with "
-                            + f"acceptable relative tolerance: {rel}"
-                        )
-                        converged = True
-                    batches_since_plateau += 1
-            epoch += 1
-            if epoch >= num_epochs:
-                print("Terminating because we are out of iterations")
-        return losses
-
-
 def batched_minimize(
     loss_fn,
     batched_data_factory,
@@ -292,6 +62,7 @@ def batched_minimize(
     clip_norm=1.0,
     test_fn=None,
     verbose=False,
+    debug=False,
     temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
     **kwargs,
 ):
@@ -303,13 +74,13 @@ def batched_minimize(
 
     decay_step = 0
 
-    optimizer = tf.optimizers.Adam(
+    opt = tf.optimizers.Adam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step),
         clipvalue=clip_value,
         global_clipnorm=clip_norm,
     )
 
-    opt = tfa.optimizers.Lookahead(optimizer)
+    # opt = tfa.optimizers.Lookahead(opt)
 
     watched_variables = trainable_variables
 
@@ -322,38 +93,6 @@ def batched_minimize(
         checkpoint_name=checkpoint_name,
         max_to_keep=3,
     )
-
-    @tf.function(autograph=False)
-    def compute_grads(watched_variables, data=None):
-        """Run a single optimization step."""
-        if data is None:
-            data = next(iter(batched_data_factory()))
-        with tf.GradientTape(
-            watch_accessed_variables=watched_variables is None
-        ) as tape:
-            for v in watched_variables or []:
-                tape.watch(v)
-            loss = loss_fn(data=data)
-
-        grads = tape.gradient(loss, watched_variables)
-        grads = tf.nest.pack_sequence_as(
-            grads,
-            [
-                tf.clip_by_value(
-                    tf.where(tf.math.is_finite(t), t, tf.zeros_like(t)),
-                    -clip_value,
-                    clip_value,
-                )
-                for t in tf.nest.flatten(grads)
-            ],
-        )
-        # train_op = opt.apply_gradients(zip(adjusted, watched_variables))
-        state = trace_fn(
-            tf.identity(loss),
-            [tf.identity(g) for g in grads],
-            [tf.identity(v) for v in watched_variables],
-        )
-        return state, grads
 
     @tf.function(autograph=False)
     def accumulate_grads(data, gradient_accumulation, trainable_variables):
@@ -375,6 +114,11 @@ def batched_minimize(
         ]
 
         for i, t in enumerate(flat_grads):
+            t = tf.where(
+                tf.math.is_finite(t),
+                t,
+                tf.zeros_like(t)
+            )
             gradient_accumulation[i].assign_add(t, read_value=False)
 
         state = trace_fn(
@@ -424,7 +168,9 @@ def batched_minimize(
                 # this batch is the start of a new epoch
 
                 #  apply the grad
-                if gradient_accumulation is not None:
+                if (gradient_accumulation is not None) and (
+                    np.isfinite(loss)
+                ):
                     _ = apply_grads(gradient_accumulation, watched_variables)
                     pbar_outer.update(1)
                 epoch += 1
@@ -459,10 +205,12 @@ def batched_minimize(
                 if verbose:
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
+                test = loss_fn(data=data)
+                continue
 
-            loss = tf.reduce_mean(batch_losses[-1])
-            avg_losses += [loss.numpy()]
-            losses += [loss.numpy()]
+            loss = np.mean(batch_losses[-1])
+            avg_losses += [loss]
+            losses += [loss]
             deviation = np.abs(avg_losses[-1] - min_loss)
             rel = np.abs(deviation / loss)
 
@@ -491,7 +239,7 @@ def batched_minimize(
                     if decay_step > max_decay_steps:
                         converged = True
                         continue
-                    print(f"New learning rate: {optimizer.lr}", flush=True)
+                    print(f"New learning rate: {opt.lr}", flush=True)
                     continue
                 if losses[-1] < min_loss:
                     """
@@ -527,7 +275,7 @@ def batched_minimize(
                         converged = True
                         continue
                     batches_since_plateau = 0
-                    print(f"New learning rate: {optimizer.lr}", flush=True)
+                    print(f"New learning rate: {opt.lr}", flush=True)
 
                     if batches_since_checkpoint >= 2:
                         if batches_since_checkpoint >= max_plateau_epochs:
@@ -552,118 +300,6 @@ def batched_minimize(
         except AssertionError:
             pass
         return trace
-
-
-def clip_gradients(fn, clip_value, clip_by="norm", dtype=tf.float64):
-    def wrapper(*args, **kwargs):
-        @tf.custom_gradient
-        def grad_wrapper(*flat_args_kwargs):
-            with tf.GradientTape() as tape:
-                tape.watch(flat_args_kwargs)
-                new_args, new_kwargs = tf.nest.pack_sequence_as(
-                    (args, kwargs), flat_args_kwargs
-                )
-                ret = fn(*new_args, **new_kwargs)
-
-            def grad_fn(*dy):
-                flat_grads = tape.gradient(ret, flat_args_kwargs, output_gradients=dy)
-
-                if clip_by == "norm":
-                    adjusted = tf.nest.pack_sequence_as(
-                        flat_grads,
-                        tf.clip_by_global_norm(
-                            [
-                                tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
-                                for t in tf.nest.flatten(flat_grads)
-                            ],
-                            clip_value,
-                        )[0],
-                    )
-                else:
-                    adjusted = (
-                        tf.nest.pack_sequence_as(
-                            flat_grads,
-                            [
-                                tf.clip_by_value(
-                                    tf.where(tf.math.is_finite(t), t, tf.zeros_like(t)),
-                                    -clip_value,
-                                    clip_value,
-                                )
-                                for t in tf.nest.flatten(flat_grads)
-                            ],
-                        ),
-                    )
-                flat_grads = tf.nest.map_structure(
-                    lambda g: tf.where(tf.math.is_finite(g), g, tf.zeros_like(g)),
-                    flat_grads,
-                )
-                return adjusted
-
-            return ret, grad_fn
-
-        return grad_wrapper(*[tf.nest.flatten((args, kwargs))])
-
-    return wrapper
-
-
-@tf.function(autograph=False, experimental_compile=True)
-def run_chain(
-    init_state,
-    step_size,
-    target_log_prob_fn,
-    unconstraining_bijectors,
-    num_steps=500,
-    num_leapfrog_steps=10,
-    burnin=50,
-):
-    def trace_fn(_, pkr):
-        return (
-            pkr.inner_results.inner_results.target_log_prob,
-            pkr.inner_results.inner_results.leapfrogs_taken,
-            pkr.inner_results.inner_results.has_divergence,
-            pkr.inner_results.inner_results.energy,
-            pkr.inner_results.inner_results.log_accept_ratio,
-        )
-
-    kernel = tfp.mcmc.TransformedTransitionKernel(
-        inner_kernel=tfp.mcmc.NoUTurnSampler(target_log_prob_fn, step_size=step_size),
-        bijector=unconstraining_bijectors,
-    )
-    kernel = tfp.mcmc.TransformedTransitionKernel(
-        inner_kernel=tfp.mcmc.HamiltonianMonteCarlo(
-            target_log_prob_fn=target_log_prob_fn,
-            num_leapfrog_steps=num_leapfrog_steps,
-            step_size=0.1,
-            state_gradients_are_stopped=True,
-        ),
-        bijector=unconstraining_bijectors,
-    )
-    kernel = tfp.mcmc.SimpleStepSizeAdaptation(
-        inner_kernel=kernel, num_adaptation_steps=int(burnin * 0.8)
-    )
-    pbar = tfp.experimental.mcmc.ProgressBarReducer(num_steps)
-    """
-    kernel = tfp.mcmc.DualAveragingStepSizeAdaptation(
-        inner_kernel=kernel,
-        num_adaptation_steps=burnin,
-        step_size_setter_fn=lambda pkr, new_step_size: pkr._replace(
-            inner_results=pkr.inner_results._replace(step_size=new_step_size)
-        ),
-        step_size_getter_fn=lambda pkr: pkr.inner_results.step_size,
-        log_accept_prob_getter_fn=lambda pkr: pkr.inner_results.log_accept_ratio,
-    )
-    """
-    kernel = tfp.experimental.mcmc.WithReductions(kernel, pbar)
-
-    # Sampling from the chain.
-    chain_state, sampler_stat = tfp.mcmc.sample_chain(
-        num_results=num_steps,
-        num_burnin_steps=burnin,
-        current_state=init_state,
-        kernel=kernel,
-        trace_fn=trace_fn,
-    )
-    return chain_state, sampler_stat
 
 
 class TransformedVariable(tfp_util.TransformedVariable):

@@ -34,9 +34,8 @@ from tensorflow_probability.python import monte_carlo
 from bayesianquilts.util import (
     batched_minimize,
     TransformedVariable,
-    minimize_distributed,
 )
-from bayesianquilts.util import _trace_variables, _trace_loss
+from bayesianquilts.util import _trace_loss
 
 
 # @tf.function(autograph=False)

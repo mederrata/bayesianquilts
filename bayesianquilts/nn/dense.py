@@ -1,28 +1,18 @@
-from abc import abstractmethod
-import numpy as np
 import inspect
+from abc import abstractmethod
+
+import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from bayesianquilts.metastrings import (
-    weight_code,
-    cauchy_code,
-    sq_igamma_code,
-    igamma_code,
-)
-
-from bayesianquilts.util import (
-    clip_gradients,
-    run_chain,
-)
 from bayesianquilts.distributions import SqrtInverseGamma
+from bayesianquilts.metastrings import (cauchy_code, horseshoe_code,
+                                        horseshoe_lambda_code, igamma_code,
+                                        sq_igamma_code, weight_code)
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.metastrings import horseshoe_code, horseshoe_lambda_code
-from bayesianquilts.vi.advi import (
-    build_trainable_InverseGamma_dist,
-    build_trainable_normal_dist,
-    build_surrogate_posterior,
-)
+from bayesianquilts.vi.advi import (build_surrogate_posterior,
+                                    build_trainable_InverseGamma_dist,
+                                    build_trainable_normal_dist)
 
 tfd = tfp.distributions
 

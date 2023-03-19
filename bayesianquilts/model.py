@@ -23,8 +23,6 @@ from tensorflow.python.distribute.input_lib import DistributedDataset
 from tqdm import tqdm
 
 from bayesianquilts.util import (
-    clip_gradients,
-    run_chain,
     tf_data_cardinality,
 )
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
@@ -83,7 +81,7 @@ class BayesianModel(ABC):
         abs_tol=1e-10,
         rel_tol=1e-8,
         clip_value=5.0,
-        clip_by='norm',
+        clip_by="norm",
         max_decay_steps=25,
         lr_decay_factor=0.99,
         check_every=1,
