@@ -141,6 +141,7 @@ class BayesianModel(ABC):
                 trainable_variables=trainable_variables,
                 batched_data_factory=batched_data_factory,
                 test_fn=test_fn,
+                **kwargs
             )
             return losses
 
