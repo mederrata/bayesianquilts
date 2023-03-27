@@ -206,7 +206,8 @@ def batched_minimize(
                 if verbose:
                     for g, v in zip(grads, watched_variables):
                         tf.print(v.name, tf.reduce_max(g))
-                test = loss_fn(data=data)
+                if loss_fn:
+                    test_results += [loss_fn(data=data)]
                 continue
 
             loss = np.mean(batch_losses[-1])
@@ -301,7 +302,8 @@ def batched_minimize(
         except AssertionError:
             pass
         if test_fn is not None:
-            return trace, test_results
+            trace.test_eval = test_results
+            return trace
         return trace
 
 
