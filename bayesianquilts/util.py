@@ -161,6 +161,7 @@ def batched_minimize(
         data_factory = data_factory.repeat()
         pbar_outer = tqdm(total=num_epochs, position=0)
         pbar = None
+        test_results = []
         epoch = 0
         for n_batch, data in enumerate(data_factory):
 
@@ -228,7 +229,7 @@ def batched_minimize(
                     flush=True,
                 )
                 if test_fn is not None:
-                    test_fn()
+                    test_results += [test_fn()]
 
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
@@ -299,6 +300,8 @@ def batched_minimize(
                 trace.latest_checkpoint = manager.latest_checkpoint
         except AssertionError:
             pass
+        if test_fn is not None:
+            return trace, test_results
         return trace
 
 
