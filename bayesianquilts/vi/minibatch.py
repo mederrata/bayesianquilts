@@ -179,39 +179,21 @@ def minibatch_fit_surrogate_posterior(
             **kwargs,
         )
 
-    if strategy is None:
-        return batched_minimize(
-            complete_variational_loss_fn,
-            batched_data_factory=batched_data_factory,
-            num_epochs=num_epochs,
-            trace_fn=trace_fn,
-            learning_rate=learning_rate,
-            trainable_variables=trainable_variables,
-            abs_tol=abs_tol,
-            rel_tol=rel_tol,
-            clip_value=clip_value,
-            clip_by=clip_by,
-            accumulate_batches=accumulate_batches,
-            batches_per_epoch=batches_per_epoch,
-            decay_rate=decay_rate,
-            check_every=check_every,
-            test_fn=test_fn,
-            **kwargs,
-        )
-    else:
-        return minimize_distributed(
-            complete_variational_loss_fn,
-            data_factory=batched_data_factory,
-            num_epochs=num_epochs,
-            trace_fn=trace_fn,
-            learning_rate=learning_rate,
-            trainable_variables=trainable_variables,
-            abs_tol=abs_tol,
-            rel_tol=rel_tol,
-            decay_rate=decay_rate,
-            accumulate_batches=accumulate_batches,
-            check_every=check_every,
-            strategy=strategy,
-            test_fn=test_fn,
-            **kwargs,
-        )
+    return batched_minimize(
+        complete_variational_loss_fn,
+        batched_data_factory=batched_data_factory,
+        num_epochs=num_epochs,
+        trace_fn=trace_fn,
+        learning_rate=learning_rate,
+        trainable_variables=trainable_variables,
+        abs_tol=abs_tol,
+        rel_tol=rel_tol,
+        clip_value=clip_value,
+        clip_by=clip_by,
+        accumulate_batches=accumulate_batches,
+        batches_per_epoch=batches_per_epoch,
+        decay_rate=decay_rate,
+        check_every=check_every,
+        test_fn=test_fn,
+        **kwargs,
+    )
