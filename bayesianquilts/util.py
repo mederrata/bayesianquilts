@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_addons as tfa
 import tensorflow_probability as tfp
 from tensorflow_probability.python import util as tfp_util
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
