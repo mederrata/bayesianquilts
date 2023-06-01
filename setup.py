@@ -10,7 +10,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="bayesianquilts",
-    version="0.1.2",
+    version="0.1.3",
     author="mederrata",
     author_email="info@mederrata.com",
     description="Quilting a Bayesian Hierarchical model to mimic relu neural networks",
@@ -42,9 +42,8 @@ setuptools.setup(
         # We need to check for direct depends or we can delete scipy.
         'scipy',
         'protobuf~=3.19.0',
-        'tensorflow==2.10.1',
-        'tensorflow-probability==0.18.0',
-        'tensorflow-addons==0.18.0',
+        'tensorflow==2.12.0',
+        'tensorflow-probability==0.20.0',
         'jax',
         'natsort',
         'tqdm',
