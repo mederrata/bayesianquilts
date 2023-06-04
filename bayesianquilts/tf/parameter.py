@@ -21,7 +21,9 @@ def tf_ravel_multi_index(multi_index, dims):
     return tf.reduce_sum(multi_index * tf.expand_dims(strides, 1), axis=0)
 
 
-def ravel_broadcast_tile(tensor, from_shape, to_shape, param_ndims=None, batch_ndims=None):
+def ravel_broadcast_tile(
+    tensor, from_shape, to_shape, param_ndims=None, batch_ndims=None
+):
     """Unravel, tile to match to_shape, ravel,
     without raveling.
 
@@ -31,11 +33,13 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape, param_ndims=None, batch_n
         from_shape ([type]): shape for unraveled version of tensor
         to_shape ([type]): shape to tile to
     """
-    multiple = int(np.prod(to_shape)/np.prod(from_shape))
+    multiple = int(np.prod(to_shape) / np.prod(from_shape))
     tensor_shape = tensor.shape.as_list()
     if param_ndims is None:
         param_ndims = 0
-        for tdim, todim, fdim in zip(reversed(tensor_shape), reversed(to_shape), reversed(from_shape)):
+        for tdim, todim, fdim in zip(
+            reversed(tensor_shape), reversed(to_shape), reversed(from_shape)
+        ):
             if tdim == todim and fdim == tdim:
                 param_ndims += 1
             else:
@@ -44,27 +48,27 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape, param_ndims=None, batch_n
 
     if batch_ndims is None:
         batch_ndims = 0
-        for tdim, todim, fdim in zip(tensor_shape[:(-param_ndims-1)], to_shape[:(-param_ndims-1)], from_shape[:(-param_ndims-1)]):
+        for tdim, todim, fdim in zip(
+            tensor_shape[: (-param_ndims - 1)],
+            to_shape[: (-param_ndims - 1)],
+            from_shape[: (-param_ndims - 1)],
+        ):
             if tdim == todim and tdim == fdim:
                 batch_ndims += 1
             else:
                 break
     batch_dims = tensor_shape[:batch_ndims]
-    tensor_ = tf.tile(
-        tensor[..., tf.newaxis], [1]*len(tensor_shape) + [multiple])
+    tensor_ = tf.tile(tensor[..., tf.newaxis], [1] * len(tensor_shape) + [multiple])
 
-    broadcast_dims = [
-        k for k, i in enumerate(from_shape) if i == 1]
+    broadcast_dims = [k for k, i in enumerate(from_shape) if i == 1]
 
     # we need to re-arrange tensor_, putting things in the right place
     # traverse broadcast_dims, looking for continuous regions
 
     contiguous = [
-        list(map(
-            itemgetter(1), g
-        )) for k, g in groupby(
-            enumerate(broadcast_dims
-                      ), lambda i_x: i_x[0] - i_x[1])]
+        list(map(itemgetter(1), g))
+        for k, g in groupby(enumerate(broadcast_dims), lambda i_x: i_x[0] - i_x[1])
+    ]
 
     # the last dimension is now the product of all of the missing
     # dimensions in broadcast_dims. Let's stick this dimension into
@@ -73,9 +77,10 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape, param_ndims=None, batch_n
     tensor_ = tf.transpose(
         tensor_,
         (
-            list(range(batch_ndims + 1)) + [len(tensor_shape)]
+            list(range(batch_ndims + 1))
+            + [len(tensor_shape)]
             + list(range(batch_ndims + 1, len(tensor_shape)))
-        )
+        ),
     )
 
     for chunk in contiguous:
@@ -104,31 +109,32 @@ def ravel_broadcast_tile(tensor, from_shape, to_shape, param_ndims=None, batch_n
         tensor_ = tf.reshape(
             tensor_,
             (
-                (batch_dims if len(batch_dims) > 0 else [
-                 1]) + [int(np.prod(prior_dims))] + [int(np.prod(post_dims))]
-                + [dims_to_insert] +
-                [int(extra_dims/dims_to_insert)] + [np.prod(param_dims)]
-            )
+                (batch_dims if len(batch_dims) > 0 else [1])
+                + [int(np.prod(prior_dims))]
+                + [int(np.prod(post_dims))]
+                + [dims_to_insert]
+                + [int(extra_dims / dims_to_insert)]
+                + [np.prod(param_dims)]
+            ),
         )
-        tensor_ = tf.transpose(
-            tensor_,
-            (0, 1, 3, 2, 4, 5)
-        )
+        tensor_ = tf.transpose(tensor_, (0, 1, 3, 2, 4, 5))
         _temp_shape = tensor_.shape.as_list()
         tensor_ = tf.reshape(
             tensor_,
             (
-                (batch_dims if len(batch_dims) > 0 else [
-                 1]) + [int(np.prod(_temp_shape[1:4]))]
-                + [int(np.prod(_temp_shape[4:5]))] + param_dims
-            )
+                (batch_dims if len(batch_dims) > 0 else [1])
+                + [int(np.prod(_temp_shape[1:4]))]
+                + [int(np.prod(_temp_shape[4:5]))]
+                + param_dims
+            ),
         )
 
     _temp_shape = tensor_.shape.as_list()
     tensor_ = tf.reshape(
         tensor_,
-        batch_dims +
-        [int(np.prod(_temp_shape[batch_ndims:(-param_ndims)]))] + param_dims
+        batch_dims
+        + [int(np.prod(_temp_shape[batch_ndims:(-param_ndims)]))]
+        + param_dims,
     )
     return tensor_
 
@@ -139,6 +145,7 @@ class Interactions(object):
     def __init__(self, dimensions, exclusions=None) -> None:
         super().__init__()
         exclusions = [] if exclusions is None else exclusions
+        dimensions = [] if None else dimensions
         self._dimensions = dimensions
         self._intrinsic_shape = []
         for x in self._dimensions:
@@ -176,10 +183,7 @@ class Interactions(object):
         )
         exclusions = []
         hot = [
-            set(
-                d[0] for i, d in zip(ind, self._dimensions) if i == 1
-            )
-            for ind in onehot
+            set(d[0] for i, d in zip(ind, self._dimensions) if i == 1) for ind in onehot
         ]
         exclusions += hot
         return Interactions(
@@ -215,7 +219,6 @@ class Decomposed(object):
         name="",
         **kwargs,
     ) -> None:
-
         super().__init__()
         assert isinstance(
             interactions, Interactions
@@ -244,19 +247,25 @@ class Decomposed(object):
     def generate_labels(self):
         # generate a label for each tensor part
         dimension_dict = dict(self._interactions._dimensions)
-        _dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
-            dimension_dict[j], list) else [f"{j}={t}" for t in range(dimension_dict[j])] for j in [x[0] for x in self._interactions._dimensions]]
-        _dimension_labels = [" & ".join(t)
-                             for t in product(*_dimension_labels)]
+        _dimension_labels = [
+            [f"{j}={t}" for t in dimension_dict[j]]
+            if isinstance(dimension_dict[j], list)
+            else [f"{j}={t}" for t in range(dimension_dict[j])]
+            for j in [x[0] for x in self._interactions._dimensions]
+        ]
+        _dimension_labels = [" & ".join(t) for t in product(*_dimension_labels)]
         labels = defaultdict(lambda: _dimension_labels)
 
         for k, v in self._tensor_part_interactions.items():
             if len(v) == 0:
                 continue
-            dimension_labels = [[f"{j}={t}" for t in dimension_dict[j]] if isinstance(
-                dimension_dict[j], list) else [f"{j}={t}" for t in range(dimension_dict[j])] for j in v]
-            dimension_labels = [" & ".join(t)
-                                for t in product(*dimension_labels)]
+            dimension_labels = [
+                [f"{j}={t}" for t in dimension_dict[j]]
+                if isinstance(dimension_dict[j], list)
+                else [f"{j}={t}" for t in range(dimension_dict[j])]
+                for j in v
+            ]
+            dimension_labels = [" & ".join(t) for t in product(*dimension_labels)]
             labels[k] = dimension_labels
         return labels
 
@@ -280,6 +289,15 @@ class Decomposed(object):
         batch_shape = [] if batch_shape is None else batch_shape
         batch_ndims = len(batch_shape)
         tensor_shapes = {}
+
+        if len(self._interaction_shape) == 0:
+            tensor_names[self._name] = ()
+            tensor_shapes[self._name] = self._param_shape
+            tensors[self._name] = tf.zeros(self._param_shape, dtype)
+            if target is not None:
+                tensors[self._name] += target
+            return tensors, tensor_names, tensor_shapes
+
         if target is None:
             residual = tf.zeros(batch_shape + self.shape(), dtype)
         else:
@@ -308,8 +326,7 @@ class Decomposed(object):
             tensor_shape += self._param_shape
 
             # Set the tensor value
-            tensor_names[self._name + "__" +
-                         interaction_name] = interaction_vars
+            tensor_names[self._name + "__" + interaction_name] = interaction_vars
             value = residual
             for ax, flag in enumerate(n_tuple):
                 if flag == 0:
@@ -323,9 +340,7 @@ class Decomposed(object):
             interaction_cats = np.prod(t_shape[: (-len(self._param_shape))])
             value = tf.reshape(
                 value,
-                batch_shape
-                + [interaction_cats]
-                + self._param_shape,
+                batch_shape + [interaction_cats] + self._param_shape,
             )
             if self._implicit and (interaction_cats > 1):
                 if len(self._param_shape) == 1:
@@ -335,7 +350,7 @@ class Decomposed(object):
                 elif len(self._param_shape) == 3:
                     value = value[..., 1:, :, :, :]
                 elif len(self._param_shape) == 4:
-                    value = value[..., 1:, :, :, :, :],
+                    value = (value[..., 1:, :, :, :, :],)
                 elif len(self._param_shape) == 5:
                     value = value[..., 1:, :, :, :, :, :]
                 elif len(self._param_shape) == 6:
@@ -387,8 +402,7 @@ class Decomposed(object):
         if tf.is_tensor(x):
             return tf.add_n(
                 broadcast_tensors(
-                    [x, self.unravel_tensor(
-                        self.sum_parts(self._tensor_parts))]
+                    [x, self.unravel_tensor(self.sum_parts(self._tensor_parts))]
                 )
             )
         return self.constitute().__add__(x)
@@ -404,9 +418,7 @@ class Decomposed(object):
 
     def sum_parts(self, tensors=None, unravel=False, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
-        raveled_shape = [
-            np.prod(self._interaction_shape)
-        ] + self._param_shape
+        raveled_shape = [np.prod(self._interaction_shape)] + self._param_shape
         # infer the batch shape
 
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
@@ -424,10 +436,8 @@ class Decomposed(object):
             part_interact_shape = self._tensor_part_shapes[k][
                 : (-len(self._param_shape))
             ]
-            broadcast_dims = [k for k, i in enumerate(
-                part_interact_shape) if i == 1]
-            keep_dims = [k for k, i in enumerate(
-                part_interact_shape) if i != 1]
+            broadcast_dims = [k for k, i in enumerate(part_interact_shape) if i == 1]
+            keep_dims = [k for k, i in enumerate(part_interact_shape) if i != 1]
             if len(keep_dims) == 0:
                 partial_sum += v
                 continue
@@ -435,19 +445,20 @@ class Decomposed(object):
             to_shape = batch_shape + self.shape()
             # pad interaction dimension with leading zeros
             if self._implicit and (np.prod(part_interact_shape) > 1):
-
                 v = tf.pad(
-                    v, [[0, 0]]*len(batch_shape) + [[1, 0]] +
-                    [[0, 0]]*len(self._param_shape), "CONSTANT"
+                    v,
+                    [[0, 0]] * len(batch_shape)
+                    + [[1, 0]]
+                    + [[0, 0]] * len(self._param_shape),
+                    "CONSTANT",
                 )
             v_ = ravel_broadcast_tile(
-                v, from_shape, to_shape, param_ndims=len(self._param_shape))
+                v, from_shape, to_shape, param_ndims=len(self._param_shape)
+            )
             partial_sum += self.scales[k] * v_
 
         if unravel:
-            partial_sum = tf.reshape(
-                partial_sum, to_shape
-            )
+            partial_sum = tf.reshape(partial_sum, to_shape)
         return partial_sum
 
     def unravel_tensor(self, tensor):
@@ -473,7 +484,8 @@ class Decomposed(object):
         """
         # flatten the indices
         tensors = self._tensor_parts if tensors is None else tensors
-
+        if len(self._interaction_shape) == 0:
+            return tensors[self._name]
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
         tensors = self._tensor_parts if tensors is None else tensors
@@ -494,8 +506,11 @@ class Decomposed(object):
             ]
             if self._implicit and (np.prod(part_interact_shape) > 1):
                 _tensor = tf.pad(
-                    tensor, [[0, 0]]*len(batch_shape) + [[1, 0]] +
-                    [[0, 0]]*len(self._param_shape), "CONSTANT"
+                    tensor,
+                    [[0, 0]] * len(batch_shape)
+                    + [[1, 0]]
+                    + [[0, 0]] * len(self._param_shape),
+                    "CONSTANT",
                 )
             else:
                 _tensor = tensor
@@ -516,16 +531,14 @@ class Decomposed(object):
             """
             index_select = [1 if k != 1 else 0 for k in part_interact_shape]
             # move batch back up
-            _indices = interaction_indices * \
-                tf.cast(index_select, interaction_indices.dtype)
-            _indices = tf_ravel_multi_index(
-                tf.transpose(_indices),
-                part_interact_shape
+            _indices = interaction_indices * tf.cast(
+                index_select, interaction_indices.dtype
             )
+            _indices = tf_ravel_multi_index(tf.transpose(_indices), part_interact_shape)
             _tensor = tf.transpose(
                 _tensor,
-                list(range(batch_ndims, len(_tensor.shape.as_list()))) +
-                list(range(batch_ndims))
+                list(range(batch_ndims, len(_tensor.shape.as_list())))
+                + list(range(batch_ndims)),
             )
             _tensor = tf.gather_nd(_tensor, _indices[:, tf.newaxis])
 
@@ -533,14 +546,16 @@ class Decomposed(object):
             _rank = len(_tensor.shape.as_list())
             _tensor = tf.transpose(
                 _tensor,
-                list(range(_rank-batch_ndims, _rank)) +
-                list(range(_rank-batch_ndims))
+                list(range(_rank - batch_ndims, _rank))
+                + list(range(_rank - batch_ndims)),
             )
             cumulative += _tensor
             # add to cumulative sum
         return cumulative
 
-    def dot_sum(self, interaction_indices, y, tensors=None, axes=[-1], dtype=tf.float32):
+    def dot_sum(
+        self, interaction_indices, y, tensors=None, axes=[-1], dtype=tf.float32
+    ):
         # y has to have a compatible shape
         """Multi-index mult without summing, then sum on axes
 
@@ -549,7 +564,8 @@ class Decomposed(object):
             tensors ([type], optional): [description]. Defaults to None.
         """
         tensors = self._tensor_parts if tensors is None else tensors
-
+        if len(self._interaction_shape) == 0:
+            return tf.reduce_sum(tensors[self._name] * y, axes)
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
@@ -571,8 +587,11 @@ class Decomposed(object):
             ]
             if self._implicit and (np.prod(part_interact_shape) > 1):
                 _tensor = tf.pad(
-                    tensor, [[0, 0]]*len(batch_shape) + [[1, 0]] +
-                    [[0, 0]]*len(self._param_shape), "CONSTANT"
+                    tensor,
+                    [[0, 0]] * len(batch_shape)
+                    + [[1, 0]]
+                    + [[0, 0]] * len(self._param_shape),
+                    "CONSTANT",
                 )
             else:
                 _tensor = tensor
@@ -593,16 +612,14 @@ class Decomposed(object):
             """
             index_select = [1 if k != 1 else 0 for k in part_interact_shape]
             # move batch back up
-            _indices = interaction_indices * \
-                tf.cast(index_select, interaction_indices.dtype)
-            _indices = tf_ravel_multi_index(
-                tf.transpose(_indices),
-                part_interact_shape
+            _indices = interaction_indices * tf.cast(
+                index_select, interaction_indices.dtype
             )
+            _indices = tf_ravel_multi_index(tf.transpose(_indices), part_interact_shape)
             _tensor = tf.transpose(
                 _tensor,
-                list(range(batch_ndims, len(_tensor.shape.as_list()))) +
-                list(range(batch_ndims))
+                list(range(batch_ndims, len(_tensor.shape.as_list())))
+                + list(range(batch_ndims)),
             )
             _tensor = tf.gather_nd(_tensor, _indices[:, tf.newaxis])
 
@@ -610,10 +627,10 @@ class Decomposed(object):
             _rank = len(_tensor.shape.as_list())
             _tensor = tf.transpose(
                 _tensor,
-                list(range(_rank-batch_ndims, _rank)) +
-                list(range(_rank-batch_ndims))
+                list(range(_rank - batch_ndims, _rank))
+                + list(range(_rank - batch_ndims)),
             )
-            part = tf.reduce_sum(_tensor*tf.cast(y, _tensor.dtype), axes)
+            part = tf.reduce_sum(_tensor * tf.cast(y, _tensor.dtype), axes)
             cumulative += part
             # add to cumulative sum
         return cumulative
@@ -622,10 +639,13 @@ class Decomposed(object):
         return self._lookup_by_parts(interaction_indices, tensors=tensors, dtype=dtype)
 
     def _lookup_by_sum(self, interaction_indices, tensors=None, dtype=tf.float32):
+        tensors = self._tensor_parts if tensors is None else tensors
+
+        if len(self._interaction_shape) == 0:
+            return tensors[self._name]
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
-        tensors = self._tensor_parts if tensors is None else tensors
 
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
@@ -640,14 +660,11 @@ class Decomposed(object):
         new_rank = len(summed.shape.as_list())
 
         # stick batch axes on the  end
-        permutation = list(range(batch_ndims, new_rank)) + \
-            list(range(batch_ndims))
+        permutation = list(range(batch_ndims, new_rank)) + list(range(batch_ndims))
         summed = tf.transpose(summed, permutation)
 
-        interaction_indices = tf.transpose(
-            tf.convert_to_tensor(interaction_indices))
-        indices = tf_ravel_multi_index(
-            interaction_indices, self._interaction_shape)
+        interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
+        indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
         summed = tf.gather_nd(summed, indices[:, tf.newaxis])
 
         rank = len(summed.shape.as_list())
@@ -671,12 +688,10 @@ class Decomposed(object):
         summed = tf.reshape(
             summed,
             [np.prod(summed.shape[: -(len(self._param_shape) + batch_ndims)])]
-            + summed.shape[(-(len(self._param_shape) + batch_ndims)):],
+            + summed.shape[(-(len(self._param_shape) + batch_ndims)) :],
         )
-        interaction_indices = tf.transpose(
-            tf.convert_to_tensor(interaction_indices))
-        indices = tf_ravel_multi_index(
-            interaction_indices, self._interaction_shape)
+        interaction_indices = tf.transpose(tf.convert_to_tensor(interaction_indices))
+        indices = tf_ravel_multi_index(interaction_indices, self._interaction_shape)
         summed = tf.gather_nd(summed, indices[:, tf.newaxis])
 
         rank = len(summed.shape.as_list())
@@ -696,23 +711,25 @@ class Decomposed(object):
 
 
 def demo():
-
-    interact = Interactions([], exclusions=[])
-    # p = Decomposed(interactions=interact, param_shape=[
-    #               100], name="beta", implicit=True)
     dims = [
-        ("planned", ['no', 'yes']),
+        ("planned", ["no", "yes"]),
         ("pre2011", 2),
         ("mdc", 26),
-        *[(f"hx_{j}", ['low', 'high']) for j in range(5)],
+        *[(f"hx_{j}", ["low", "high"]) for j in range(5)],
     ]
 
     interact = Interactions(dims, exclusions=[]).truncate_to_order(3)
+    p = Decomposed(interactions=interact, param_shape=[100], name="beta", implicit=True)
     print(interact)
-    p = Decomposed(interactions=interact, param_shape=[
-                   100], name="beta", implicit=True)
-    print(p.generate_labels()['nono'])
-    print(p)
+    print(p.generate_labels()["nono"])
+
+    interact = Interactions([], exclusions=[])
+    p0 = Decomposed(
+        interactions=interact, param_shape=[100], name="beta", implicit=True
+    )
+
+    print(p0)
+
     indices = [
         [0, 0, 21, 1, 1, 1, 1, 0],
         [0, 0, 12, 1, 1, 1, 1, 1],
