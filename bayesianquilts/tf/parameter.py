@@ -145,7 +145,7 @@ class Interactions(object):
     def __init__(self, dimensions, exclusions=None) -> None:
         super().__init__()
         exclusions = [] if exclusions is None else exclusions
-        dimensions = [] if None else dimensions
+        dimensions = [] if dimensions is None else dimensions
         self._dimensions = dimensions
         self._intrinsic_shape = []
         for x in self._dimensions:
@@ -154,6 +154,8 @@ class Interactions(object):
             except TypeError:
                 self._intrinsic_shape += [x[1]]
         self._exclusions = [set(s) for s in exclusions]
+        if len(self._intrinsic_shape) == 0:
+            self._intrinsic_shape = [1]
 
     def shape(self):
         return self._intrinsic_shape
@@ -171,10 +173,14 @@ class Interactions(object):
         return out
 
     def retrieve_indices(self, data):
+        if len(self._dimensions) == 0:
+            return tf.cast([0], tf.int64)
         indices = [tf.cast(data[k[0]], tf.int64) for k in self._dimensions]
         return tf.concat(indices, axis=-1)
 
     def truncate_to_order(self, max_order):
+        if len(self._dimensions) == 0:
+            return self
         onehot = list(
             filter(
                 lambda x: sum(x) > max_order,
