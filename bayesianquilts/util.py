@@ -113,11 +113,7 @@ def batched_minimize(
         ]
 
         for i, t in enumerate(flat_grads):
-            t = tf.where(
-                tf.math.is_finite(t),
-                t,
-                tf.zeros_like(t)
-            )
+            t = tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
             gradient_accumulation[i].assign_add(t, read_value=False)
 
         state = trace_fn(
@@ -163,14 +159,11 @@ def batched_minimize(
         test_results = []
         epoch = 0
         for n_batch, data in enumerate(data_factory):
-
             if n_batch % batches_per_epoch == 0:
                 # this batch is the start of a new epoch
 
                 #  apply the grad
-                if (gradient_accumulation is not None) and (
-                    np.isfinite(loss)
-                ):
+                if (gradient_accumulation is not None) and (np.isfinite(loss)):
                     _ = apply_grads(gradient_accumulation, watched_variables)
                     pbar_outer.update(1)
                 epoch += 1
@@ -228,8 +221,14 @@ def batched_minimize(
                     f"\nEpoch {epoch}: average-batch loss:" + f"{loss} rel loss: {rel}",
                     flush=True,
                 )
+                save_because_of_test = False
                 if test_fn is not None:
                     test_results += [test_fn()]
+                    if isinstance(test_results[-1], tf.Tensor):
+                        test_results[-1] = test_results[-1].numpy()
+                    if len(test_results) > 1:
+                        if test_results[-1] > np.mean(test_results[:-1]):
+                            save_because_of_test = True
 
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
@@ -269,6 +268,14 @@ def batched_minimize(
                         )
                         converged = True
                     batches_since_plateau += 1
+                elif save_because_of_test:
+                    save_path = manager.save()
+                    print(f"Saved a checkpoint: {save_path}", flush=True)
+                    batches_since_checkpoint += 1
+                    decay_step += 1
+                    if decay_step > max_decay_steps:
+                        converged = True
+                        continue
                 else:
                     batches_since_checkpoint += 1
                     decay_step += 1
