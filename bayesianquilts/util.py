@@ -310,7 +310,7 @@ def batched_minimize(
                 else:
                     #
                     if len(test_results) > 1:
-                        if test_results[-1] > np.max(test_results[:-1]):
+                        if test_results[-1] < np.max(test_results[:-1]):
                             cp_status = checkpoint.restore(manager.latest_checkpoint)
                             cp_status.assert_consumed()
                             trace.latest_checkpoint = manager.latest_checkpoint
