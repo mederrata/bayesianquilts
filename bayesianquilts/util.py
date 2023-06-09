@@ -241,7 +241,12 @@ def batched_minimize(
                         continue
                     print(f"New learning rate: {opt.lr}", flush=True)
                     continue
-                if losses[-1] < min_loss:
+                save_because_of_loss = losses[-1] < min_loss
+                save_this = (
+                    save_because_of_loss if test_fn is None else save_because_of_test
+                )
+
+                if save_this:
                     """
                     Save a checkpoint
                     """
@@ -268,14 +273,6 @@ def batched_minimize(
                         )
                         converged = True
                     batches_since_plateau += 1
-                elif save_because_of_test:
-                    save_path = manager.save()
-                    print(f"Saved a checkpoint: {save_path}", flush=True)
-                    batches_since_checkpoint += 1
-                    decay_step += 1
-                    if decay_step > max_decay_steps:
-                        converged = True
-                        continue
                 else:
                     batches_since_checkpoint += 1
                     decay_step += 1
@@ -313,7 +310,7 @@ def batched_minimize(
                 else:
                     #
                     if len(test_results) > 1:
-                        if test_results[-1] < np.max(test_results[:-1]):
+                        if test_results[-1] > np.max(test_results[:-1]):
                             cp_status = checkpoint.restore(manager.latest_checkpoint)
                             cp_status.assert_consumed()
                             trace.latest_checkpoint = manager.latest_checkpoint
