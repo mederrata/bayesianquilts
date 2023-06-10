@@ -67,6 +67,9 @@ class BayesianModel(ABC):
     def fit(self, *args, **kwargs):
         return self._calibrate_minibatch_advi(*args, **kwargs)
 
+    def preprocessor(self):
+        return None
+
     def _calibrate_advi(self):
         pass
 
