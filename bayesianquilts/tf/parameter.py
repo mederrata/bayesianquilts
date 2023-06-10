@@ -424,7 +424,7 @@ class Decomposed(object):
 
     def sum_parts(self, tensors=None, unravel=False, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
-        tensors = {k: v for k, v in tensors.values if k in self._tensor_parts.keys()}
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         raveled_shape = [np.prod(self._interaction_shape)] + self._param_shape
         # infer the batch shape
 
