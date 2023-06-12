@@ -60,7 +60,7 @@ def ravel_broadcast_tile(
     batch_dims = tensor_shape[:batch_ndims]
     tensor_ = tf.tile(tensor[..., tf.newaxis], [1] * len(tensor_shape) + [multiple])
 
-    broadcast_dims = [k for k, i in enumerate(from_shape) if i == 1]
+    broadcast_dims = [k for k, i in enumerate(from_shape[:(-param_ndims)]) if i == 1]
 
     # we need to re-arrange tensor_, putting things in the right place
     # traverse broadcast_dims, looking for continuous regions
@@ -725,9 +725,15 @@ def demo():
     ]
 
     interact = Interactions(dims, exclusions=[]).truncate_to_order(3)
-    p = Decomposed(interactions=interact, param_shape=[100], name="beta", implicit=True)
+    p = Decomposed(interactions=interact, param_shape=[100, 1], name="beta", implicit=True)
     print(interact)
     print(p.generate_labels()["nono"])
+    t, n, s = p.generate_tensors(batch_shape=[4])
+    out = p.sum_parts(t)
+
+    r = p.lookup(indices, t)
+    r1 = p._lookup_by_parts(indices, t)
+    out2 = p.dot(indices)
 
     interact = Interactions([], exclusions=[])
     p0 = Decomposed(
@@ -745,12 +751,6 @@ def demo():
         [0, 1, 13, 0, 0, 1, 0, 1],
     ]
 
-    t, n, s = p.generate_tensors(batch_shape=[4])
-    out = p.sum_parts(t)
-
-    r = p.lookup(indices, t)
-    r1 = p._lookup_by_parts(indices, t)
-    out2 = p.dot(indices)
     return None
 
 
