@@ -243,7 +243,7 @@ def batched_minimize(
                     continue
                 save_because_of_loss = losses[-1] < min_loss
                 save_this = (
-                    save_because_of_loss if test_fn is None else save_because_of_test
+                    save_because_of_test if test_fn else save_because_of_loss
                 )
 
                 if save_this:
