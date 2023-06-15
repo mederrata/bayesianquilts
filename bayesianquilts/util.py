@@ -93,7 +93,6 @@ def batched_minimize(
         max_to_keep=3,
     )
 
-    @tf.function(autograph=False)
     def accumulate_grads(data, gradient_accumulation, trainable_variables):
         """Run a single optimization step."""
         if data is None:
@@ -122,6 +121,9 @@ def batched_minimize(
             [tf.identity(v) for v in watched_variables],
         )
         return state, flat_grads
+
+    if not debug:
+        accumulate_grads = tf.function(accumulate_grads, autograph=False)
 
     def apply_grads(gradient_accumulation, trainable_variables):
         return opt.apply_gradients(zip(gradient_accumulation, trainable_variables))
@@ -163,7 +165,7 @@ def batched_minimize(
                 # this batch is the start of a new epoch
 
                 #  apply the grad
-                if (gradient_accumulation is not None) and (np.isfinite(loss)):
+                if (gradient_accumulation is not None) and (np.isfinite(batch_loss)):
                     _ = apply_grads(gradient_accumulation, watched_variables)
                     pbar_outer.update(1)
                 epoch += 1
@@ -242,9 +244,7 @@ def batched_minimize(
                     print(f"New learning rate: {opt.lr}", flush=True)
                     continue
                 save_because_of_loss = losses[-1] < min_loss
-                save_this = (
-                    save_because_of_test if test_fn else save_because_of_loss
-                )
+                save_this = save_because_of_test if test_fn else save_because_of_loss
 
                 if save_this:
                     """

@@ -88,7 +88,7 @@ class BayesianModel(ABC):
         max_decay_steps=25,
         lr_decay_factor=0.99,
         check_every=1,
-        set_expectations=True,
+        set_expectations=False,
         sample_size=24,
         sample_batches=1,
         trainable_variables=None,
