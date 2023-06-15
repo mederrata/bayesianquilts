@@ -123,7 +123,7 @@ def batched_minimize(
         return state, flat_grads
 
     if not debug:
-        accumulate_grads = tf.function(accumulate_grads, autograd=False)
+        accumulate_grads = tf.function(accumulate_grads, autograph=False)
 
     def apply_grads(gradient_accumulation, trainable_variables):
         return opt.apply_gradients(zip(gradient_accumulation, trainable_variables))
