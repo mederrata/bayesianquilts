@@ -490,11 +490,9 @@ class Decomposed(object):
         """
         # flatten the indices
         tensors = self._tensor_parts if tensors is None else tensors
-        if len(self._interaction_shape) == 0:
-            return tensors[self._name]
+        if np.prod(self._interaction_shape) == 1:
+            return tensors[self._name + "__"]
         interaction_indices = tf.convert_to_tensor(interaction_indices)
-        # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
-        tensors = self._tensor_parts if tensors is None else tensors
 
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
