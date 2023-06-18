@@ -46,6 +46,7 @@ def batched_minimize(
     batches_per_epoch=1,
     num_epochs=1000,
     max_plateau_epochs=10,
+    plateau_epochs_til_restore=5,
     abs_tol=1e-4,
     rel_tol=1e-4,
     trainable_variables=None,
@@ -282,7 +283,7 @@ def batched_minimize(
                     batches_since_plateau = 0
                     print(f"New learning rate: {opt.lr}", flush=True)
 
-                    if batches_since_checkpoint >= 2:
+                    if batches_since_checkpoint >= plateau_epochs_til_restore:
                         if batches_since_checkpoint >= max_plateau_epochs:
                             converged = True
                             print(

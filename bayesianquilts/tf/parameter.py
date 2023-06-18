@@ -5,12 +5,14 @@ from collections import Counter, defaultdict
 from itertools import product, groupby
 from operator import itemgetter
 import numpy as np
+from tqdm import tqdm
 
 import tensorflow as tf
 from tensorflow.python.ops.check_ops import assert_none_equal_v2
 import tensorflow_probability as tfp
 from tensorflow_probability import bijectors as tfb
 from tensorflow_probability import distributions as tfd
+from readmission.data.lib.countencoder import CountEncoder
 
 from bayesianquilts.stackedtensor import broadcast_tensors
 
@@ -233,7 +235,6 @@ class Decomposed(object):
         self._interactions = interactions
         self._default_val = default_val
         self._interaction_shape = interactions.shape()
-        self._intrinsic_shape = self._interaction_shape + param_shape
         self._dtype = dtype
         self._implicit = implicit
         self._name = name
@@ -242,11 +243,14 @@ class Decomposed(object):
         if len(param_shape) > 5:
             raise NotImplementedError("Param dimensions > 5 are not supported")
         self._param_shape = param_shape
+        self._intrinsic_shape = self._interaction_shape + param_shape
+
         (
             self._tensor_parts,
             self._tensor_part_interactions,
             self._tensor_part_shapes,
         ) = self.generate_tensors()
+
         self.scales = defaultdict(lambda: 1)
         self.labels = self.generate_labels()
 
@@ -714,6 +718,20 @@ class Decomposed(object):
         return self._interactions.retrieve_indices(data)
 
 
+def cross_tabulate(interactions, data_factory, dtype=tf.int32):
+    decomposition = Decomposed(interactions)
+    n_dims = np.prod(decomposition._interaction_shape)
+    counts = tf.zeros((n_dims), dtype=dtype)
+    dataset = data_factory()
+    counter = CountEncoder(list(range(np.prod(decomposition._interaction_shape))))
+    for batch in tqdm(iter(dataset)):
+        indices = decomposition.retrieve_indices(batch)
+        indices = tf_ravel_multi_index(tf.transpose(indices), decomposition._interaction_shape)
+        counts_ = counter.encode(indices)
+        counts += tf.cast(counts_[1:], counts.dtype)
+    return counts
+
+
 def demo():
     dims = [
         ("planned", ["no", "yes"]),
@@ -723,7 +741,9 @@ def demo():
     ]
 
     interact = Interactions(dims, exclusions=[]).truncate_to_order(3)
-    p = Decomposed(interactions=interact, param_shape=[100, 1], name="beta", implicit=True)
+    p = Decomposed(
+        interactions=interact, param_shape=[100, 1], name="beta", implicit=True
+    )
     print(interact)
     print(p.generate_labels()["nono"])
     t, n, s = p.generate_tensors(batch_shape=[4])
