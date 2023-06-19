@@ -43,8 +43,8 @@ fit_surrogate_posterior = None
 def batched_minimize(
     loss_fn,
     batched_data_factory,
-    batches_per_epoch=1,
-    num_epochs=1000,
+    batches_per_step=1,
+    num_steps=1000,
     max_plateau_epochs=10,
     plateau_epochs_til_restore=5,
     abs_tol=1e-4,
@@ -157,20 +157,20 @@ def batched_minimize(
         gradient_accumulation = None
         data_factory = batched_data_factory()
         data_factory = data_factory.repeat()
-        pbar_outer = tqdm(total=num_epochs, position=0)
+        pbar_outer = tqdm(total=num_steps, position=0)
         pbar = None
         test_results = []
         epoch = 0
         for n_batch, data in enumerate(data_factory):
-            if n_batch % batches_per_epoch == 0:
-                # this batch is the start of a new epoch
+            if n_batch % batches_per_step == 0:
+                # this batch is the start of a gradient step
 
                 #  apply the grad
                 if (gradient_accumulation is not None) and (np.isfinite(batch_loss)):
                     _ = apply_grads(gradient_accumulation, watched_variables)
                     pbar_outer.update(1)
                 epoch += 1
-                pbar = tqdm(total=batches_per_epoch, leave=False, position=1)
+                pbar = tqdm(total=batches_per_step, leave=False, position=1)
                 batch_losses += [[]]
 
                 gradient_accumulation = [
@@ -183,7 +183,7 @@ def batched_minimize(
                     )
                     for i, v in enumerate(watched_variables)
                 ]
-                if (epoch > num_epochs) or converged:
+                if (epoch > num_steps) or converged:
                     print("Terminating because we are out of iterations", flush=True)
                     break
             pbar.update(1)
@@ -213,7 +213,7 @@ def batched_minimize(
 
             if (
                 (epoch > 0)
-                and (n_batch % batches_per_epoch == batches_per_epoch - 1)
+                and (n_batch % batches_per_step == batches_per_step - 1)
                 and (epoch % check_every) == 0
             ):
                 """

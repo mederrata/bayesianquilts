@@ -485,7 +485,7 @@ class LogisticBayesianquilt(BayesianModel):
         batched_data_factory,
         batch_size,
         dataset_size,
-        num_epochs,
+        num_steps,
         warmup=25,
         warmup_max_order=6,
         clip_value=5,
@@ -497,7 +497,7 @@ class LogisticBayesianquilt(BayesianModel):
 
         # train
         if warmup == 0:
-            return self._calibrate_advi(num_epochs=num_epochs, *args, **kwargs)
+            return self._calibrate_advi(num_steps=num_steps, *args, **kwargs)
         else:
             # train weibull scale first few epochs
             for max_order in range(warmup_max_order):
@@ -562,7 +562,7 @@ class LogisticBayesianquilt(BayesianModel):
                 print(f"Training up to {max_order} order")
                 losses = self._calibrate_minibatch_advi(
                     batched_data_factory=batched_data_factory,
-                    num_epochs=warmup,
+                    num_steps=warmup,
                     clip_value=clip_value,
                     batch_size=batch_size,
                     dataset_size=dataset_size,
@@ -572,10 +572,10 @@ class LogisticBayesianquilt(BayesianModel):
                     **kwargs,
                 )
 
-            print(f"Training for remaining {num_epochs} epochs")
+            print(f"Training for remaining {num_steps} steps")
             losses = self._calibrate_minibatch_advi(
                 batched_data_factory=batched_data_factory,
-                num_epochs=num_epochs,
+                num_steps=num_steps,
                 clip_value=clip_value,
                 batch_size=batch_size,
                 dataset_size=dataset_size,
