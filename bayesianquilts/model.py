@@ -78,7 +78,7 @@ class BayesianModel(ABC):
         batched_data_factory,
         batch_size,
         dataset_size,
-        num_epochs=100,
+        num_steps=100,
         learning_rate=0.1,
         opt=None,
         abs_tol=1e-10,
@@ -94,7 +94,7 @@ class BayesianModel(ABC):
         trainable_variables=None,
         unormalized_log_prob_fn=None,
         accumulate_batches=False,
-        batches_per_epoch=None,
+        batches_per_step=None,
         temp_dir=tempfile.gettempdir(),
         test_fn=None,
         **kwargs,
@@ -119,7 +119,7 @@ class BayesianModel(ABC):
         if trainable_variables is None:
             trainable_variables = self.surrogate_distribution.variables
 
-        def run_approximation(num_epochs):
+        def run_approximation(num_steps):
             losses = minibatch_fit_surrogate_posterior(
                 target_log_prob_fn=unormalized_log_prob_fn
                 if unormalized_log_prob_fn is not None
@@ -127,7 +127,7 @@ class BayesianModel(ABC):
                 surrogate_posterior=self.surrogate_distribution,
                 dataset_size=dataset_size,
                 batch_size=batch_size,
-                num_epochs=num_epochs,
+                num_steps=num_steps,
                 sample_size=sample_size,
                 sample_batches=sample_batches,
                 learning_rate=learning_rate,
@@ -140,7 +140,7 @@ class BayesianModel(ABC):
                 check_every=check_every,
                 strategy=self.strategy,
                 accumulate_batches=accumulate_batches,
-                batches_per_epoch=batches_per_epoch,
+                batches_per_step=batches_per_step,
                 trainable_variables=trainable_variables,
                 batched_data_factory=batched_data_factory,
                 test_fn=test_fn,
@@ -148,7 +148,7 @@ class BayesianModel(ABC):
             )
             return losses
 
-        losses = run_approximation(num_epochs)
+        losses = run_approximation(num_steps)
         if set_expectations:
             if (not np.isnan(losses[-1])) and (not np.isinf(losses[-1])):
                 self.surrogate_sample = self.surrogate_distribution.sample(100)

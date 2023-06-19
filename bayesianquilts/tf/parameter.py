@@ -729,7 +729,7 @@ def cross_tabulate(interactions, data_factory, dtype=tf.int32):
         indices = tf_ravel_multi_index(tf.transpose(indices), decomposition._interaction_shape)
         counts_ = counter.encode(indices)
         counts += tf.cast(counts_[1:], counts.dtype)
-    return counts
+    return counts, decomposition.labels
 
 
 def demo():
