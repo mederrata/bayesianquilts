@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from email.policy import default
+
 import re
 from collections import Counter, defaultdict
 from itertools import product, groupby
