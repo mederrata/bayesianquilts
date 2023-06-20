@@ -740,6 +740,8 @@ class MultiwayContingencyTable(object):
         counter = CountEncoder(list(range(np.prod(decomposition._interaction_shape))))
         for batch in tqdm(iter(dataset)):
             indices = decomposition.retrieve_indices(batch)
+            if isinstance(indices, tf.RaggedTensor):
+                indices = indices.to_tensor()
             indices = tf_ravel_multi_index(
                 tf.transpose(indices), decomposition._interaction_shape
             )
