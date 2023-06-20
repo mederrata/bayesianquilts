@@ -8,11 +8,10 @@ import numpy as np
 from tqdm import tqdm
 
 import tensorflow as tf
-from tensorflow.python.ops.check_ops import assert_none_equal_v2
 import tensorflow_probability as tfp
 from tensorflow_probability import bijectors as tfb
 from tensorflow_probability import distributions as tfd
-from readmission.data.lib.countencoder import CountEncoder
+from bayesianquilts.util import CountEncoder
 
 from bayesianquilts.stackedtensor import broadcast_tensors
 
@@ -362,6 +361,7 @@ class Decomposed(object):
                 value,
                 batch_shape + [interaction_cats] + self._param_shape,
             )
+            value = tf.constant(value)
             if self._implicit and (interaction_cats > 1):
                 if len(self._param_shape) == 1:
                     value = value[..., 1:, :]

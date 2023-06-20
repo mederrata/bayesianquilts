@@ -428,3 +428,56 @@ def split_tensor_factory(num_parts, axis=0):
         return bulk + [remainder]
 
     return split_tensor
+
+
+class IndexMapper(object):
+    def __init__(self, vocab):
+        self.vocab = tf.constant(vocab)
+        self.N_keys = tf.shape(self.vocab)[0]
+        self.vals = tf.constant(tf.range(1, self.N_keys + 1, dtype=tf.int32))
+        self.table = tf.lookup.StaticHashTable(
+            tf.lookup.KeyValueTensorInitializer(self.vocab, self.vals), 0
+        )
+
+    def map(self, x):
+        return self.table.lookup(x)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["table"]
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__ = state.copy()
+        self.table = tf.lookup.StaticHashTable(
+            tf.lookup.KeyValueTensorInitializer(self.vocab, self.vals), 0
+        )
+
+
+class CountEncoder(object):
+    def __init__(self, vocab, dtype=tf.int32):
+        self.vocab = tf.constant(vocab)
+        self.N_keys = len(vocab)
+        self.vals = tf.range(1, self.N_keys + 1, dtype=tf.int32)
+        self.table = tf.lookup.StaticHashTable(
+            tf.lookup.KeyValueTensorInitializer(self.vocab, self.vals), 0
+        )
+
+    def encode(self, x):
+        # x = tf.strings.split(x, ",")
+        shape = tf.constant([self.N_keys + 1])
+        x = self.table.lookup(x)
+        y, idx, count = tf.unique_with_counts(x)
+        counts = tf.scatter_nd(y[..., tf.newaxis], tf.cast(count, tf.int32), shape)
+        return tf.cast(counts, tf.float64)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["table"]
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__ = state.copy()
+        self.table = tf.lookup.StaticHashTable(
+            tf.lookup.KeyValueTensorInitializer(self.vocab, self.vals), 0
+        )
