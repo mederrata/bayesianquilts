@@ -198,6 +198,16 @@ class Interactions(object):
             self._dimensions,
             exclusions=exclusions,
         )
+    
+    def __add__(self, other):
+        if other is None:
+            return self
+        exclusions = other.exclusions + self._exclusions
+        dimensions = self._dimensions + other._dimensions
+        res = []
+        [res.append(x) for x in dimensions if x not in res]
+        return Interactions(dimensions=res, exclusions=exclusions)
+
 
 
 class Decomposed(object):
@@ -718,18 +728,51 @@ class Decomposed(object):
         return self._interactions.retrieve_indices(data)
 
 
-def cross_tabulate(interactions, data_factory, dtype=tf.int32):
-    decomposition = Decomposed(interactions)
-    n_dims = np.prod(decomposition._interaction_shape)
-    counts = tf.zeros((n_dims), dtype=dtype)
-    dataset = data_factory()
-    counter = CountEncoder(list(range(np.prod(decomposition._interaction_shape))))
-    for batch in tqdm(iter(dataset)):
-        indices = decomposition.retrieve_indices(batch)
-        indices = tf_ravel_multi_index(tf.transpose(indices), decomposition._interaction_shape)
-        counts_ = counter.encode(indices)
-        counts += tf.cast(counts_[1:], counts.dtype)
-    return counts, decomposition.labels
+class MultiwayContingencyTable(object):
+    def __init__(self, interaction) -> None:
+        self.interaction = interaction
+
+    def fit(self, data_factory, dtype=tf.int32):
+        decomposition = Decomposed(self.interaction, [1])
+        n_dims = np.prod(decomposition._interaction_shape)
+        counts = tf.zeros((n_dims), dtype=dtype)
+        dataset = data_factory()
+        counter = CountEncoder(list(range(np.prod(decomposition._interaction_shape))))
+        for batch in tqdm(iter(dataset)):
+            indices = decomposition.retrieve_indices(batch)
+            if isinstance(indices, tf.RaggedTensor):
+                indices = indices.to_tensor()
+            indices = tf_ravel_multi_index(
+                tf.transpose(indices), decomposition._interaction_shape
+            )
+            counts_ = counter.encode(indices)
+            counts += tf.cast(counts_[1:], counts.dtype)
+        self.counts = counts
+        return counts, decomposition.labels
+
+    def lookup(self, interaction=None):
+        """
+        Get the correstponding counts
+        """
+        # first, make sure interaction is a subset of self.interaction
+        if interaction is None:
+            return np.sum(self.counts)
+        dims = [x[0] for x in self.interaction._dimensions]
+        axes = [dims.index(d) for d in interaction]
+        otheraxes = [d for d in range(len(self.interaction._dimensions)) if d not in axes]
+        counts = np.reshape(self.counts, self.interaction._intrinsic_shape)
+        counts = np.apply_over_axes(
+            np.sum,
+            counts,
+            [
+                d
+                for d in range(len(self.interaction._intrinsic_shape))
+                if d not in axes
+            ],
+        )
+        counts = np.transpose(counts, axes + otheraxes)
+        counts = np.reshape(counts, counts.shape[:len(axes)])
+        return counts
 
 
 def demo():
