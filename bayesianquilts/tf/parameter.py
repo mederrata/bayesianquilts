@@ -201,7 +201,7 @@ class Interactions(object):
     def __add__(self, other):
         if other is None:
             return self
-        exclusions = other.exclusions + self._exclusions
+        exclusions = other._exclusions + self._exclusions
         dimensions = self._dimensions + other._dimensions
         res = []
         [res.append(x) for x in dimensions if x not in res]
