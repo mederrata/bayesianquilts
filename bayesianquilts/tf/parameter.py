@@ -198,6 +198,16 @@ class Interactions(object):
             self._dimensions,
             exclusions=exclusions,
         )
+    
+    def __add__(self, other):
+        if other is None:
+            return self
+        exclusions = other.exclusions + self._exclusions
+        dimensions = self._dimensions + other._dimensions
+        res = []
+        [res.append(x) for x in dimensions if x not in res]
+        return Interactions(dimensions=res, exclusions=exclusions)
+
 
 
 class Decomposed(object):
