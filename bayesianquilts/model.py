@@ -104,7 +104,7 @@ class BayesianModel(ABC):
         Args:
             data_factory (callable, required): [description]. Factory
                 for generating a batch iterator.
-            num_epochs (int, optional): [description]. Defaults to 100.
+            num_steps (int, optional): [description]. Defaults to 100.
             learning_rate (float, optional): [description]. Defaults to 0.1.
             opt ([type], optional): [description]. Defaults to None.
             abs_tol ([type], optional): [description]. Defaults to 1e-10.
