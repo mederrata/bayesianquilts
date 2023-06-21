@@ -132,7 +132,7 @@ def batched_minimize(
     with tf.name_scope(name) as name:
         converged = False
         losses = []
-        avg_losses = [1e308] * 2
+        avg_losses = [1e308]
         min_loss = 1e308
 
         """
@@ -153,14 +153,20 @@ def batched_minimize(
         accepted_batches = 0
         save_path = manager.save()
         batch_losses = []
+        print(
+            f"Running optimization for {num_steps} steps of {batches_per_step} accumulated batches, checking every {check_every} steps",
+            flush=True
+        )
         print(f"Saved a checkpoint: {save_path}", flush=True)
         gradient_accumulation = None
         data_factory = batched_data_factory()
         data_factory = data_factory.repeat()
+
         pbar_outer = tqdm(total=num_steps, position=0)
         pbar = None
         test_results = []
-        epoch = 0
+        step = 0
+
         for n_batch, data in enumerate(data_factory):
             if n_batch % batches_per_step == 0:
                 # this batch is the start of a gradient step
@@ -168,8 +174,11 @@ def batched_minimize(
                 #  apply the grad
                 if (gradient_accumulation is not None) and (np.isfinite(batch_loss)):
                     _ = apply_grads(gradient_accumulation, watched_variables)
+                    if debug:
+                        print(f"batch {n_batch} step {step}", flush=True)
+                        print('applying gradient', flush=True)
                     pbar_outer.update(1)
-                epoch += 1
+                step += 1
                 pbar = tqdm(total=batches_per_step, leave=False, position=1)
                 batch_losses += [[]]
 
@@ -183,7 +192,7 @@ def batched_minimize(
                     )
                     for i, v in enumerate(watched_variables)
                 ]
-                if (epoch > num_steps) or converged:
+                if (step > num_steps) or converged:
                     print("Terminating because we are out of iterations", flush=True)
                     break
             pbar.update(1)
@@ -212,16 +221,16 @@ def batched_minimize(
             rel = np.abs(deviation / loss)
 
             if (
-                (epoch > 0)
+                (step > 0)
                 and (n_batch % batches_per_step == batches_per_step - 1)
-                and (epoch % check_every) == 0
+                and (step % check_every) == 0
             ):
                 """
                 Check for convergence
                 """
 
                 print(
-                    f"\nEpoch {epoch}: average-batch loss:" + f"{loss} rel loss: {rel}",
+                    f"\Step {step}: average-batch loss:" + f"{loss} rel loss: {rel}",
                     flush=True,
                 )
                 save_because_of_test = False
@@ -236,13 +245,13 @@ def batched_minimize(
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
-                    print("\nEpoch loss NaN, restoring a checkpoint", flush=True)
+                    print("\Step loss NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
 
                     if decay_step > max_decay_steps:
                         converged = True
                         continue
-                    print(f"New learning rate: {opt.lr}", flush=True)
+                    print(f"New learning rate: {opt.lr.numpy()}", flush=True)
                     continue
                 save_because_of_loss = losses[-1] < min_loss
                 save_this = save_because_of_test if test_fn else save_because_of_loss
@@ -260,7 +269,7 @@ def batched_minimize(
                         np.abs((avg_losses[2] - min_loss)) < abs_tol
                     ):
                         print(
-                            f"Converged in {epoch} iterations "
+                            f"Converged in {step} iterations "
                             + "with acceptable absolute tolerance",
                             flush=True,
                         )
@@ -269,7 +278,7 @@ def batched_minimize(
                         (np.abs(avg_losses[2] - min_loss) / loss) < abs_tol
                     ):
                         print(
-                            f"Converged in {epoch} iterations with "
+                            f"Converged in {step} iterations with "
                             + "acceptable relative tolerance"
                         )
                         converged = True
@@ -281,7 +290,7 @@ def batched_minimize(
                         converged = True
                         continue
                     batches_since_plateau = 0
-                    print(f"New learning rate: {opt.lr}", flush=True)
+                    print(f"New learning rate: {opt.lr.numpy()}", flush=True)
 
                     if batches_since_checkpoint >= plateau_epochs_til_restore:
                         if batches_since_checkpoint >= max_plateau_epochs:
