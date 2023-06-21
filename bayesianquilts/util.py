@@ -169,7 +169,7 @@ def batched_minimize(
 
         for n_batch, data in enumerate(data_factory):
             if debug:
-                print(f"{n_batch} {step}", flush=True)
+                print(f"batch {n_batch} step {step}", flush=True)
             if n_batch % batches_per_step == 0:
                 # this batch is the start of a gradient step
 
