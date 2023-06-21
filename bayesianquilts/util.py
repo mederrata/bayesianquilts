@@ -176,6 +176,8 @@ def batched_minimize(
                 #  apply the grad
                 if (gradient_accumulation is not None) and (np.isfinite(batch_loss)):
                     _ = apply_grads(gradient_accumulation, watched_variables)
+                    if debug:
+                        print('applying gradient', flush=True)
                     pbar_outer.update(1)
                 step += 1
                 pbar = tqdm(total=batches_per_step, leave=False, position=1)
