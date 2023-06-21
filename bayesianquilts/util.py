@@ -168,8 +168,6 @@ def batched_minimize(
         step = 0
 
         for n_batch, data in enumerate(data_factory):
-            if debug:
-                print(f"batch {n_batch} step {step}", flush=True)
             if n_batch % batches_per_step == 0:
                 # this batch is the start of a gradient step
 
@@ -177,6 +175,7 @@ def batched_minimize(
                 if (gradient_accumulation is not None) and (np.isfinite(batch_loss)):
                     _ = apply_grads(gradient_accumulation, watched_variables)
                     if debug:
+                        print(f"batch {n_batch} step {step}", flush=True)
                         print('applying gradient', flush=True)
                     pbar_outer.update(1)
                 step += 1
