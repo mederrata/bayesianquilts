@@ -197,7 +197,7 @@ class Interactions(object):
             self._dimensions,
             exclusions=exclusions,
         )
-    
+
     def __add__(self, other):
         if other is None:
             return self
@@ -206,7 +206,6 @@ class Interactions(object):
         res = []
         [res.append(x) for x in dimensions if x not in res]
         return Interactions(dimensions=res, exclusions=exclusions)
-
 
 
 class Decomposed(object):
@@ -450,6 +449,15 @@ class Decomposed(object):
         # folded
         for k, v in tensors.items():
             v = tf.cast(v, dtype)
+            scale = self.scales[k]
+            scale = tf.cast(scale, v.dtype)
+            scale = tf.reshape(
+                scale,
+                [1] * len(batch_shape)
+                + scale.shape.as_list()
+                + [1] * len(self._param_shape),
+            )
+            v *= scale
             # shuffle axes, placing broadcast axes together
             if k not in self._tensor_part_shapes.keys():
                 continue
@@ -475,7 +483,7 @@ class Decomposed(object):
             v_ = ravel_broadcast_tile(
                 v, from_shape, to_shape, param_ndims=len(self._param_shape)
             )
-            partial_sum += self.scales[k] * v_
+            partial_sum += v_
 
         if unravel:
             partial_sum = tf.reshape(partial_sum, to_shape)
@@ -517,6 +525,15 @@ class Decomposed(object):
         cumulative = 0
         for k, tensor in tensors.items():
             tensor = tf.cast(tensor, dtype)
+            scale = self.scales[k]
+            scale = tf.cast(scale, tensor.dtype)
+            scale = tf.reshape(
+                scale,
+                [1] * len(batch_shape)
+                + scale.shape.as_list()
+                + [1] * len(self._param_shape),
+            )
+            tensor *= scale
             if k not in self._tensor_part_shapes.keys():
                 continue
             part_interact_shape = self._tensor_part_shapes[k][
@@ -598,6 +615,15 @@ class Decomposed(object):
         cumulative = 0
         for k, tensor in tensors.items():
             tensor = tf.cast(tensor, dtype)
+            scale = self.scales[k]
+            scale = tf.cast(scale, tensor.dtype)
+            scale = tf.reshape(
+                scale,
+                [1] * len(batch_shape)
+                + scale.shape.as_list()
+                + [1] * len(self._param_shape),
+            )
+            tensor *= scale
             if k not in self._tensor_part_shapes.keys():
                 continue
             part_interact_shape = self._tensor_part_shapes[k][
@@ -759,19 +785,17 @@ class MultiwayContingencyTable(object):
             return np.sum(self.counts)
         dims = [x[0] for x in self.interaction._dimensions]
         axes = [dims.index(d) for d in interaction]
-        otheraxes = [d for d in range(len(self.interaction._dimensions)) if d not in axes]
+        otheraxes = [
+            d for d in range(len(self.interaction._dimensions)) if d not in axes
+        ]
         counts = np.reshape(self.counts, self.interaction._intrinsic_shape)
         counts = np.apply_over_axes(
             np.sum,
             counts,
-            [
-                d
-                for d in range(len(self.interaction._intrinsic_shape))
-                if d not in axes
-            ],
+            [d for d in range(len(self.interaction._intrinsic_shape)) if d not in axes],
         )
         counts = np.transpose(counts, axes + otheraxes)
-        counts = np.reshape(counts, counts.shape[:len(axes)])
+        counts = np.reshape(counts, counts.shape[: len(axes)])
         return counts
 
 

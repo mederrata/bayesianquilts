@@ -155,7 +155,7 @@ def batched_minimize(
         batch_losses = []
         print(
             f"Running optimization for {num_steps} steps of {batches_per_step} accumulated batches, checking every {check_every} steps",
-            flush=True
+            flush=True,
         )
         print(f"Saved a checkpoint: {save_path}", flush=True)
         gradient_accumulation = None
@@ -163,25 +163,28 @@ def batched_minimize(
         data_factory = data_factory.repeat()
 
         pbar_outer = tqdm(total=num_steps, position=0)
-        pbar = None
+        pbar = tqdm(total=batches_per_step, leave=False, position=1)
         test_results = []
         step = 0
-
+        batch_loss = np.nan
         for n_batch, data in enumerate(data_factory):
             if n_batch % batches_per_step == 0:
-                # this batch is the start of a gradient step
-
-                #  apply the grad
-                if (gradient_accumulation is not None) and (np.isfinite(batch_loss)):
-                    _ = apply_grads(gradient_accumulation, watched_variables)
-                    if debug:
-                        print(f"batch {n_batch} step {step}", flush=True)
-                        print('applying gradient', flush=True)
-                    pbar_outer.update(1)
-                step += 1
                 pbar = tqdm(total=batches_per_step, leave=False, position=1)
-                batch_losses += [[]]
+                # this batch is the start of a gradient step
+                if step > 0:
+                    pbar_outer.update(1)
+                    
+                    if not np.isfinite(batch_loss):
+                        print(f"Step {step} has an infinite loss", flush=True)
 
+                        #  apply the grad
+                    elif gradient_accumulation is not None:
+                        _ = apply_grads(gradient_accumulation, watched_variables)
+                        if debug:
+                            print(f"batch {n_batch} step {step}", flush=True)
+                            print("applying gradient", flush=True)
+                step += 1
+                batch_losses += [[]]
                 gradient_accumulation = [
                     tf.Variable(
                         tf.zeros_like(v),
@@ -192,10 +195,13 @@ def batched_minimize(
                     )
                     for i, v in enumerate(watched_variables)
                 ]
-                if (step > num_steps) or converged:
+                if (step > num_steps):
                     print("Terminating because we are out of iterations", flush=True)
                     break
-            pbar.update(1)
+
+                if converged:
+                    print("Terminating because the loss converged", flush=True)
+                    break
 
             if processing_fn is not None:
                 data = processing_fn(data)
@@ -203,6 +209,7 @@ def batched_minimize(
             batch_loss, grads = accumulate_grads(
                 data, gradient_accumulation, watched_variables
             )
+            pbar.update(1)
 
             if np.isfinite(batch_loss.numpy()):
                 batch_losses[-1] += [batch_loss.numpy()]
@@ -290,13 +297,13 @@ def batched_minimize(
                         converged = True
                         continue
                     batches_since_plateau = 0
-                    print(f"New learning rate: {opt.lr.numpy()}", flush=True)
+                    print(f"New learning rate: {opt.lr}", flush=True)
 
                     if batches_since_checkpoint >= plateau_epochs_til_restore:
                         if batches_since_checkpoint >= max_plateau_epochs:
                             converged = True
                             print(
-                                f"We have had {batches_since_checkpoint} epochs with no improvement so we give up",
+                                f"We have had {batches_since_checkpoint} checks with no improvement so we give up",
                                 flush=True,
                             )
                         else:
