@@ -149,6 +149,7 @@ class Interactions(object):
         dimensions = [] if dimensions is None else dimensions
         self._dimensions = dimensions
         self._intrinsic_shape = []
+
         for x in self._dimensions:
             try:
                 self._intrinsic_shape += [len(x[1])]
@@ -188,7 +189,7 @@ class Interactions(object):
                 product([0, 1], repeat=len(self._dimensions)),
             )
         )
-        exclusions = []
+        exclusions = self._exclusions
         hot = [
             set(d[0] for i, d in zip(ind, self._dimensions) if i == 1) for ind in onehot
         ]
@@ -197,6 +198,12 @@ class Interactions(object):
             self._dimensions,
             exclusions=exclusions,
         )
+
+    def exclude(self, exclusions):
+        _exclusions = self._exclusions + [set(s) for s in exclusions]
+        exclusions = []
+        [exclusions.append(x) for x in _exclusions if x not in exclusions]
+        return Interactions(self._dimensions, exclusions=exclusions)
 
     def __add__(self, other):
         if other is None:
@@ -287,7 +294,7 @@ class Decomposed(object):
             labels[k] = dimension_labels
         return labels
 
-    def generate_tensors(self, batch_shape=None, target=None, dtype=None):
+    def generate_tensors(self, batch_shape=None, target=None, skip=None, dtype=None):
         """Generate parameter tensors for the parameter decomposition,
            neatly handling TF's limitation in the maximum number of
            axes (6) for a tensor to be used in most common mathematical operations
@@ -301,6 +308,8 @@ class Decomposed(object):
         Returns:
             [type]: [description]
         """
+        if skip is None:
+            skip = []
         tensors = {}
         tensor_names = {}
         dtype = dtype if dtype is not None else self._dtype
@@ -334,6 +343,10 @@ class Decomposed(object):
             if set(interaction_vars) in self._interactions._exclusions:
                 continue
             interaction_name = "_".join(interaction_vars)
+            tensor_name = self._name + "__" + interaction_name
+            if tensor_name in skip:
+                continue
+
             interaction_shape = (
                 self._interactions.shape() ** np.array(n_tuple)
             ).tolist()
@@ -374,7 +387,7 @@ class Decomposed(object):
                     value = value[..., 1:, :, :, :, :, :]
                 elif len(self._param_shape) == 6:
                     value = value[..., 1:, :, :, :, :, :, :]
-            tensors[self._name + "__" + interaction_name] = value
+            tensors[tensor_name] = value
 
         return tensors, tensor_names, tensor_shapes
 
@@ -511,6 +524,7 @@ class Decomposed(object):
             tensors ([type], optional): [description]. Defaults to None.
         """
         # flatten the indices
+
         tensors = self._tensor_parts if tensors is None else tensors
         if np.prod(self._interaction_shape) == 1:
             return tensors[self._name + "__"]
@@ -519,6 +533,8 @@ class Decomposed(object):
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
         )
+        if len(tensors)==0:
+            return 0
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
