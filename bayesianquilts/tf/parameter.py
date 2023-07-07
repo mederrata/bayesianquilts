@@ -239,6 +239,7 @@ class Decomposed(object):
         default_val=None,
         implicit=True,
         dtype=tf.float32,
+        post_fn=None,
         name="",
         **kwargs,
     ) -> None:
@@ -253,6 +254,7 @@ class Decomposed(object):
         self._dtype = dtype
         self._implicit = implicit
         self._name = name
+        self._post_fn = post_fn
         if param_shape is None:
             param_shape = [1]
         if len(param_shape) > 5:
@@ -500,6 +502,8 @@ class Decomposed(object):
 
         if unravel:
             partial_sum = tf.reshape(partial_sum, to_shape)
+        if self._post_fn is not None:
+            partial_sum = self._post_fn(partial_sum)
         return partial_sum
 
     def unravel_tensor(self, tensor):
@@ -540,6 +544,8 @@ class Decomposed(object):
         ]
         cumulative = 0
         for k, tensor in tensors.items():
+            if k not in self._tensor_parts.keys():
+                continue
             tensor = tf.cast(tensor, dtype)
             scale = self.scales[k]
             scale = tf.cast(scale, tensor.dtype)
@@ -602,6 +608,8 @@ class Decomposed(object):
             )
             cumulative += _tensor
             # add to cumulative sum
+        if self._post_fn is not None:
+            cumulative = self._post_fn(cumulative)
         return cumulative
 
     def dot_sum(
@@ -625,6 +633,9 @@ class Decomposed(object):
         interaction_shape = tf.convert_to_tensor(
             self._interaction_shape, dtype=interaction_indices.dtype
         )
+
+        if len(tensors) == 0:
+            return 0
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
@@ -760,7 +771,8 @@ class Decomposed(object):
             range(rank - batch_ndims)
         )
         summed = tf.transpose(summed, permutation)
-
+        if self._post_fn is not None:
+            summed = self._post_fn(summed)
         return summed
 
     def shape(self):

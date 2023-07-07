@@ -497,3 +497,7 @@ class CountEncoder(object):
         self.table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(self.vocab, self.vals), 0
         )
+
+
+class DummyObject(object):
+    pass
