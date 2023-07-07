@@ -544,6 +544,8 @@ class Decomposed(object):
         ]
         cumulative = 0
         for k, tensor in tensors.items():
+            if k not in self._tensor_parts.keys():
+                continue
             tensor = tf.cast(tensor, dtype)
             scale = self.scales[k]
             scale = tf.cast(scale, tensor.dtype)
