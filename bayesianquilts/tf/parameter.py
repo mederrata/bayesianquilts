@@ -625,6 +625,7 @@ class Decomposed(object):
             tensors ([type], optional): [description]. Defaults to None.
         """
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         if len(self._interaction_shape) == 0:
             return tf.reduce_sum(tensors[self._name] * y, axes)
         # flatten the indices
@@ -713,6 +714,7 @@ class Decomposed(object):
 
     def _lookup_by_sum(self, interaction_indices, tensors=None, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
 
         if len(self._interaction_shape) == 0:
             return tensors[self._name]
