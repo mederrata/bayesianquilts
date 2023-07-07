@@ -452,6 +452,7 @@ class Decomposed(object):
 
     def sum_parts(self, tensors=None, unravel=False, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         raveled_shape = [np.prod(self._interaction_shape)] + self._param_shape
         # infer the batch shape
 
@@ -530,6 +531,7 @@ class Decomposed(object):
         # flatten the indices
 
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         if np.prod(self._interaction_shape) == 1:
             return tensors[self._name + "__"]
         interaction_indices = tf.convert_to_tensor(interaction_indices)
@@ -623,6 +625,7 @@ class Decomposed(object):
             tensors ([type], optional): [description]. Defaults to None.
         """
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         if len(self._interaction_shape) == 0:
             return tf.reduce_sum(tensors[self._name] * y, axes)
         # flatten the indices
@@ -711,6 +714,7 @@ class Decomposed(object):
 
     def _lookup_by_sum(self, interaction_indices, tensors=None, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
 
         if len(self._interaction_shape) == 0:
             return tensors[self._name]
