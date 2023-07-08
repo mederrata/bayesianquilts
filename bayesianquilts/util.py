@@ -180,9 +180,7 @@ def batched_minimize(
                         #  apply the grad
                     elif gradient_accumulation is not None:
                         _ = apply_grads(gradient_accumulation, watched_variables)
-                        if debug:
-                            print(f"batch {n_batch} step {step}", flush=True)
-                            print("applying gradient", flush=True)
+
                 step += 1
                 batch_losses += [[]]
                 gradient_accumulation = [
@@ -237,7 +235,7 @@ def batched_minimize(
                 """
 
                 print(
-                    f"\Step {step}: average-batch loss:" + f"{loss} rel loss: {rel}",
+                    f"Step {step}: average-batch loss:" + f"{loss} rel loss: {rel}",
                     flush=True,
                 )
                 save_because_of_test = False
@@ -252,7 +250,7 @@ def batched_minimize(
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
-                    print("\Step loss NaN, restoring a checkpoint", flush=True)
+                    print("Step loss NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
 
                     if decay_step > max_decay_steps:
