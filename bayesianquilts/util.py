@@ -173,7 +173,7 @@ def batched_minimize(
                 # this batch is the start of a gradient step
                 if step > 0:
                     pbar_outer.update(1)
-                    
+
                     if not np.isfinite(batch_loss):
                         print(f"Step {step} has an infinite loss", flush=True)
 
@@ -193,7 +193,7 @@ def batched_minimize(
                     )
                     for i, v in enumerate(watched_variables)
                 ]
-                if (step > num_steps):
+                if step > num_steps:
                     print("Terminating because we are out of iterations", flush=True)
                     break
 
@@ -244,7 +244,7 @@ def batched_minimize(
                     if isinstance(test_results[-1], tf.Tensor):
                         test_results[-1] = test_results[-1].numpy()
                     if len(test_results) > 1:
-                        if test_results[-1] > np.max(flatten(test_results)[:-1]):
+                        if test_results[-1] > np.max(test_results[:-1]):
                             save_because_of_test = True
 
                 if not np.isfinite(loss):
@@ -312,25 +312,25 @@ def batched_minimize(
                             batches_since_plateau = 0
 
         trace = tf.stack(losses)
-        if test_fn is not None:
-            # take the checkpoint that had the best test result
-            trace.test_eval = test_results
-            return trace
-        else:
-            try:
-                if np.isnan(losses[-1]):
-                    cp_status = checkpoint.restore(manager.latest_checkpoint)
-                    cp_status.assert_consumed()
-                    trace.latest_checkpoint = manager.latest_checkpoint
-                else:
-                    #
-                    if len(test_results) > 1:
-                        if test_results[-1] < np.max(flatten(test_results[:-1])):
-                            cp_status = checkpoint.restore(manager.latest_checkpoint)
-                            cp_status.assert_consumed()
-                            trace.latest_checkpoint = manager.latest_checkpoint
-            except AssertionError:
-                pass
+        try:
+            if test_fn is not None:
+                test_results = np.array(test_results).flatten()
+                # take the checkpoint that had the best test result
+                trace.test_eval = test_results
+                if len(test_results) > 1:
+                    if test_results[-1] < np.max(flatten(test_results[:-1])):
+                        cp_status = checkpoint.restore(manager.latest_checkpoint)
+                        cp_status.assert_consumed()
+                        trace.latest_checkpoint = manager.latest_checkpoint
+                return trace
+
+            if np.isnan(losses[-1]):
+                cp_status = checkpoint.restore(manager.latest_checkpoint)
+                cp_status.assert_consumed()
+                trace.latest_checkpoint = manager.latest_checkpoint
+
+        except AssertionError:
+            pass
 
         return trace
 
