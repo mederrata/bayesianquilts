@@ -240,12 +240,13 @@ def batched_minimize(
                 )
                 save_because_of_test = False
                 if test_fn is not None:
-                    test_results += [test_fn()]
-                    if isinstance(test_results[-1], tf.Tensor):
-                        test_results[-1] = test_results[-1].numpy()
+                    res = test_fn()
+                    if isinstance(res, tf.Tensor):
+                        res = res.numpy()
                     if len(test_results) > 1:
-                        if test_results[-1] > np.max(test_results[:-1]):
+                        if res > np.max(np.array(test_results).flatten()):
                             save_because_of_test = True
+                    test_results += [res]
 
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
@@ -314,11 +315,15 @@ def batched_minimize(
         trace = tf.stack(losses)
         try:
             if test_fn is not None:
+                res = test_fn()
+                if isinstance(res, tf.Tensor):
+                    res = res.numpy()
+
                 test_results = np.array(test_results).flatten()
                 # take the checkpoint that had the best test result
                 trace.test_eval = test_results
                 if len(test_results) > 1:
-                    if test_results[-1] < np.max(flatten(test_results[:-1])):
+                    if res < np.max(test_results):
                         cp_status = checkpoint.restore(manager.latest_checkpoint)
                         cp_status.assert_consumed()
                         trace.latest_checkpoint = manager.latest_checkpoint
