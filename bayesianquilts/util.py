@@ -167,6 +167,8 @@ def batched_minimize(
         test_results = []
         step = 0
         batch_loss = np.nan
+        if test_fn is not None:
+            max_test = -1e308
         for n_batch, data in enumerate(data_factory):
             if n_batch % batches_per_step == 0:
                 pbar = tqdm(total=batches_per_step, leave=False, position=1)
@@ -243,9 +245,10 @@ def batched_minimize(
                     res = test_fn()
                     if isinstance(res, tf.Tensor):
                         res = res.numpy()
-                    if len(test_results) > 1:
-                        if res > np.max(np.array(test_results).flatten()):
-                            save_because_of_test = True
+
+                    if res > max_test:
+                        save_because_of_test = True
+                        max_test = res
                     test_results += [res]
 
                 if not np.isfinite(loss):
@@ -260,7 +263,11 @@ def batched_minimize(
                     print(f"New learning rate: {opt.lr.numpy()}", flush=True)
                     continue
                 save_because_of_loss = losses[-1] < min_loss
-                save_this = save_because_of_test if test_fn else save_because_of_loss
+                save_this = (
+                    save_because_of_test
+                    if test_fn is not None
+                    else save_because_of_loss
+                )
 
                 if save_this:
                     """
@@ -319,14 +326,13 @@ def batched_minimize(
                 if isinstance(res, tf.Tensor):
                     res = res.numpy()
 
-                test_results = np.array(test_results).flatten()
                 # take the checkpoint that had the best test result
                 trace.test_eval = test_results
-                if len(test_results) > 1:
-                    if res < np.max(test_results):
-                        cp_status = checkpoint.restore(manager.latest_checkpoint)
-                        cp_status.assert_consumed()
-                        trace.latest_checkpoint = manager.latest_checkpoint
+
+                if res < max_test:
+                    cp_status = checkpoint.restore(manager.latest_checkpoint)
+                    cp_status.assert_consumed()
+                    trace.latest_checkpoint = manager.latest_checkpoint
                 return trace
 
             if np.isnan(losses[-1]):
