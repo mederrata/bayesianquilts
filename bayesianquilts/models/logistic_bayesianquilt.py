@@ -2,34 +2,31 @@
 """Example quilt model
 """
 import argparse
-import sys
-import os
 import csv
-import itertools
-from itertools import product
-import arviz as az
-from tensorflow._api.v2 import data
-from tqdm import tqdm
-import json
-from collections import defaultdict
 import functools
+import itertools
+import json
+import os
+import sys
+from collections import defaultdict
+from itertools import product
 
+import arviz as az
 import numpy as np
 import pandas as pd
-
 import tensorflow as tf
-from tensorflow.python.ops.math_ops import _bucketize as bucketize
 import tensorflow_probability as tfp
-
-from bayesianquilts.model import BayesianModel
-from bayesianquilts.tf.parameter import Interactions, Decomposed
-from bayesianquilts.vi.advi import build_surrogate_posterior
-from bayesianquilts.util import flatten, split_tensor
-from bayesianquilts.metrics.classification import accuracy, auc
-
+from tensorflow._api.v2 import data
 from tensorflow.python.ops import math_ops
-
+from tensorflow.python.ops.math_ops import _bucketize as bucketize
 from tensorflow_probability.python import distributions as tfd
+from tqdm import tqdm
+
+from bayesianquilts.metrics.classification import accuracy, auc
+from bayesianquilts.model import BayesianModel
+from bayesianquilts.tf.parameter import Decomposed, Interactions
+from bayesianquilts.util import flatten, split_tensor
+from bayesianquilts.vi.advi import build_surrogate_posterior
 
 
 class LogisticBayesianquilt(BayesianModel):
