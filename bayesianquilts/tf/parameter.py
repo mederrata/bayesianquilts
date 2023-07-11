@@ -455,7 +455,8 @@ class Decomposed(object):
         tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         raveled_shape = [np.prod(self._interaction_shape)] + self._param_shape
         # infer the batch shape
-
+        if len(tensors) == 0:
+            return 0
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
@@ -536,10 +537,7 @@ class Decomposed(object):
             return tensors[self._name + "__"]
         interaction_indices = tf.convert_to_tensor(interaction_indices)
 
-        interaction_shape = tf.convert_to_tensor(
-            self._interaction_shape, dtype=interaction_indices.dtype
-        )
-        if len(tensors)==0:
+        if len(tensors) == 0:
             return 0
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
@@ -632,10 +630,6 @@ class Decomposed(object):
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
         tensors = self._tensor_parts if tensors is None else tensors
-
-        interaction_shape = tf.convert_to_tensor(
-            self._interaction_shape, dtype=interaction_indices.dtype
-        )
 
         if len(tensors) == 0:
             return 0
