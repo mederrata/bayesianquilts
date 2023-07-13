@@ -534,7 +534,10 @@ class Decomposed(object):
         tensors = self._tensor_parts if tensors is None else tensors
         tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         if np.prod(self._interaction_shape) == 1:
-            return tensors[self._name + "__"]
+            try:
+                return tensors[self._name + "__"]
+            except KeyError:
+                return 0
         interaction_indices = tf.convert_to_tensor(interaction_indices)
 
         if len(tensors) == 0:
