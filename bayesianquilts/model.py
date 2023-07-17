@@ -144,7 +144,7 @@ class BayesianModel(ABC):
                 trainable_variables=trainable_variables,
                 batched_data_factory=batched_data_factory,
                 test_fn=test_fn,
-                **kwargs
+                **kwargs,
             )
             return losses
 
@@ -353,7 +353,14 @@ class BayesianModel(ABC):
         return
 
     def reconstitute(self, state):
-        self.create_distributions()
+        surrogate_params = {t.name: t for t in state["surrogate_vars"]}
+        try:
+            self.create_distributions(
+                max_order=state["max_order"], surrogate_params=surrogate_params
+            )
+            return
+        except TypeError:
+            self.create_distributions()
         try:
             for j, value in tqdm(enumerate(state["surrogate_vars"])):
                 self.surrogate_distribution.trainable_variables[j].assign(
@@ -390,4 +397,3 @@ class BayesianModel(ABC):
         #  self.dtype = tf.float64
         self.reconstitute(state)
         self.saved_state = state
-        self.set_calibration_expectations()
