@@ -42,6 +42,7 @@ def build_trainable_concentration_scale_distribution(
     validate_args=False,
     strategy=None,
     name=None,
+    surrogate_params=None,
 ):
     """Builds a variational distribution from a location-scale family.
     Args:
@@ -183,8 +184,10 @@ def build_surrogate_posterior(
     name=None,
     gaussian_only=False,
     dtype=tf.float64,
+    surrogate_params=None,
 ):
-
+    if surrogate_params is None:
+        surrogate_params = {}
     prior_sample = joint_distribution_named.sample(int(num_samples))
     surrogate_dict = {}
     means = {
@@ -235,7 +238,11 @@ def build_surrogate_posterior(
                     name=label,
                 )
             )
-    return tfd.JointDistributionNamed(surrogate_dict)
+    surrogate = tfd.JointDistributionNamed(surrogate_dict)
+    for j, var in enumerate(surrogate.trainable_variables):
+        if var.name in surrogate_params.keys():
+            surrogate.trainable_variables[j].assign(surrogate_params[var.name])
+    return surrogate
 
 
 def build_trainable_concentration_distribution(
