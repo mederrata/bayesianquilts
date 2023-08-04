@@ -237,7 +237,7 @@ class Decomposed(object):
         interactions,
         param_shape=None,
         default_val=None,
-        implicit=True,
+        implicit=False,
         dtype=tf.float32,
         post_fn=None,
         name="",

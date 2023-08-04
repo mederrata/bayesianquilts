@@ -44,8 +44,9 @@ from tensorflow.python.ops.math_ops import bucketize
 class PiecewiseExponential(tfd.Distribution):
     def __init__(
         self,
-        rates,
-        breakpoints,
+        rates=None,
+        breakpoints=None,
+        hazard_fn=None,
         validate_args=False,
         allow_nan_stats=True,
         name="PiecewiseExponential",
