@@ -526,20 +526,22 @@ class PiecewiseFunction(object):
         ndx = tf.reduce_sum(
             tf.cast(self.breakpoints <= value[..., tf.newaxis], tf.int32), axis=-1
         )
-        return tf.gather(self.values, ndx - 1)
+        return tf.transpose(tf.gather(tf.transpose(self.values), ndx))
 
     def __add__(self, obj):
         if isinstance(obj, numbers.Number):
             return PiecewiseFunction(self.breakpoints, obj + self.values)
         breakpoints = tf.concat([obj.breakpoints, self.breakpoints], axis=-1)
         breakpoints, _ = unique(x=breakpoints, axis=[-1])
-        v1 = self(breakpoints)
-        v2 = obj(breakpoints)
+        d = len(breakpoints.shape.as_list())
+        breakpoints_ = tf.pad(breakpoints, [(0, 0)]*(d-1) + [(1, 0)])
+        v1 = self(breakpoints_)
+        v2 = obj(breakpoints_)
         return PiecewiseFunction(breakpoints, v1 + v2, dtype=self.dtype)
 
 
 def demo():
-    f = PiecewiseFunction([1, 2, 3], [1, 2, 2, 3])
+    f = PiecewiseFunction([[1, 2, 3]], [[1, 2, 2, 3]])
     g = f + 1
     print(g(1))
     h = g + f
