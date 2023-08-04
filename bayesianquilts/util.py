@@ -515,7 +515,7 @@ class DummyObject(object):
 
 
 class PiecewiseFunction(object):
-    def __init__(self, breakpoints, values, cadlag=True, dtype=tf.float32):
+    def __init__(self, breakpoints, values, cadlag=True, dtype=tf.float64):
         self.dtype = dtype
         self.breakpoints = tf.cast(breakpoints, dtype)
         self.values = tf.cast(values, dtype)
