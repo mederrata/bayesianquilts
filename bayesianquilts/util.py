@@ -517,24 +517,51 @@ class DummyObject(object):
 class PiecewiseFunction(object):
     def __init__(self, breakpoints, values, cadlag=True, dtype=tf.float64):
         self.dtype = dtype
+        values = tf.cast(values, dtype)
+        breakpoints = tf.cast(breakpoints, dtype)
+        last = breakpoints.shape.as_list()[-1]
+        if last is None:
+            last = 1
+
+        if len(values.shape.as_list()) > len(breakpoints.shape.as_list()):
+            breakpoints += tf.zeros(
+                values.shape.as_list()[:-1] + [last],
+                breakpoints.dtype,
+            )
         self.breakpoints = tf.cast(breakpoints, dtype)
-        self.values = tf.cast(values, dtype)
+        self.values = values
         self.cadlag = cadlag
 
     def __call__(self, value):
         value = tf.cast(value, self.dtype)
         ndx = tf.reduce_sum(
-            tf.cast(self.breakpoints <= value[..., tf.newaxis], tf.int32), axis=-1
+            tf.cast(
+                self.breakpoints[..., tf.newaxis] <= value[..., tf.newaxis, :], tf.int32
+            ),
+            axis=-2,
         )
-        return tf.transpose(tf.gather(tf.transpose(self.values), ndx))
+        return tf.gather(
+            self.values, ndx, batch_dims=len(self.values.shape.as_list()) - 1
+        )
 
     def __add__(self, obj):
         if isinstance(obj, numbers.Number):
             return PiecewiseFunction(self.breakpoints, obj + self.values)
-        breakpoints = tf.concat([obj.breakpoints, self.breakpoints], axis=-1)
+        left = self.breakpoints
+
+        left_batch_shape = left.shape.as_list()[:-1]
+        right = tf.cast(obj.breakpoints, self.dtype)
+        right_batch_shape = right.shape.as_list()[:-1]
+
+        if len(left_batch_shape) < len(right_batch_shape):
+            left += tf.zeros(right_batch_shape + left.shape.as_list()[-1:], self.dtype)
+        elif len(left_batch_shape) > len(right_batch_shape):
+            right += tf.zeros(left_batch_shape + right.shape.as_list()[-1:], self.dtype)
+
+        breakpoints = tf.concat([left, right], axis=-1)
         breakpoints, _ = unique(x=breakpoints, axis=[-1])
         d = len(breakpoints.shape.as_list())
-        breakpoints_ = tf.pad(breakpoints, [(0, 0)]*(d-1) + [(1, 0)])
+        breakpoints_ = tf.pad(breakpoints, [(0, 0)] * (d - 1) + [(1, 0)])
         v1 = self(breakpoints_)
         v2 = obj(breakpoints_)
         return PiecewiseFunction(breakpoints, v1 + v2, dtype=self.dtype)
