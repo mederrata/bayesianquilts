@@ -5,6 +5,7 @@ import tempfile
 import uuid
 from collections import defaultdict
 from pathlib import Path
+import numbers
 
 import numpy as np
 import tensorflow as tf
@@ -17,9 +18,10 @@ from tensorflow_probability.python.internal import (
     tensorshape_util,
 )
 from tqdm import tqdm
+from tensorflow.raw_ops import UniqueV2 as unique
 
-tfd = tfp.distributions
-tfb = tfp.bijectors
+from tensorflow_probability import distributions as tfd
+from tensorflow_probability import bijectors as tfb
 
 
 def flatten(lst):
@@ -510,3 +512,41 @@ class CountEncoder(object):
 
 class DummyObject(object):
     pass
+
+
+class PiecewiseFunction(object):
+    def __init__(self, breakpoints, values, cadlag=True, dtype=tf.float32):
+        self.dtype = dtype
+        self.breakpoints = tf.cast(breakpoints, dtype)
+        self.values = tf.cast(values, dtype)
+        self.cadlag = cadlag
+
+    def __call__(self, value):
+        value = tf.cast(value, self.dtype)
+        ndx = tf.reduce_sum(
+            tf.cast(self.breakpoints <= value[..., tf.newaxis], tf.int32), axis=-1
+        )
+        return tf.gather(self.values, ndx - 1)
+
+    def __add__(self, obj):
+        if isinstance(obj, numbers.Number):
+            return PiecewiseFunction(self.breakpoints, obj + self.values)
+        breakpoints = tf.concat([obj.breakpoints, self.breakpoints], axis=-1)
+        breakpoints, _ = unique(x=breakpoints, axis=[-1])
+        v1 = self(breakpoints)
+        v2 = obj(breakpoints)
+        return PiecewiseFunction(breakpoints, v1 + v2, dtype=self.dtype)
+
+
+def demo():
+    f = PiecewiseFunction([1, 2, 3], [1, 2, 2, 3])
+    g = f + 1
+    print(g(1))
+    h = g + f
+    print(h(1))
+    print(h(5))
+    pass
+
+
+if __name__ == "__main__":
+    demo()
