@@ -515,8 +515,11 @@ class DummyObject(object):
 
 
 class PiecewiseFunction(object):
-    def __init__(self, breakpoints, values, cadlag=True, dtype=tf.float64):
+    def __init__(
+        self, breakpoints, values, cadlag=True, unique_breaks=False, dtype=tf.float64
+    ):
         self.dtype = dtype
+        self.unique_breaks = unique_breaks
         values = tf.cast(values, dtype)
         breakpoints = tf.cast(breakpoints, dtype)
         last = breakpoints.shape.as_list()[-1]
@@ -560,6 +563,7 @@ class PiecewiseFunction(object):
 
         breakpoints = tf.concat([left, right], axis=-1)
         breakpoints, _ = unique(x=breakpoints, axis=[-1])
+        breakpoints = tf.sort(breakpoints, axis=-1)
         d = len(breakpoints.shape.as_list())
         breakpoints_ = tf.pad(breakpoints, [(0, 0)] * (d - 1) + [(1, 0)])
         v1 = self(breakpoints_)
