@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_addons as tfa
 import tensorflow_probability as tfp
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.framework import ops
@@ -25,16 +24,17 @@ from tensorflow_probability.python.internal import (
     prefer_static,
     tensorshape_util,
 )
-from tensorflow_probability.python.vi import csiszar_divergence
+from tensorflow_probability.python.vi import csiszar_divergence, kl_reverse
 from tqdm import tqdm
 
 from tensorflow_probability.python.vi import GradientEstimators
+from tensorflow_probability.python import monte_carlo
+
 from bayesianquilts.util import (
     batched_minimize,
     TransformedVariable,
-    minimize_distributed,
 )
-from bayesianquilts.util import _trace_variables, _trace_loss
+from bayesianquilts.util import _trace_loss
 
 
 # @tf.function(autograph=False)
@@ -43,11 +43,16 @@ def minibatch_mc_variational_loss(
     surrogate_posterior,
     dataset_size,
     batch_size,
+    data,
     sample_size=1,
     sample_batches=1,
+    importance_sample_size=1,
+    discrepancy_fn=kl_reverse,
+    use_reparameterization=None,
+    gradient_estimator=None,
+    stopped_surrogate_posterior=None,
     seed=None,
-    data=None,
-    name=None,
+    cost="reweighted",
     **kwargs,
 ):
     """The minibatch variational loss
@@ -68,32 +73,57 @@ def minibatch_mc_variational_loss(
     """
     # @tf.function
     def sample_elbo():
-        q_samples, q_lp_ = surrogate_posterior.experimental_sample_and_log_prob(
+        q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
             sample_size, seed=seed
         )
-        return q_samples, q_lp_
+        return q_samples, q_lp
 
     # @tf.function(autograph=False)
-    def sample_expected_elbo(sample_batches):
-        expected_elbo = tf.zeros(1, tf.float64)
-        for _ in range(sample_batches):
-            q_samples, q_lp_ = sample_elbo()
+    batch_expectations = []
 
-            penalized_ll = target_log_prob_fn(
-                data=data,
-                prior_weight=tf.constant(batch_size / dataset_size),
-                **q_samples,
-            )
-            expected_elbo += tf.cast(
-                tf.reduce_mean(q_lp_ * batch_size / dataset_size - penalized_ll),
-                expected_elbo.dtype,
-            )
-        expected_elbo /= tf.cast(sample_batches, expected_elbo.dtype)
+    reweighted = functools.partial(
+        target_log_prob_fn,
+        data=data,
+        prior_weight=tf.cast(batch_size / dataset_size, tf.float64),
+    )
+
+    def sample_expected_elbo(q_samples, q_lp):
+
+        penalized_ll = target_log_prob_fn(
+            data=data,
+            prior_weight=tf.constant(batch_size / dataset_size),
+            **q_samples,
+        )
+        expected_elbo = tf.reduce_mean(q_lp * batch_size / dataset_size - penalized_ll)
+
         return expected_elbo
 
-    expected_elbo = sample_expected_elbo(sample_batches)
-
-    return expected_elbo
+    for _ in range(sample_batches):
+        q_samples, q_lp = sample_elbo()
+        if cost == "tfp":
+            batch_expectations += [
+                monte_carlo.expectation(
+                    f=csiszar_divergence._make_importance_weighted_divergence_fn(
+                        reweighted,
+                        surrogate_posterior=surrogate_posterior,
+                        discrepancy_fn=discrepancy_fn,
+                        precomputed_surrogate_log_prob=q_lp * batch_size / dataset_size,
+                        importance_sample_size=importance_sample_size,
+                        gradient_estimator=gradient_estimator,
+                        stopped_surrogate_posterior=(stopped_surrogate_posterior),
+                    ),
+                    samples=q_samples,
+                    # Log-prob is only used if `gradient_estimator == SCORE_FUNCTION`.
+                    log_prob=surrogate_posterior.log_prob,
+                    use_reparameterization=(
+                        gradient_estimator != GradientEstimators.SCORE_FUNCTION
+                    ),
+                )
+            ]
+        else:
+            batch_expectations += [sample_expected_elbo(q_samples, q_lp)]
+    batch_expectations = tf.reduce_mean(batch_expectations, axis=0)
+    return batch_expectations
 
 
 def minibatch_fit_surrogate_posterior(
@@ -102,7 +132,7 @@ def minibatch_fit_surrogate_posterior(
     batched_data_factory,
     batch_size,
     dataset_size,
-    num_epochs=1000,
+    num_steps=1000,
     trace_fn=_trace_loss,
     sample_size=8,
     sample_batches=1,
@@ -110,8 +140,11 @@ def minibatch_fit_surrogate_posterior(
     decay_rate=0.9,
     learning_rate=1.0,
     clip_value=10.0,
+    clip_by="norm",
     trainable_variables=None,
     jit_compile=None,
+    accumulate_batches=False,
+    batches_per_step=1,
     abs_tol=None,
     rel_tol=None,
     strategy=None,
@@ -145,35 +178,21 @@ def minibatch_fit_surrogate_posterior(
             **kwargs,
         )
 
-    if strategy is None:
-        return batched_minimize(
-            complete_variational_loss_fn,
-            batched_data_factory=batched_data_factory,
-            num_epochs=num_epochs,
-            trace_fn=trace_fn,
-            learning_rate=learning_rate,
-            trainable_variables=trainable_variables,
-            abs_tol=abs_tol,
-            rel_tol=rel_tol,
-            clip_value=clip_value,
-            decay_rate=decay_rate,
-            check_every=check_every,
-            test_fn=test_fn,
-            **kwargs,
-        )
-    else:
-        return minimize_distributed(
-            complete_variational_loss_fn,
-            data_factory=batched_data_factory,
-            num_epochs=num_epochs,
-            trace_fn=trace_fn,
-            learning_rate=learning_rate,
-            trainable_variables=trainable_variables,
-            abs_tol=abs_tol,
-            rel_tol=rel_tol,
-            decay_rate=decay_rate,
-            check_every=check_every,
-            strategy=strategy,
-            test_fn=test_fn,
-            **kwargs,
-        )
+    return batched_minimize(
+        complete_variational_loss_fn,
+        batched_data_factory=batched_data_factory,
+        num_steps=num_steps,
+        trace_fn=trace_fn,
+        learning_rate=learning_rate,
+        trainable_variables=trainable_variables,
+        abs_tol=abs_tol,
+        rel_tol=rel_tol,
+        clip_value=clip_value,
+        clip_by=clip_by,
+        accumulate_batches=accumulate_batches,
+        batches_per_step=batches_per_step,
+        decay_rate=decay_rate,
+        check_every=check_every,
+        test_fn=test_fn,
+        **kwargs,
+    )

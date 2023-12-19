@@ -23,8 +23,6 @@ from tensorflow.python.distribute.input_lib import DistributedDataset
 from tqdm import tqdm
 
 from bayesianquilts.util import (
-    clip_gradients,
-    run_chain,
     tf_data_cardinality,
 )
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
@@ -69,6 +67,9 @@ class BayesianModel(ABC):
     def fit(self, *args, **kwargs):
         return self._calibrate_minibatch_advi(*args, **kwargs)
 
+    def preprocessor(self):
+        return None
+
     def _calibrate_advi(self):
         pass
 
@@ -77,19 +78,23 @@ class BayesianModel(ABC):
         batched_data_factory,
         batch_size,
         dataset_size,
-        num_epochs=100,
+        num_steps=100,
         learning_rate=0.1,
         opt=None,
         abs_tol=1e-10,
         rel_tol=1e-8,
         clip_value=5.0,
+        clip_by="norm",
         max_decay_steps=25,
         lr_decay_factor=0.99,
         check_every=1,
-        set_expectations=True,
+        set_expectations=False,
         sample_size=24,
         sample_batches=1,
         trainable_variables=None,
+        unormalized_log_prob_fn=None,
+        accumulate_batches=False,
+        batches_per_step=None,
         temp_dir=tempfile.gettempdir(),
         test_fn=None,
         **kwargs,
@@ -99,7 +104,7 @@ class BayesianModel(ABC):
         Args:
             data_factory (callable, required): [description]. Factory
                 for generating a batch iterator.
-            num_epochs (int, optional): [description]. Defaults to 100.
+            num_steps (int, optional): [description]. Defaults to 100.
             learning_rate (float, optional): [description]. Defaults to 0.1.
             opt ([type], optional): [description]. Defaults to None.
             abs_tol ([type], optional): [description]. Defaults to 1e-10.
@@ -114,13 +119,15 @@ class BayesianModel(ABC):
         if trainable_variables is None:
             trainable_variables = self.surrogate_distribution.variables
 
-        def run_approximation(num_epochs):
+        def run_approximation(num_steps):
             losses = minibatch_fit_surrogate_posterior(
-                target_log_prob_fn=self.unormalized_log_prob,
+                target_log_prob_fn=unormalized_log_prob_fn
+                if unormalized_log_prob_fn is not None
+                else self.unormalized_log_prob,
                 surrogate_posterior=self.surrogate_distribution,
                 dataset_size=dataset_size,
                 batch_size=batch_size,
-                num_epochs=num_epochs,
+                num_steps=num_steps,
                 sample_size=sample_size,
                 sample_batches=sample_batches,
                 learning_rate=learning_rate,
@@ -129,22 +136,26 @@ class BayesianModel(ABC):
                 abs_tol=abs_tol,
                 rel_tol=rel_tol,
                 clip_value=clip_value,
+                clip_by=clip_by,
                 check_every=check_every,
                 strategy=self.strategy,
+                accumulate_batches=accumulate_batches,
+                batches_per_step=batches_per_step,
                 trainable_variables=trainable_variables,
                 batched_data_factory=batched_data_factory,
                 test_fn=test_fn,
+                **kwargs
             )
             return losses
 
-        losses = run_approximation(num_epochs)
+        losses = run_approximation(num_steps)
         if set_expectations:
             if (not np.isnan(losses[-1])) and (not np.isinf(losses[-1])):
                 self.surrogate_sample = self.surrogate_distribution.sample(100)
                 self.set_calibration_expectations()
         return losses
 
-    def set_calibration_expectations(self, samples=50, variational=True):
+    def set_calibration_expectations(self, samples=24, variational=True):
         if variational:
             mean, var = FactorizedDistributionMoments(
                 self.surrogate_distribution, samples=samples
@@ -344,7 +355,7 @@ class BayesianModel(ABC):
     def reconstitute(self, state):
         self.create_distributions()
         try:
-            for j, value in enumerate(state["surrogate_vars"]):
+            for j, value in tqdm(enumerate(state["surrogate_vars"])):
                 self.surrogate_distribution.trainable_variables[j].assign(
                     tf.cast(value, self.dtype)
                 )
