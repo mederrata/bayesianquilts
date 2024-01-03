@@ -75,6 +75,9 @@ class LogisticRegression(BayesianModel):
         )
 
         self.create_distributions()
+        
+    def preprocessor(self):
+        return lambda x: x
 
     def create_distributions(self):
 
@@ -152,27 +155,29 @@ class LogisticRegression(BayesianModel):
         except KeyError:
             regression_params = {k: params[k] for k in self.regression_var_list}
             intercept_params = {k: params[k] for k in self.intercept_var_list}
-        counts = data["hx_counts"]
-        if isinstance(counts, tf.RaggedTensor):
-            counts = counts.to_tensor()
+            
+        processed = (self.preprocessor())(data)
 
-        planned_ = tf.cast(data["planned"], self.dtype)
-        indices = planned_
-        if isinstance(indices, tf.RaggedTensor):
-            indices = indices.to_tensor()
+        regression_indices = self.regression_decomposition.retrieve_indices(processed)
+        if isinstance(regression_indices, tf.RaggedTensor):
+            regression_indices = regression_indices.to_tensor()
+            
+        intercept_indices = self.intercept_decomposition.retrieve_indices(processed)
+        if isinstance(intercept_indices, tf.RaggedTensor):
+            intercept_indices = intercept_indices.to_tensor()
 
         coef_ = self.regression_decomposition.lookup(
-            indices,
+            regression_indices,
             tensors=regression_params,
         )
 
         intercept = self.intercept_decomposition.lookup(
-            indices, tensors=intercept_params
+            intercept_indices, tensors=intercept_params
         )
 
         # compute regression product
         X = tf.cast(
-            (data["covariates"] - self.regressor_offsets) / self.regressor_scales,
+            (data["X"] - self.regressor_offsets) / self.regressor_scales,
             self.dtype,
         )
 
@@ -182,7 +187,7 @@ class LogisticRegression(BayesianModel):
 
         # assemble outcome random vars
 
-        label = tf.cast(tf.squeeze(data["label"]), self.dtype)
+        label = tf.cast(tf.squeeze(data["y"]), self.dtype)
 
         rv_outcome = tfd.Bernoulli(logits=mu)
         log_likelihood = rv_outcome.log_prob(label)
@@ -210,7 +215,7 @@ class LogisticRegression(BayesianModel):
             log_likelihood,
             tf.zeros_like(log_likelihood),
         )
-        min_val = tf.reduce_min(finite_portion) - 100.0
+        min_val = tf.reduce_min(finite_portion) - 10.0
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
