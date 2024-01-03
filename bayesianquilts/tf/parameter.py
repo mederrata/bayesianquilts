@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from email.policy import default
+
 import re
 from collections import Counter, defaultdict
 from itertools import product, groupby
@@ -149,6 +149,7 @@ class Interactions(object):
         dimensions = [] if dimensions is None else dimensions
         self._dimensions = dimensions
         self._intrinsic_shape = []
+
         for x in self._dimensions:
             try:
                 self._intrinsic_shape += [len(x[1])]
@@ -188,7 +189,7 @@ class Interactions(object):
                 product([0, 1], repeat=len(self._dimensions)),
             )
         )
-        exclusions = []
+        exclusions = self._exclusions
         hot = [
             set(d[0] for i, d in zip(ind, self._dimensions) if i == 1) for ind in onehot
         ]
@@ -197,16 +198,21 @@ class Interactions(object):
             self._dimensions,
             exclusions=exclusions,
         )
-    
+
+    def exclude(self, exclusions):
+        _exclusions = self._exclusions + [set(s) for s in exclusions]
+        exclusions = []
+        [exclusions.append(x) for x in _exclusions if x not in exclusions]
+        return Interactions(self._dimensions, exclusions=exclusions)
+
     def __add__(self, other):
         if other is None:
             return self
-        exclusions = other.exclusions + self._exclusions
+        exclusions = other._exclusions + self._exclusions
         dimensions = self._dimensions + other._dimensions
         res = []
         [res.append(x) for x in dimensions if x not in res]
         return Interactions(dimensions=res, exclusions=exclusions)
-
 
 
 class Decomposed(object):
@@ -231,8 +237,9 @@ class Decomposed(object):
         interactions,
         param_shape=None,
         default_val=None,
-        implicit=True,
+        implicit=False,
         dtype=tf.float32,
+        post_fn=None,
         name="",
         **kwargs,
     ) -> None:
@@ -247,6 +254,7 @@ class Decomposed(object):
         self._dtype = dtype
         self._implicit = implicit
         self._name = name
+        self._post_fn = post_fn
         if param_shape is None:
             param_shape = [1]
         if len(param_shape) > 5:
@@ -288,7 +296,7 @@ class Decomposed(object):
             labels[k] = dimension_labels
         return labels
 
-    def generate_tensors(self, batch_shape=None, target=None, dtype=None):
+    def generate_tensors(self, batch_shape=None, target=None, skip=None, dtype=None):
         """Generate parameter tensors for the parameter decomposition,
            neatly handling TF's limitation in the maximum number of
            axes (6) for a tensor to be used in most common mathematical operations
@@ -302,6 +310,8 @@ class Decomposed(object):
         Returns:
             [type]: [description]
         """
+        if skip is None:
+            skip = []
         tensors = {}
         tensor_names = {}
         dtype = dtype if dtype is not None else self._dtype
@@ -335,6 +345,10 @@ class Decomposed(object):
             if set(interaction_vars) in self._interactions._exclusions:
                 continue
             interaction_name = "_".join(interaction_vars)
+            tensor_name = self._name + "__" + interaction_name
+            if tensor_name in skip:
+                continue
+
             interaction_shape = (
                 self._interactions.shape() ** np.array(n_tuple)
             ).tolist()
@@ -375,7 +389,7 @@ class Decomposed(object):
                     value = value[..., 1:, :, :, :, :, :]
                 elif len(self._param_shape) == 6:
                     value = value[..., 1:, :, :, :, :, :, :]
-            tensors[self._name + "__" + interaction_name] = value
+            tensors[tensor_name] = value
 
         return tensors, tensor_names, tensor_shapes
 
@@ -438,9 +452,11 @@ class Decomposed(object):
 
     def sum_parts(self, tensors=None, unravel=False, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         raveled_shape = [np.prod(self._interaction_shape)] + self._param_shape
         # infer the batch shape
-
+        if len(tensors) == 0:
+            return 0
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
@@ -450,6 +466,15 @@ class Decomposed(object):
         # folded
         for k, v in tensors.items():
             v = tf.cast(v, dtype)
+            scale = self.scales[k]
+            scale = tf.cast(scale, v.dtype)
+            scale = tf.reshape(
+                scale,
+                [1] * len(batch_shape)
+                + scale.shape.as_list()
+                + [1] * len(self._param_shape),
+            )
+            v *= scale
             # shuffle axes, placing broadcast axes together
             if k not in self._tensor_part_shapes.keys():
                 continue
@@ -475,10 +500,12 @@ class Decomposed(object):
             v_ = ravel_broadcast_tile(
                 v, from_shape, to_shape, param_ndims=len(self._param_shape)
             )
-            partial_sum += self.scales[k] * v_
+            partial_sum += v_
 
         if unravel:
             partial_sum = tf.reshape(partial_sum, to_shape)
+        if self._post_fn is not None:
+            partial_sum = self._post_fn(partial_sum)
         return partial_sum
 
     def unravel_tensor(self, tensor):
@@ -503,20 +530,35 @@ class Decomposed(object):
             tensors ([type], optional): [description]. Defaults to None.
         """
         # flatten the indices
+
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
         if np.prod(self._interaction_shape) == 1:
-            return tensors[self._name + "__"]
+            try:
+                return tensors[self._name + "__"]
+            except KeyError:
+                return 0
         interaction_indices = tf.convert_to_tensor(interaction_indices)
 
-        interaction_shape = tf.convert_to_tensor(
-            self._interaction_shape, dtype=interaction_indices.dtype
-        )
+        if len(tensors) == 0:
+            return 0
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
         cumulative = 0
         for k, tensor in tensors.items():
+            if k not in self._tensor_parts.keys():
+                continue
             tensor = tf.cast(tensor, dtype)
+            scale = self.scales[k]
+            scale = tf.cast(scale, tensor.dtype)
+            scale = tf.reshape(
+                scale,
+                [1] * len(batch_shape)
+                + scale.shape.as_list()
+                + [1] * len(self._param_shape),
+            )
+            tensor *= scale
             if k not in self._tensor_part_shapes.keys():
                 continue
             part_interact_shape = self._tensor_part_shapes[k][
@@ -569,6 +611,8 @@ class Decomposed(object):
             )
             cumulative += _tensor
             # add to cumulative sum
+        if self._post_fn is not None:
+            cumulative = self._post_fn(cumulative)
         return cumulative
 
     def dot_sum(
@@ -582,22 +626,31 @@ class Decomposed(object):
             tensors ([type], optional): [description]. Defaults to None.
         """
         tensors = self._tensor_parts if tensors is None else tensors
-        if len(self._interaction_shape) == 0:
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
+        if len(self._interaction_shape) == 0 or interaction_indices is None:
             return tf.reduce_sum(tensors[self._name] * y, axes)
         # flatten the indices
         interaction_indices = tf.convert_to_tensor(interaction_indices)
         # assert interaction_indices.shape.as_list()[-1] == len(self._interaction_shape)
         tensors = self._tensor_parts if tensors is None else tensors
 
-        interaction_shape = tf.convert_to_tensor(
-            self._interaction_shape, dtype=interaction_indices.dtype
-        )
+        if len(tensors) == 0:
+            return 0
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
         cumulative = 0
         for k, tensor in tensors.items():
             tensor = tf.cast(tensor, dtype)
+            scale = self.scales[k]
+            scale = tf.cast(scale, tensor.dtype)
+            scale = tf.reshape(
+                scale,
+                [1] * len(batch_shape)
+                + scale.shape.as_list()
+                + [1] * len(self._param_shape),
+            )
+            tensor *= scale
             if k not in self._tensor_part_shapes.keys():
                 continue
             part_interact_shape = self._tensor_part_shapes[k][
@@ -658,6 +711,7 @@ class Decomposed(object):
 
     def _lookup_by_sum(self, interaction_indices, tensors=None, dtype=tf.float32):
         tensors = self._tensor_parts if tensors is None else tensors
+        tensors = {k: v for k, v in tensors.items() if k in self._tensor_parts.keys()}
 
         if len(self._interaction_shape) == 0:
             return tensors[self._name]
@@ -718,7 +772,8 @@ class Decomposed(object):
             range(rank - batch_ndims)
         )
         summed = tf.transpose(summed, permutation)
-
+        if self._post_fn is not None:
+            summed = self._post_fn(summed)
         return summed
 
     def shape(self):
@@ -759,19 +814,17 @@ class MultiwayContingencyTable(object):
             return np.sum(self.counts)
         dims = [x[0] for x in self.interaction._dimensions]
         axes = [dims.index(d) for d in interaction]
-        otheraxes = [d for d in range(len(self.interaction._dimensions)) if d not in axes]
+        otheraxes = [
+            d for d in range(len(self.interaction._dimensions)) if d not in axes
+        ]
         counts = np.reshape(self.counts, self.interaction._intrinsic_shape)
         counts = np.apply_over_axes(
             np.sum,
             counts,
-            [
-                d
-                for d in range(len(self.interaction._intrinsic_shape))
-                if d not in axes
-            ],
+            [d for d in range(len(self.interaction._intrinsic_shape)) if d not in axes],
         )
         counts = np.transpose(counts, axes + otheraxes)
-        counts = np.reshape(counts, counts.shape[:len(axes)])
+        counts = np.reshape(counts, counts.shape[: len(axes)])
         return counts
 
 
