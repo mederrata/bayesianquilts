@@ -5,6 +5,7 @@ import tempfile
 import uuid
 from collections import defaultdict
 from pathlib import Path
+import numbers
 
 import numpy as np
 import tensorflow as tf
@@ -17,9 +18,10 @@ from tensorflow_probability.python.internal import (
     tensorshape_util,
 )
 from tqdm import tqdm
+from tensorflow.raw_ops import UniqueV2 as unique
 
-tfd = tfp.distributions
-tfb = tfp.bijectors
+from tensorflow_probability import distributions as tfd
+from tensorflow_probability import bijectors as tfb
 
 
 def flatten(lst):
@@ -130,7 +132,7 @@ def batched_minimize(
     with tf.name_scope(name) as name:
         converged = False
         losses = []
-        avg_losses = [1e308] * 2
+        avg_losses = [1e308]
         min_loss = 1e308
 
         """
@@ -151,26 +153,38 @@ def batched_minimize(
         accepted_batches = 0
         save_path = manager.save()
         batch_losses = []
+        print(
+            f"Running optimization for {num_steps} steps of {batches_per_step} accumulated batches, checking every {check_every} steps",
+            flush=True,
+        )
         print(f"Saved a checkpoint: {save_path}", flush=True)
         gradient_accumulation = None
         data_factory = batched_data_factory()
         data_factory = data_factory.repeat()
+
         pbar_outer = tqdm(total=num_steps, position=0)
-        pbar = None
+        pbar = tqdm(total=batches_per_step, leave=False, position=1)
         test_results = []
-        epoch = 0
+        step = 0
+        batch_loss = np.nan
+        if test_fn is not None:
+            max_test = -1e308
         for n_batch, data in enumerate(data_factory):
             if n_batch % batches_per_step == 0:
-                # this batch is the start of a gradient step
-
-                #  apply the grad
-                if (gradient_accumulation is not None) and (np.isfinite(batch_loss)):
-                    _ = apply_grads(gradient_accumulation, watched_variables)
-                    pbar_outer.update(1)
-                epoch += 1
                 pbar = tqdm(total=batches_per_step, leave=False, position=1)
-                batch_losses += [[]]
+                # this batch is the start of a gradient step
+                if step > 0:
+                    pbar_outer.update(1)
 
+                    if not np.isfinite(batch_loss):
+                        print(f"Step {step} has an infinite loss", flush=True)
+
+                        #  apply the grad
+                    elif gradient_accumulation is not None:
+                        _ = apply_grads(gradient_accumulation, watched_variables)
+
+                step += 1
+                batch_losses += [[]]
                 gradient_accumulation = [
                     tf.Variable(
                         tf.zeros_like(v),
@@ -181,10 +195,13 @@ def batched_minimize(
                     )
                     for i, v in enumerate(watched_variables)
                 ]
-                if (epoch > num_steps) or converged:
+                if step > num_steps:
                     print("Terminating because we are out of iterations", flush=True)
                     break
-            pbar.update(1)
+
+                if converged:
+                    print("Terminating because the loss converged", flush=True)
+                    break
 
             if processing_fn is not None:
                 data = processing_fn(data)
@@ -192,6 +209,7 @@ def batched_minimize(
             batch_loss, grads = accumulate_grads(
                 data, gradient_accumulation, watched_variables
             )
+            pbar.update(1)
 
             if np.isfinite(batch_loss.numpy()):
                 batch_losses[-1] += [batch_loss.numpy()]
@@ -210,40 +228,46 @@ def batched_minimize(
             rel = np.abs(deviation / loss)
 
             if (
-                (epoch > 0)
+                (step > 0)
                 and (n_batch % batches_per_step == batches_per_step - 1)
-                and (epoch % check_every) == 0
+                and (step % check_every) == 0
             ):
                 """
                 Check for convergence
                 """
 
                 print(
-                    f"\nEpoch {epoch}: average-batch loss:" + f"{loss} rel loss: {rel}",
+                    f"Step {step}: average-batch loss:" + f"{loss} rel loss: {rel}",
                     flush=True,
                 )
                 save_because_of_test = False
                 if test_fn is not None:
-                    test_results += [test_fn()]
-                    if isinstance(test_results[-1], tf.Tensor):
-                        test_results[-1] = test_results[-1].numpy()
-                    if len(test_results) > 1:
-                        if test_results[-1] > np.max(test_results[:-1]):
-                            save_because_of_test = True
+                    res = test_fn()
+                    if isinstance(res, tf.Tensor):
+                        res = res.numpy()
+
+                    if res > max_test:
+                        save_because_of_test = True
+                        max_test = res
+                    test_results += [res]
 
                 if not np.isfinite(loss):
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
-                    print("\nEpoch loss NaN, restoring a checkpoint", flush=True)
+                    print("Step loss NaN, restoring a checkpoint", flush=True)
                     decay_step += 1
 
                     if decay_step > max_decay_steps:
                         converged = True
                         continue
-                    print(f"New learning rate: {opt.lr}", flush=True)
+                    print(f"New learning rate: {opt.lr.numpy()}", flush=True)
                     continue
                 save_because_of_loss = losses[-1] < min_loss
-                save_this = save_because_of_test if test_fn else save_because_of_loss
+                save_this = (
+                    save_because_of_test
+                    if test_fn is not None
+                    else save_because_of_loss
+                )
 
                 if save_this:
                     """
@@ -258,7 +282,7 @@ def batched_minimize(
                         np.abs((avg_losses[2] - min_loss)) < abs_tol
                     ):
                         print(
-                            f"Converged in {epoch} iterations "
+                            f"Converged in {step} iterations "
                             + "with acceptable absolute tolerance",
                             flush=True,
                         )
@@ -267,7 +291,7 @@ def batched_minimize(
                         (np.abs(avg_losses[2] - min_loss) / loss) < abs_tol
                     ):
                         print(
-                            f"Converged in {epoch} iterations with "
+                            f"Converged in {step} iterations with "
                             + "acceptable relative tolerance"
                         )
                         converged = True
@@ -285,7 +309,7 @@ def batched_minimize(
                         if batches_since_checkpoint >= max_plateau_epochs:
                             converged = True
                             print(
-                                f"We have had {batches_since_checkpoint} epochs with no improvement so we give up",
+                                f"We have had {batches_since_checkpoint} checks with no improvement so we give up",
                                 flush=True,
                             )
                         else:
@@ -296,25 +320,28 @@ def batched_minimize(
                             batches_since_plateau = 0
 
         trace = tf.stack(losses)
-        if test_fn is not None:
-            # take the checkpoint that had the best test result
-            trace.test_eval = test_results
-            return trace
-        else:
-            try:
-                if np.isnan(losses[-1]):
+        try:
+            if test_fn is not None:
+                res = test_fn()
+                if isinstance(res, tf.Tensor):
+                    res = res.numpy()
+
+                # take the checkpoint that had the best test result
+                trace.test_eval = test_results
+
+                if res < max_test:
                     cp_status = checkpoint.restore(manager.latest_checkpoint)
                     cp_status.assert_consumed()
                     trace.latest_checkpoint = manager.latest_checkpoint
-                else:
-                    #
-                    if len(test_results) > 1:
-                        if test_results[-1] < np.max(test_results[:-1]):
-                            cp_status = checkpoint.restore(manager.latest_checkpoint)
-                            cp_status.assert_consumed()
-                            trace.latest_checkpoint = manager.latest_checkpoint
-            except AssertionError:
-                pass
+                return trace
+
+            if np.isnan(losses[-1]):
+                cp_status = checkpoint.restore(manager.latest_checkpoint)
+                cp_status.assert_consumed()
+                trace.latest_checkpoint = manager.latest_checkpoint
+
+        except AssertionError:
+            pass
 
         return trace
 
@@ -479,3 +506,78 @@ class CountEncoder(object):
         self.table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(self.vocab, self.vals), 0
         )
+
+
+class DummyObject(object):
+    pass
+
+
+class PiecewiseFunction(object):
+    def __init__(
+        self, breakpoints, values, cadlag=True, unique_breaks=False, dtype=tf.float64
+    ):
+        self.dtype = dtype
+        self.unique_breaks = unique_breaks
+        values = tf.cast(values, dtype)
+        breakpoints = tf.cast(breakpoints, dtype)
+        last = breakpoints.shape.as_list()[-1]
+        if last is None:
+            last = 1
+
+        if len(values.shape.as_list()) > len(breakpoints.shape.as_list()):
+            breakpoints += tf.zeros(
+                values.shape.as_list()[:-1] + [last],
+                breakpoints.dtype,
+            )
+        self.breakpoints = tf.cast(breakpoints, dtype)
+        self.values = values
+        self.cadlag = cadlag
+
+    def __call__(self, value):
+        value = tf.cast(value, self.dtype)
+        ndx = tf.reduce_sum(
+            tf.cast(
+                self.breakpoints[..., tf.newaxis] <= value[..., tf.newaxis, :], tf.int32
+            ),
+            axis=-2,
+        )
+        return tf.gather(
+            self.values, ndx, batch_dims=len(self.values.shape.as_list()) - 1
+        )
+
+    def __add__(self, obj):
+        if isinstance(obj, numbers.Number):
+            return PiecewiseFunction(self.breakpoints, obj + self.values)
+        left = self.breakpoints
+
+        left_batch_shape = left.shape.as_list()[:-1]
+        right = tf.cast(obj.breakpoints, self.dtype)
+        right_batch_shape = right.shape.as_list()[:-1]
+
+        if len(left_batch_shape) < len(right_batch_shape):
+            left += tf.zeros(right_batch_shape + left.shape.as_list()[-1:], self.dtype)
+        elif len(left_batch_shape) > len(right_batch_shape):
+            right += tf.zeros(left_batch_shape + right.shape.as_list()[-1:], self.dtype)
+
+        breakpoints = tf.concat([left, right], axis=-1)
+        breakpoints, _ = unique(x=breakpoints, axis=[-1])
+        breakpoints = tf.sort(breakpoints, axis=-1)
+        d = len(breakpoints.shape.as_list())
+        breakpoints_ = tf.pad(breakpoints, [(0, 0)] * (d - 1) + [(1, 0)])
+        v1 = self(breakpoints_)
+        v2 = obj(breakpoints_)
+        return PiecewiseFunction(breakpoints, v1 + v2, dtype=self.dtype)
+
+
+def demo():
+    f = PiecewiseFunction([[1, 2, 3]], [[1, 2, 2, 3]])
+    g = f + 1
+    print(g(1))
+    h = g + f
+    print(h(1))
+    print(h(5))
+    pass
+
+
+if __name__ == "__main__":
+    demo()

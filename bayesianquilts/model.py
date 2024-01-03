@@ -1,33 +1,35 @@
-import inspect
-from itertools import cycle
-import tempfile
-import os
 import gzip
-
-import dill
-import arviz as az
-from arviz.data.base import dict_to_dataset
-from arviz.data import InferenceData
+import inspect
+import os
+import tempfile
 from abc import ABC, abstractmethod
+from collections import defaultdict
+from functools import partial
+from itertools import cycle
 
-import tensorflow as tf
-
+import arviz as az
+import dill
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from functools import partial
+import tensorflow_probability as tfp
 import xarray as xr
-
+from arviz.data import InferenceData
+from arviz.data.base import dict_to_dataset
 from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow.python.distribute.input_lib import DistributedDataset
+from tensorflow_probability.python import distributions as tfd
 from tqdm import tqdm
 
-from bayesianquilts.util import (
-    tf_data_cardinality,
-)
-from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
-
 from bayesianquilts.distributions import FactorizedDistributionMoments
+from bayesianquilts.tf.parameter import (
+    Decomposed,
+    Interactions,
+    MultiwayContingencyTable,
+)
+from bayesianquilts.util import DummyObject, flatten, tf_data_cardinality
+from bayesianquilts.vi.advi import build_surrogate_posterior
+from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
 
 class BayesianModel(ABC):
@@ -144,7 +146,7 @@ class BayesianModel(ABC):
                 trainable_variables=trainable_variables,
                 batched_data_factory=batched_data_factory,
                 test_fn=test_fn,
-                **kwargs
+                **kwargs,
             )
             return losses
 
@@ -353,7 +355,14 @@ class BayesianModel(ABC):
         return
 
     def reconstitute(self, state):
-        self.create_distributions()
+        surrogate_params = {t.name: t for t in state["surrogate_vars"]}
+        try:
+            self.create_distributions(
+                max_order=state["max_order"], surrogate_params=surrogate_params
+            )
+            return
+        except TypeError:
+            self.create_distributions()
         try:
             for j, value in tqdm(enumerate(state["surrogate_vars"])):
                 self.surrogate_distribution.trainable_variables[j].assign(
@@ -390,4 +399,85 @@ class BayesianModel(ABC):
         #  self.dtype = tf.float64
         self.reconstitute(state)
         self.saved_state = state
-        self.set_calibration_expectations()
+
+
+def generate_distributions(
+    decomposition,
+    skip=None,
+    table=None,
+    dim_decay_factor=1.0,
+    scale=1.0,
+    gaussian_only=True,
+    dtype=tf.float32,
+    surrogate_params=None,
+    gen_surrogate=True,
+):
+    (
+        tensors,
+        vars,
+        shapes,
+    ) = decomposition.generate_tensors(skip=skip, dtype=dtype)
+
+    if isinstance(table, MultiwayContingencyTable):
+        N = table.lookup()
+        # check if there are certain dimensions in the interactions
+        # that are not covered by the contingency table
+        scales = {}
+        for k, v in shapes.items():
+            scales[k] = (
+                scale
+                * dim_decay_factor ** (len([d for d in v if d > 1]))
+                * np.reshape(
+                    np.sqrt(table.lookup(vars[k]) / N),
+                    -1,
+                )
+            )
+
+    else:
+        scales = {
+            k: scale * dim_decay_factor ** (len([d for d in v if d > 1]))
+            for k, v in shapes.items()
+        }
+
+    if decomposition._implicit:
+        scales = {k: v[1:] if len(v) > 1 else v for k, v in scales.items()}
+    decomposition.set_scales(scales)
+
+    prior_dict = {}
+    for label, tensor in tensors.items():
+        prior_dict[label] = tfd.Independent(
+            tfd.Normal(
+                loc=tf.zeros_like(tf.cast(tensor, dtype)),
+                scale=tf.ones_like(tf.cast(tensor, dtype)),
+            ),
+            reinterpreted_batch_ndims=len(tensor.shape.as_list()),
+        )
+
+    if len(prior_dict) > 0:
+        prior = tfd.JointDistributionNamed(prior_dict)
+    else:
+        prior = DummyObject()
+        prior.model = {}
+
+    out = {
+        "decomposition": decomposition,
+        "prior": prior,
+        "vars": vars,
+        "shapes": shapes,
+        "scales": scales,
+    }
+    if gen_surrogate:
+        if len(prior_dict) > 0:
+            out["surrogate"] = build_surrogate_posterior(
+                prior,
+                initializers=tensors,
+                dtype=dtype,
+                bijectors=defaultdict(tfp.bijectors.Identity),
+                gaussian_only=gaussian_only,
+                surrogate_params=surrogate_params,
+            )
+        else:
+            out["surrogate"] = DummyObject()
+            out["surrogate"].model = {}
+
+    return out

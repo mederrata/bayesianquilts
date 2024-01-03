@@ -44,13 +44,13 @@ from tensorflow.python.ops.math_ops import bucketize
 class PiecewiseExponential(tfd.Distribution):
     def __init__(
         self,
-        rates,
-        breakpoints,
+        rates=None,
+        breakpoints=None,
+        hazard_fn=None,
         validate_args=False,
         allow_nan_stats=True,
         name="PiecewiseExponential",
     ):
-
         parameters = dict(locals())
         with tf.name_scope(name) as name:
             dtype = dtype_util.common_dtype([rates, breakpoints], dtype_hint=tf.float32)
@@ -304,7 +304,6 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
         allow_nan_stats=True,
         name="PiecewiseExponentialRaggedBreaks",
     ):
-
         parameters = dict(locals())
         with tf.name_scope(name) as name:
             try:
@@ -339,8 +338,12 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
         breakpoints = params["breakpoints"]
 
         def get_cumhazards(x):
-            b = x[0].to_tensor()
-            r = x[1].to_tensor()
+            b = x[0]
+            if isinstance(b, tf.RaggedTensor):
+                b = b.to_tensor()
+            r = x[1]
+            if isinstance(r, tf.RaggedTensor):
+                r = r.to_tensor()
             b = tf.concat(
                 [b[..., 0][..., tf.newaxis], b[..., 1:] - b[..., :-1]], axis=-1
             )
@@ -407,9 +410,7 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
                 v = v.to_tensor()
             if isinstance(b, tf.RaggedTensor):
                 b = b.to_tensor()
-            indices = tf.reduce_sum(
-                tf.cast(v[..., tf.newaxis] >= b, tf.int32), axis=-1
-            )
+            indices = tf.reduce_sum(tf.cast(v[..., tf.newaxis] >= b, tf.int32), axis=-1)
             hazards = tf.gather(tf.transpose(r.to_tensor()), indices)[0, ...]
             return hazards
 
@@ -604,6 +605,14 @@ class PiecewiseExponentialRaggedBreaks(PiecewiseExponential):
 
 
 def demo():
+    print("Demo: one set of breakpoints to broadcast")
+    pe = PiecewiseExponential(rates=[[1, 2, 1], [1, 3, 1]], breakpoints=[[2, 8]])
+    h = pe.hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
+    print(h)
+    ch = pe.cumulative_hazard([1, 2.5, 10, 11, 12])
+    print(ch)
+    pr = pe.log_prob([1, 2.5, 10, 4.5])
+    print(pr)
 
     print("Demo: one set of breakpoints for each rate")
     pe = PiecewiseExponentialRaggedBreaks(
@@ -612,15 +621,6 @@ def demo():
     h = pe.hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
     print(h)
     ch = pe.cumulative_hazard([1, 2.5, 10, 4.5])
-    print(ch)
-    pr = pe.log_prob([1, 2.5, 10, 4.5])
-    print(pr)
-
-    print("Demo: one set of breakpoints to broadcast")
-    pe = PiecewiseExponential(rates=[[1, 2, 1], [1, 3, 1]], breakpoints=[[2, 8]])
-    h = pe.hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
-    print(h)
-    ch = pe.cumulative_hazard([1, 2.5, 10, 4.5, 0.5, 3, 2])
     print(ch)
     pr = pe.log_prob([1, 2.5, 10, 4.5])
     print(pr)
