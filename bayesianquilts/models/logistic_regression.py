@@ -234,3 +234,5 @@ class LogisticRegression(BayesianModel):
         )
 
         return tf.reduce_sum(log_likelihood, axis=-1) + prior
+
+    
