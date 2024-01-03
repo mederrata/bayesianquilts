@@ -8,7 +8,6 @@ import csv
 import itertools
 from itertools import product
 import arviz as az
-from tensorflow._api.v2 import data
 from tqdm import tqdm
 import json
 
@@ -16,18 +15,13 @@ import numpy as np
 import pandas as pd
 
 import tensorflow as tf
-from tensorflow.python.ops.math_ops import _bucketize as bucketize
 import tensorflow_probability as tfp
 
 from bayesianquilts.model import BayesianModel
 from mederrata_spmf import PoissonFactorization
 from bayesianquilts.tf.parameter import Interactions, Decomposed
 from bayesianquilts.vi.advi import build_surrogate_posterior
-from bayesianquilts.util import flatten
-from readmission.data.cms.postdischarge_data import get_dataset
-from bayesianquilts.metastrings import horseshoe_code, horseshoe_lambda_code
 
-from tensorflow.python.ops import math_ops
 
 tfd = tfp.distributions
 
@@ -37,7 +31,7 @@ class LogisticRegression(BayesianModel):
         self,
         dim_regressors,
         regression_interact=None,
-        dim_decay_factor=0.8,
+        dim_decay_factor=0.5,
         regressor_scales=None,
         regressor_offsets=None,
         dtype=tf.float64,
@@ -52,24 +46,17 @@ class LogisticRegression(BayesianModel):
         self.regressor_offsets = (
             regressor_offsets if regressor_offsets is not None else 0
         )
-        regression_dims = [
-            ("planned", 2),
-        ]
-
-        intercept_dims = [
-            ("planned", 2),
-        ]
 
         if regression_interact is None:
             self.regression_interact = Interactions(
-                regression_dims,
+                [],
                 exclusions=[],
             )
         else:
             self.regression_interact = regression_interact
 
         self.intercept_interact = Interactions(
-            intercept_dims,
+            [],
             exclusions=[],
         )
 
@@ -88,6 +75,9 @@ class LogisticRegression(BayesianModel):
         )
 
         self.create_distributions()
+        
+    def preprocessor(self):
+        return lambda x: x
 
     def create_distributions(self):
 
@@ -99,7 +89,7 @@ class LogisticRegression(BayesianModel):
             regression_shapes,
         ) = self.regression_decomposition.generate_tensors(dtype=self.dtype)
         regression_scales = {
-            k: 10*self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
+            k: self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
             for k, v in regression_shapes.items()
         }
         self.regression_decomposition.set_scales(regression_scales)
@@ -123,7 +113,7 @@ class LogisticRegression(BayesianModel):
             intercept_shapes,
         ) = self.intercept_decomposition.generate_tensors(dtype=self.dtype)
         intercept_scales = {
-            k: 20*self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
+            k: self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
             for k, v in intercept_shapes.items()
         }
         self.intercept_decomposition.set_scales(intercept_scales)
@@ -165,27 +155,29 @@ class LogisticRegression(BayesianModel):
         except KeyError:
             regression_params = {k: params[k] for k in self.regression_var_list}
             intercept_params = {k: params[k] for k in self.intercept_var_list}
-        counts = data["hx_counts"]
-        if isinstance(counts, tf.RaggedTensor):
-            counts = counts.to_tensor()
+            
+        processed = (self.preprocessor())(data)
 
-        planned_ = tf.cast(data["planned"], self.dtype)
-        indices = planned_
-        if isinstance(indices, tf.RaggedTensor):
-            indices = indices.to_tensor()
+        regression_indices = self.regression_decomposition.retrieve_indices(processed)
+        if isinstance(regression_indices, tf.RaggedTensor):
+            regression_indices = regression_indices.to_tensor()
+            
+        intercept_indices = self.intercept_decomposition.retrieve_indices(processed)
+        if isinstance(intercept_indices, tf.RaggedTensor):
+            intercept_indices = intercept_indices.to_tensor()
 
         coef_ = self.regression_decomposition.lookup(
-            indices,
+            regression_indices,
             tensors=regression_params,
         )
 
         intercept = self.intercept_decomposition.lookup(
-            indices, tensors=intercept_params
+            intercept_indices, tensors=intercept_params
         )
 
         # compute regression product
         X = tf.cast(
-            (data["covariates"] - self.regressor_offsets) / self.regressor_scales,
+            (data["X"] - self.regressor_offsets) / self.regressor_scales,
             self.dtype,
         )
 
@@ -195,7 +187,7 @@ class LogisticRegression(BayesianModel):
 
         # assemble outcome random vars
 
-        label = tf.cast(tf.squeeze(data["label"]), self.dtype)
+        label = tf.cast(tf.squeeze(data["y"]), self.dtype)
 
         rv_outcome = tfd.Bernoulli(logits=mu)
         log_likelihood = rv_outcome.log_prob(label)
@@ -213,7 +205,7 @@ class LogisticRegression(BayesianModel):
             "log_likelihood"
         ]
 
-    def unormalized_log_prob(self, data=None, prior_weight=tf.constant(1.), **params):
+    def unormalized_log_prob(self, data=None, **params):
         prediction = self.predictive_distribution(data, **params)
         log_likelihood = prediction["log_likelihood"]
         max_val = tf.reduce_max(log_likelihood)
@@ -223,7 +215,7 @@ class LogisticRegression(BayesianModel):
             log_likelihood,
             tf.zeros_like(log_likelihood),
         )
-        min_val = tf.reduce_min(finite_portion) - 100.0
+        min_val = tf.reduce_min(finite_portion) - 10.0
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
@@ -240,6 +232,5 @@ class LogisticRegression(BayesianModel):
                 },
             }
         )
-        prior_weight = tf.cast(prior_weight, self.dtype)
 
-        return tf.reduce_sum(log_likelihood, axis=-1) + prior_weight*prior
+        return tf.reduce_sum(log_likelihood, axis=-1) + prior

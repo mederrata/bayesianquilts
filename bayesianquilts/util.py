@@ -38,8 +38,6 @@ def _trace_loss(loss, grads, variables):
 
 build_trainable_InverseGamma_dist = None
 build_trainable_normal_dist = None
-build_surrogate_posterior = None
-fit_surrogate_posterior = None
 
 
 def batched_minimize(
