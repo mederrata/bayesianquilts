@@ -234,3 +234,34 @@ class LogisticRegression(BayesianModel):
         )
 
         return tf.reduce_sum(log_likelihood, axis=-1) + prior
+
+    def stepaway(self, data, params, step_size):
+        y = tf.cast(tf.squeeze(data['y']), tf.float64)
+        X = tf.cast(data['X'], tf.float64)
+        mu = tf.reduce_sum(params['beta__']*data['X'], axis=-1) + params['intercept__'][..., 0]
+        sigma = tf.math.sigmoid(mu)
+        nu = (y*(sigma)+(1-y)*(1-sigma))**-1
+        nu_weights = nu/tf.reduce_sum(nu, axis=0, keepdims=True)
+        
+        grad_pre = tf.cast(y, tf.float64)*tf.cast(1-sigma, tf.float64)-tf.cast(1-y, tf.float64)*tf.cast(sigma, tf.float64)
+        grad_beta = grad_pre[..., tf.newaxis] * X
+        grad_intercept = grad_pre[..., tf.newaxis]
+        
+        beta_new = params['beta__'] - step_size*grad_beta
+        intercept_new = params['intercept__'] - step_size*grad_intercept
+        mu_new = tf.reduce_sum(beta_new*data['X'], axis=-1) + intercept_new[..., 0]
+        sigma_new = tf.math.sigmoid(mu_new)
+        nu_new = (y*(sigma_new)+(1-y)*(1-sigma_new))**-1
+        J = 1 + step_size*(1 + tf.math.reduce_sum(X*X, -1))*sigma*(1-sigma)
+
+        log_beta_new = self.surrogate_distribution.model['beta__'].log_prob(beta_new[..., tf.newaxis, :])
+        log_beta = self.surrogate_distribution.model['beta__'].log_prob(params['beta__'])
+        log_intercept_new = self.surrogate_distribution.model['intercept__'].log_prob(intercept_new[..., tf.newaxis, :])
+        log_intercept= self.surrogate_distribution.model['intercept__'].log_prob(params['intercept__'])
+        eta = nu_new*J*tf.math.exp(log_beta_new + log_intercept_new - log_beta[:, tf.newaxis] - log_intercept[:, tf.newaxis])
+        eta_weights = eta/tf.reduce_sum(eta, axis=0, keepdims=True)
+        
+        p_loo = tf.reduce_sum(sigma_new * eta_weights, axis=0)
+        ll_loo = tf.reduce_sum(eta_weights/nu_new, axis=0)
+
+        return {'eta_weights': eta_weights, 'nu_weights': nu_weights, 'p_loo': p_loo, 'll_loo': ll_loo}

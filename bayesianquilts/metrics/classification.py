@@ -1,6 +1,28 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
+import numpy as np
+import pandas as pd
+from sklearn import metrics as skmetrics
 
+
+def auroc(labels, probs):
+    fpr, tpr, thresholds = skmetrics.roc_curve(labels, probs, pos_label=1)
+    return {
+        "auroc": skmetrics.auc(fpr, tpr),
+        "fpr": fpr,
+        "tpr": tpr,
+        "thresholds": thresholds,
+    }
+
+
+def auprc(labels, probs):
+    precision, recall, thresholds = skmetrics.precision_recall_curve(labels, probs)
+    return {
+        "auprc": skmetrics.auc(recall, precision),
+        "precision": precision,
+        "recall": recall,
+        "thresholds": thresholds,
+    }
 
 def accuracy(probs, labels, n_thresholds=200):
     thresholds = tf.cast(tf.linspace(1, 0, n_thresholds), probs.dtype)
@@ -47,3 +69,76 @@ def accuracy(probs, labels, n_thresholds=200):
 
 def auc(x, y):
     return tfp.math.trapz(x=x, y=y)
+
+def classification_metrics(
+    data_factory,
+    prediction_fn,
+    preprocessing_fn=None,
+    by_vars=None,
+    outcome_label="label",
+    method="pd",
+    save_file=None,
+):
+    if by_vars is None:
+        by_vars = []
+    collect_vars = by_vars + [outcome_label]
+    collect_vars = set(collect_vars)
+    collected_data = {k: [] for k in collect_vars}
+    probs = []
+    metrics = {}
+
+    for batch in iter(data_factory()):
+        if preprocessing_fn is not None:
+            batch = preprocessing_fn(batch)
+
+        for k in collected_data.keys():
+            collected_data[k] += [tf.squeeze(batch[k]).numpy()]
+
+        probs += [prediction_fn(data=batch)]
+
+    probs = np.concatenate(probs, axis=0)
+    for k in collected_data.keys():
+        collected_data[k] = np.squeeze(np.concatenate(collected_data[k], axis=0))
+
+    computed = pd.DataFrame({"probs": probs, **collected_data})
+    if save_file:
+        computed.to_parquet(save_file)
+    metrics["prob"] = np.mean(computed[outcome_label])
+    metrics["auroc"] = auroc(computed[outcome_label], computed.probs)
+    metrics["auprc"] = auprc(computed[outcome_label], computed.probs)
+
+    for var in by_vars:
+        metrics[var] = {}
+        metrics[var]["prob"] = (
+            computed.groupby(var)
+            .apply(lambda x: np.mean(x[outcome_label]))
+            .dropna()
+            .reset_index()
+        )
+        metrics[var]["count"] = (
+            computed.groupby(var)
+            .apply(lambda x: np.sum(x[outcome_label]))
+            .dropna()
+            .reset_index()
+        )
+        metrics[var]["auroc"] = (
+            computed.groupby(var)
+            .apply(lambda x: auroc(x[outcome_label], x.probs))
+            .dropna()
+            .reset_index()
+        )
+        metrics[var]["auroc"] = pd.concat(
+            [metrics[var]["auroc"], metrics[var]["auroc"][0].apply(pd.Series)], axis=1
+        ).drop(columns=0)
+        metrics[var]["auprc"] = (
+            computed.groupby(var)
+            .apply(lambda x: auprc(x[outcome_label], x.probs))
+            .dropna()
+            .reset_index()
+        )
+        metrics[var]["auprc"] = pd.concat(
+            [metrics[var]["auprc"], metrics[var]["auprc"][0].apply(pd.Series)], axis=1
+        ).drop(columns=0)
+    return metrics
+
+
