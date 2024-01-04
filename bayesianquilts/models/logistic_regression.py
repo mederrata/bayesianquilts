@@ -235,7 +235,14 @@ class LogisticRegression(BayesianModel):
 
         return tf.reduce_sum(log_likelihood, axis=-1) + prior
 
-    def stepaway(self, data, params, step_size):
+    def stepaway_loo(self, data, params, step_size):
+        """Compute step-away transformation for LOO
+        
+        Keyword arguments:
+        argument -- description
+        Return: return_description
+        """
+        
         y = tf.cast(tf.squeeze(data['y']), tf.float64)
         X = tf.cast(data['X'], tf.float64)
         mu = tf.reduce_sum(params['beta__']*data['X'], axis=-1) + params['intercept__'][..., 0]
@@ -261,7 +268,10 @@ class LogisticRegression(BayesianModel):
         eta = nu_new*J*tf.math.exp(log_beta_new + log_intercept_new - log_beta[:, tf.newaxis] - log_intercept[:, tf.newaxis])
         eta_weights = eta/tf.reduce_sum(eta, axis=0, keepdims=True)
         
-        p_loo = tf.reduce_sum(sigma_new * eta_weights, axis=0)
-        ll_loo = tf.reduce_sum(eta_weights/nu_new, axis=0)
+        p_loo_stepaway = tf.reduce_sum(sigma_new * eta_weights, axis=0)
+        p_loo = tf.reduce_sum(sigma*nu_weights, axis=0)
+        ll_loo = tf.reduce_sum(nu_weights/nu, axis=0)
+        ll_loo_stepaway = tf.reduce_sum(eta_weights/nu_new, axis=0)
 
-        return {'eta_weights': eta_weights, 'nu_weights': nu_weights, 'p_loo': p_loo, 'll_loo': ll_loo}
+        return {
+            'eta_weights': eta_weights, 'nu_weights': nu_weights, 'p_loo': p_loo, 'p_loo_stepaway': p_loo_stepaway, 'll_loo_stepaway': ll_loo_stepaway, 'll_loo': ll_loo}

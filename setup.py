@@ -41,6 +41,7 @@ setuptools.setup(
         'pandas',
         # We need to check for direct depends or we can delete scipy.
         'scipy',
+        'scikit_learn==1.3.2',
         'protobuf~=3.19.0',
         'tensorflow==2.13.0',
         'tensorflow-probability==0.23.0',
