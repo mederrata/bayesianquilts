@@ -4,8 +4,6 @@ import sys
 import os
 import csv
 import itertools
-import arviz as az
-from tensorflow._api.v2 import data
 from tqdm import tqdm
 import json
 import tempfile
@@ -20,8 +18,6 @@ from bayesianquilts.model import BayesianModel
 from mederrata_spmf import PoissonFactorization
 from bayesianquilts.nn.dense import DenseHorseshoe, Dense
 
-from readmission.data.cms.postdischarge_data import get_dataset
-
 tfd = tfp.distributions
 
 
@@ -29,17 +25,21 @@ class LogisticRelunet(DenseHorseshoe):
     def __init__(
         self,
         dim_regressors,
-        strategy=None,
+        layer_sizes=None,
         regressor_scales=None,
         regressor_offsets=None,
         outcome_classes=2,
         dtype=tf.float64,
-        outcome_label='label',
+        outcome_label='y',
         **kwargs
     ):
+        if layer_sizes is None:
+            layer_sizes=[int(dim_regressors / 10), 20, outcome_classes -1],
+        else:
+            layer_sizes += [ outcome_classes -1]
         super(LogisticRelunet, self).__init__(
             input_size=dim_regressors,
-            layer_sizes=[int(dim_regressors / 10), 20, outcome_classes -1],
+            layer_sizes=layer_sizes,
             activation_fn=tf.nn.relu,
             weight_scale=1.0,
             bias_scale=1.0,
@@ -58,7 +58,7 @@ class LogisticRelunet(DenseHorseshoe):
     def predictive_distribution(self, data, **params):
 
         X = tf.cast(
-            data["covariates"],
+            data["X"],
             self.dtype,
         )
 
@@ -74,7 +74,7 @@ class LogisticRelunet(DenseHorseshoe):
         }
 
     def log_likelihood(self, data, **params):
-        return self.predictive_distribution(data, return_params=False, **params)[
+        return self.predictive_distribution(data, **params)[
             "log_likelihood"
         ]
 
