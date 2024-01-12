@@ -291,4 +291,12 @@ class LogisticRegression(BayesianModel):
         ll_loo_stepaway = tf.reduce_sum(eta_weights/nu_new, axis=0)
 
         return {
-            'eta_weights': eta_weights, 'p': tf.reduce_mean(sigma, axis=0), 'nu_weights': nu_weights, 'p_loo': p_loo, 'p_loo_stepaway': p_loo_stepaway, 'll_loo_stepaway': ll_loo_stepaway, 'll_loo': ll_loo}
+            'eta_weights': eta_weights, 
+            'p': tf.reduce_mean(sigma, axis=0),
+            'nu_weights': nu_weights,
+            'p_loo': p_loo,
+            'p_loo_stepaway': p_loo_stepaway,
+            'll_loo_stepaway': ll_loo_stepaway,
+            'll_loo': ll_loo,
+            'sigma': sigma
+            }
