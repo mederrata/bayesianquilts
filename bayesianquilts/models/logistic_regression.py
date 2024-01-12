@@ -26,6 +26,23 @@ from bayesianquilts.vi.advi import build_surrogate_posterior
 tfd = tfp.distributions
 
 
+def psis_smoothing(weights, threshold=0.7):
+    log_weights = tf.math.log(weights)
+    psis_weights = []
+
+    for log_weight in log_weights:
+        sorted_indices = tf.argsort(log_weight, axis=-1, direction="DESCENDING")
+        sorted_log_weight = tf.gather(log_weight, sorted_indices, axis=-1)
+        cumsum_log_weight = tf.cumsum(sorted_log_weight, axis=-1)
+        threshold_value = (1.0 - threshold) * tf.reduce_max(cumsum_log_weight, axis=-1, keepdims=True)
+        psis_weight = tf.exp(tf.math.minimum(sorted_log_weight - threshold_value, 0.0))
+        original_order_indices = tf.argsort(sorted_indices, axis=-1)
+        psis_weight = tf.gather(psis_weight, original_order_indices, axis=-1)
+        psis_weights.append(psis_weight)
+
+    return tf.stack(psis_weights)
+
+
 class LogisticRegression(BayesianModel):
     def __init__(
         self,
