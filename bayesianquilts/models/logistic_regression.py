@@ -297,5 +297,6 @@ class LogisticRegression(BayesianModel):
             'p_loo': p_loo,
             'p_loo_stepaway': p_loo_stepaway,
             'll_loo_stepaway': ll_loo_stepaway,
-            'll_loo': ll_loo
+            'll_loo': ll_loo,
+            'sigma': sigma
             }
