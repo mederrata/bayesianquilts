@@ -252,9 +252,8 @@ class LogisticRegression(BayesianModel):
 
         return tf.reduce_sum(log_likelihood, axis=-1) + prior
 
-    def adaptive_loo(self, data, params, h):
+    def adaptive_is_loo(self, data, params, h):
         """Compute step-away transformation for LOO
-        
         Keyword arguments:
         argument -- description
         Return: return_description
@@ -269,57 +268,110 @@ class LogisticRegression(BayesianModel):
         
         ell = (y*(sigma)+(1-y)*(1-sigma))
         nu_weights = 1/ell
-        nu_weights = nu_weights/tf.reduce_sum(nu_weights, keepdims=True)
+        nu_weights = nu_weights/tf.reduce_sum(nu_weights, axis=0, keepdims=True)
         p_loo = tf.reduce_sum(sigma*nu_weights, axis=0)
+        p_loo_sd = tf.math.reduce_std(sigma*nu_weights, axis=0)
         ll_loo = tf.reduce_sum(nu_weights*ell, axis=0)
-        
+        ll_loo_sd = tf.math.reduce_std(nu_weights*ell, axis=0)
         # Common
         
         log_ell_prime = tf.cast(y, tf.float64)*tf.cast(1-sigma, tf.float64)-tf.cast(1-y, tf.float64)*tf.cast(sigma, tf.float64)
         log_ell_doubleprime = -tf.cast(1-sigma, tf.float64)*tf.cast(sigma, tf.float64)
         
-        log_pi_beta = self.surrogate_distribution.model['beta__'].log_prob(params['beta__'])
-        log_pi_intercept= self.surrogate_distribution.model['intercept__'].log_prob(params['intercept__'])
+        log_pi_beta0 = self.surrogate_distribution.model['beta__'].log_prob( self.surrogate_distribution.model['beta__'].mean())
+        log_pi_beta = self.surrogate_distribution.model['beta__'].log_prob(params['beta__']) - log_pi_beta0
+        log_pi_intercept0 = self.surrogate_distribution.model['intercept__'].log_prob( self.surrogate_distribution.model['intercept__'].mean())
+        log_pi_intercept= self.surrogate_distribution.model['intercept__'].log_prob(params['intercept__']) - log_pi_intercept0
         log_pi = log_pi_beta + log_pi_intercept
         
+        # scaled (theta - bar(theta))/Sigma
+        delta_beta = params['beta__'] - self.surrogate_distribution.model['beta__'].mean()
+        delta_beta = delta_beta/self.surrogate_distribution.model['beta__'].variance()
+        delta_intercept = params['intercept__'] - self.surrogate_distribution.model['intercept__'].mean()
+        delta_intercept = delta_intercept/self.surrogate_distribution.model['intercept__'].variance()
+        
         # log-likelihood descent
-        beta_ll = params['beta__'] - h*log_ell_prime[..., tf.newaxis] * X
-        intercept_ll = params['intercept__'] - h*log_ell_prime[..., tf.newaxis]
         
-        mu_ll = tf.reduce_sum(beta_ll*data['X'], axis=-1) + intercept_ll[..., 0]
-        sigma_ll = tf.math.sigmoid(mu_ll)
+        def T_I(beta, intercept):
+            return beta, intercept
         
-        nu_ll = (y*(sigma_ll)+(1-y)*(1-sigma_ll))**-1
-        J_ll = 1 + h*(1 + tf.math.reduce_sum(X*X, -1))*sigma*(1-sigma)
-        log_beta_new = self.surrogate_distribution.model['beta__'].log_prob(beta_ll[..., tf.newaxis, :])
-        log_intercept_new = self.surrogate_distribution.model['intercept__'].log_prob(intercept_ll[..., tf.newaxis, :])
+        def J_I(sigma):
+            return 1.
 
-        eta = nu_ll*J_ll*tf.math.exp(log_beta_new + log_intercept_new - log_pi_beta[:, tf.newaxis] - log_pi_intercept[:, tf.newaxis])
-        eta_weights = eta/tf.reduce_sum(eta, axis=0, keepdims=True)
         
-        p_loo_stepaway = tf.reduce_sum(sigma_ll * eta_weights, axis=0)
+        def J_ll(sigma):
+            return 1 + h*(1 + tf.math.reduce_sum(X*X, -1))*sigma*(1-sigma)
+        
+        def T_ll(beta, intercept):
+            beta_ll = beta - h*log_ell_prime[..., tf.newaxis] * data['X']
+            intercept_ll = intercept - h*log_ell_prime[..., tf.newaxis]
+            return beta_ll, intercept_ll
 
-        ll_loo_stepaway = tf.reduce_sum(eta_weights/nu_ll, axis=0)        
+        def T_kl(beta, intercept):
+            beta_step = -tf.math.exp(log_pi)[..., tf.newaxis, tf.newaxis]*log_ell_prime[..., tf.newaxis] * data['X']/ell[..., tf.newaxis]
+            beta_kl = beta + h*beta_step
+            intercept_step = -tf.math.exp(log_pi)[..., tf.newaxis, tf.newaxis]*log_ell_prime[..., tf.newaxis]/ell[..., tf.newaxis]
+            intercept_kl = intercept + h*intercept_step
+            return beta_kl, intercept_kl
         
-        
-        # kl descent
-        beta_kl = params['beta__'] + h*tf.math.exp(log_pi)[..., tf.newaxis, tf.newaxis]*log_ell_prime[..., tf.newaxis] * X/ell[..., tf.newaxis]
-        intercept_kl = params['intercept__'] + h*tf.math.exp(log_pi)[..., tf.newaxis, tf.newaxis]*log_ell_prime[..., tf.newaxis]/ell[..., tf.newaxis]
-        mu_kl = tf.reduce_sum(beta_kl*data['X'], axis=-1) + intercept_kl[..., 0]
-        sigma_kl = tf.math.sigmoid(mu_kl)
-        
-        nu_kl = (y*(sigma_kl)+(1-y)*(1-sigma_kl))**-1
+        def J_kl(sigma):
+            dQ = tf.math.exp(log_pi)[..., tf.newaxis]/ell * (
+                (log_ell_prime**2 - log_ell_doubleprime)*(1 + tf.math.reduce_sum(X*X, -1)) + log_ell_prime*(delta_intercept[:, :, 0] + tf.reduce_sum(delta_beta*X, axis=-1, keepdims=False))
+                )
+            return 1 + h*dQ
+
         # variance descent -(log ell)'/l
-        beta_var = params['beta__'] - h
+        
+        def T_var(beta, intercept):
+            # S x N x P
+            intercept_step = tf.math.exp(log_pi[..., tf.newaxis, tf.newaxis])*(
+                (sigma/ell)**2*( 1 - sigma - log_ell_prime)
+            )[..., tf.newaxis]
+            beta_step = intercept_step * data['X']
 
+            return beta + h*beta_step, intercept + h*intercept_step
+        
+        def J_var(sigma):
+            dQ = 0
+            return 1 + h*dQ
+        
+        def IS(beta, intercept, Q, jacobian):
+            beta_new, intercept_new = Q(beta, intercept)
+            mu_new= tf.reduce_sum(beta_new*data['X'], axis=-1) + intercept_new[..., 0]
+            sigma_new = tf.math.sigmoid(mu_new)
+            
+            ell_new = (y*(sigma_new)+(1-y)*(1-sigma_new))
+            J = jacobian(sigma)
+            log_beta_new = self.surrogate_distribution.model['beta__'].log_prob(beta_new[..., tf.newaxis, :]) - log_pi_beta0
+            log_intercept_new = self.surrogate_distribution.model['intercept__'].log_prob(intercept_new[..., tf.newaxis, :]) - log_pi_intercept0
+
+            eta = J*tf.math.exp(log_beta_new + log_intercept_new - log_pi_beta[:, tf.newaxis] - log_pi_intercept[:, tf.newaxis])/ell_new
+            eta_weights = eta/tf.reduce_sum(eta, axis=0, keepdims=True)
+            p_loo_new = tf.reduce_sum(sigma_new * eta_weights, axis=0)
+            p_loo_sd = tf.math.reduce_std(sigma_new * eta_weights, axis=0)
+            ll_loo_new = tf.reduce_sum(eta_weights*ell_new, axis=0)
+            ll_loo_sd = tf.math.reduce_std(eta_weights*ell_new, axis=0)
+            return eta_weights, p_loo_new, p_loo_sd, ll_loo_new, ll_loo_sd
+        
+        eta_I, p_loo_I, p_loo_I_sd, ll_loo_I, ll_loo_I_sd = IS(params['beta__'], params['intercept__'], T_I, J_I)
+        
+        eta_ll, p_loo_ll, p_loo_ll_sd, ll_loo_ll, ll_loo_ll_sd = IS(params['beta__'], params['intercept__'], T_ll, J_ll)
+        # kl descent
+        eta_kl, p_loo_kl, p_loo_kl_sd, ll_loo_kl, ll_loo_kl_sd = IS(params['beta__'], params['intercept__'], T_kl, J_kl)
+        eta_var, p_loo_var, p_loo_var_sd, ll_loo_var, ll_loo_var_sd = IS(params['beta__'], params['intercept__'], T_var, J_var)
+
+        #print(np.mean(np.abs(p_loo_I-p_loo_ll)), np.mean(np.abs(p_loo_I-p_loo_kl)), np.mean(np.abs(p_loo_I-p_loo_var)))
+        #print(np.mean(np.abs(ll_loo_I-ll_loo_ll)), np.mean(np.abs(ll_loo_I-ll_loo_kl)), np.mean(np.abs(ll_loo_I-ll_loo_var)))
+        #print(np.mean(p_loo_I_sd), np.mean(p_loo_kl_sd), np.mean(p_loo_ll_sd), np.mean(p_loo_var_sd))
         return {
-            'eta_weights': eta_weights, 
+            'eta_weights': eta_ll, 
             'p': tf.reduce_mean(sigma, axis=0),
             'nu_weights': nu_weights,
             'p_loo': p_loo,
-            'p_loo_ll': p_loo_stepaway,
-            'll_loo_ll': ll_loo_stepaway,
+            'p_loo_ll': p_loo_ll,
+            'll_loo_ll': ll_loo_ll,
             'll_loo': ll_loo,
             'sigma': sigma,
 
             }
+        
