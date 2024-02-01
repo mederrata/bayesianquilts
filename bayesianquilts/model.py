@@ -356,21 +356,24 @@ class BayesianModel(ABC):
 
     def reconstitute(self, state):
         surrogate_params = {t.name: t for t in state["surrogate_vars"]}
-        try:
-            self.create_distributions(
-                max_order=state["max_order"], surrogate_params=surrogate_params
-            )
-            return
-        except TypeError:
-            self.create_distributions()
-        try:
-            for j, value in tqdm(enumerate(state["surrogate_vars"])):
-                self.surrogate_distribution.trainable_variables[j].assign(
-                    tf.cast(value, self.dtype)
+        if "max_order" in state.keys():
+            try:
+                self.create_distributions(
+                    max_order=state["max_order"], surrogate_params=surrogate_params
                 )
-        except KeyError:
-            self.state = state
-            print("Was unable to set vars, check self.saved_state")
+                return
+            except TypeError:
+                self.create_distributions()
+            try:
+                for j, value in tqdm(enumerate(state["surrogate_vars"])):
+                    self.surrogate_distribution.trainable_variables[j].assign(
+                        tf.cast(value, self.dtype)
+                    )
+            except KeyError:
+                self.state = state
+                print("Was unable to set vars, check self.saved_state")
+        else:
+            self.create_distributions()
 
     def sample(self, batch_shape=None, prior=False):
         if prior:
