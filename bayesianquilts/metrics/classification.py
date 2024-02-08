@@ -3,6 +3,7 @@ import tensorflow_probability as tfp
 import numpy as np
 import pandas as pd
 from sklearn import metrics as skmetrics
+from tqdm import tqdm
 
 
 def auroc(labels, probs):
@@ -87,7 +88,7 @@ def classification_metrics(
     probs = []
     metrics = {}
 
-    for batch in iter(data_factory()):
+    for batch in tqdm(iter(data_factory())):
         if preprocessing_fn is not None:
             batch = preprocessing_fn(batch)
 
