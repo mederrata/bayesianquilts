@@ -68,7 +68,11 @@ class BayesianModel(ABC):
 
     def fit(self, *args, **kwargs):
         return self._calibrate_minibatch_advi(*args, **kwargs)
-
+    
+    def set_data(self, data, data_transform_fn):
+        self.data = data
+        self.data_transform_fn = data_transform_fn
+        
     def preprocessor(self):
         return None
 

@@ -15,7 +15,6 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from bayesianquilts.model import BayesianModel
-from mederrata_spmf import PoissonFactorization
 from bayesianquilts.nn.dense import DenseHorseshoe, Dense
 
 tfd = tfp.distributions
