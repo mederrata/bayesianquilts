@@ -64,6 +64,7 @@ def build_trainable_concentration_scale_distribution(
     Returns:
       posterior_dist: A `tfd.Distribution` instance.
     """
+    """
     scope = (
         strategy.scope()
         if strategy is not None
@@ -71,33 +72,37 @@ def build_trainable_concentration_scale_distribution(
             name or "build_trainable_concentration_scale_distribution")
     )
     with scope:
-        dtype = dtype_util.common_dtype(
-            [initial_concentration, initial_scale], dtype_hint=tf.float64
-        )
-        initial_concentration = tf.cast(initial_concentration, dtype=dtype)
-        initial_scale = tf.cast(initial_scale, dtype=dtype)
+    """
+    scope = None
+    name = "" if None else name
+    
+    dtype = dtype_util.common_dtype(
+        [initial_concentration, initial_scale], dtype_hint=tf.float64
+    )
+    initial_concentration = tf.cast(initial_concentration, dtype=dtype)
+    initial_scale = tf.cast(initial_scale, dtype=dtype)
 
-        loc = TransformedVariable(
-            initial_concentration,
-            softplus_lib.Softplus(),
-            scope=scope,
-            name="concentration",
-        )
-        scale = TransformedVariable(
-            initial_scale, softplus_lib.Softplus(), scope=scope, name="scale"
-        )
-        posterior_dist = distribution_fn(
-            concentration=loc, scale=scale, validate_args=validate_args
-        )
+    loc = TransformedVariable(
+        initial_concentration,
+        softplus_lib.Softplus(),
+        scope=scope,
+        name=f"{name}__concentration",
+    )
+    scale = TransformedVariable(
+        initial_scale, softplus_lib.Softplus(), scope=scope, name=f"{name}__scale"
+    )
+    posterior_dist = distribution_fn(
+        concentration=loc, scale=scale, validate_args=validate_args
+    )
 
-        # Ensure the distribution has the desired number of event dimensions.
-        static_event_ndims = tf.get_static_value(event_ndims)
-        if static_event_ndims is None or static_event_ndims > 0:
-            posterior_dist = tfd.Independent(
-                posterior_dist,
-                reinterpreted_batch_ndims=event_ndims,
-                validate_args=validate_args,
-            )
+    # Ensure the distribution has the desired number of event dimensions.
+    static_event_ndims = tf.get_static_value(event_ndims)
+    if static_event_ndims is None or static_event_ndims > 0:
+        posterior_dist = tfd.Independent(
+            posterior_dist,
+            reinterpreted_batch_ndims=event_ndims,
+            validate_args=validate_args,
+        )
 
     return posterior_dist
 
@@ -132,6 +137,8 @@ def build_trainable_location_scale_distribution(
     Returns:
       posterior_dist: A `tfd.Distribution` instance.
     """
+    
+    """
     scope = (
         strategy.scope()
         if strategy is not None
@@ -139,28 +146,31 @@ def build_trainable_location_scale_distribution(
             name or "build_trainable_location_scale_distribution")
     )
     with scope:
-        dtype = dtype_util.common_dtype(
-            [initial_loc, initial_scale], dtype_hint=tf.float32
-        )
-        initial_loc = tf.convert_to_tensor(initial_loc, dtype=dtype)
-        initial_scale = tf.convert_to_tensor(initial_scale, dtype=dtype)
+    """
+    scope = None
+    name = "" if None else name
+    dtype = dtype_util.common_dtype(
+        [initial_loc, initial_scale], dtype_hint=tf.float32
+    )
+    initial_loc = tf.convert_to_tensor(initial_loc, dtype=dtype)
+    initial_scale = tf.convert_to_tensor(initial_scale, dtype=dtype)
 
-        loc = tf.Variable(initial_value=initial_loc, name="loc")
-        scale = TransformedVariable(
-            initial_scale, softplus_lib.Softplus(), scope=scope, name="scale"
-        )
-        posterior_dist = distribution_fn(
-            loc=loc, scale=scale, validate_args=validate_args
-        )
+    loc = tf.Variable(initial_value=initial_loc, name=f"{name}__loc")
+    scale = TransformedVariable(
+        initial_scale, softplus_lib.Softplus(), scope=scope, name=f"{name}__scale"
+    )
+    posterior_dist = distribution_fn(
+        loc=loc, scale=scale, validate_args=validate_args
+    )
 
-        # Ensure the distribution has the desired number of event dimensions.
-        static_event_ndims = tf.get_static_value(event_ndims)
-        if static_event_ndims is None or static_event_ndims > 0:
-            posterior_dist = tfd.Independent(
-                posterior_dist,
-                reinterpreted_batch_ndims=event_ndims,
-                validate_args=validate_args,
-            )
+    # Ensure the distribution has the desired number of event dimensions.
+    static_event_ndims = tf.get_static_value(event_ndims)
+    if static_event_ndims is None or static_event_ndims > 0:
+        posterior_dist = tfd.Independent(
+            posterior_dist,
+            reinterpreted_batch_ndims=event_ndims,
+            validate_args=validate_args,
+        )
 
     return posterior_dist
 
@@ -199,7 +209,7 @@ def build_surrogate_posterior(
     bijectors = defaultdict(tfb.Identity) if bijectors is None else bijectors
     for k, v in joint_distribution_named.model.items():
         if name is not None:
-            label = f"{name}/{k}"
+            label = f"{name}__{k}"
         else:
             label = k
         if k in exclude:
@@ -272,32 +282,39 @@ def build_trainable_concentration_distribution(
     Returns:
       posterior_dist: A `tfd.Distribution` instance.
     """
+    
+    """
     scope = (
         strategy.scope()
         if strategy is not None
         else tf.name_scope(name or "build_trainable_concentration_distribution")
     )
     with scope:
-        dtype = dtype_util.common_dtype(
-            [initial_concentration], dtype_hint=tf.float32)
+    """
+    
+    scope = None
+    name = "" if None else name
+    
+    dtype = dtype_util.common_dtype(
+        [initial_concentration], dtype_hint=tf.float32)
 
-        loc = TransformedVariable(
-            initial_concentration,
-            softplus_lib.Softplus(),
-            scope=scope,
-            name="concentration",
+    loc = TransformedVariable(
+        initial_concentration,
+        softplus_lib.Softplus(),
+        scope=scope,
+        name=f"{name}__concentration",
+    )
+
+    posterior_dist = distribution_fn(
+        concentration=loc, validate_args=validate_args)
+
+    # Ensure the distribution has the desired number of event dimensions.
+    static_event_ndims = tf.get_static_value(event_ndims)
+    if static_event_ndims is None or static_event_ndims > 0:
+        posterior_dist = tfd.Independent(
+            posterior_dist,
+            reinterpreted_batch_ndims=event_ndims,
+            validate_args=validate_args,
         )
-
-        posterior_dist = distribution_fn(
-            concentration=loc, validate_args=validate_args)
-
-        # Ensure the distribution has the desired number of event dimensions.
-        static_event_ndims = tf.get_static_value(event_ndims)
-        if static_event_ndims is None or static_event_ndims > 0:
-            posterior_dist = tfd.Independent(
-                posterior_dist,
-                reinterpreted_batch_ndims=event_ndims,
-                validate_args=validate_args,
-            )
 
     return posterior_dist

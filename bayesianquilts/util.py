@@ -74,7 +74,7 @@ def batched_minimize(
 
     decay_step = 0
 
-    opt = tf.optimizers.Adam(
+    opt = tf.keras.optimizers.Adam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step),
         clipvalue=clip_value,
         global_clipnorm=clip_norm,
@@ -83,6 +83,7 @@ def batched_minimize(
     # opt = tfa.optimizers.Lookahead(opt)
 
     watched_variables = trainable_variables
+    opt = opt.build(watched_variables)
 
     checkpoint = tf.train.Checkpoint(
         optimizer=opt, **{"var_" + str(j): v for j, v in enumerate(watched_variables)}
@@ -409,7 +410,7 @@ class TransformedVariable(tfp_util.TransformedVariable):
             pretransformed_input=variable,
             transform_fn=bijector,
             shape=initial_value.shape,
-            name=bijector.name,
+            name=f"{bijector.name}__{name}",
         )
         self._bijector = bijector
 
