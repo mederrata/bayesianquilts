@@ -83,7 +83,7 @@ def batched_minimize(
     # opt = tfa.optimizers.Lookahead(opt)
 
     watched_variables = trainable_variables
-    opt = opt.build(watched_variables)
+    # opt = opt.build(watched_variables)
 
     checkpoint = tf.train.Checkpoint(
         optimizer=opt, **{"var_" + str(j): v for j, v in enumerate(watched_variables)}
@@ -128,7 +128,7 @@ def batched_minimize(
         accumulate_grads = tf.function(accumulate_grads, autograph=False)
 
     def apply_grads(gradient_accumulation, trainable_variables):
-        return opt.apply_gradients(zip(gradient_accumulation, trainable_variables))
+        return opt.apply_gradients(zip(gradient_accumulation, trainable_variables)) #, skip_gradients_aggregation=True)
 
     with tf.name_scope(name) as name:
         converged = False
@@ -261,7 +261,7 @@ def batched_minimize(
                     if decay_step > max_decay_steps:
                         converged = True
                         continue
-                    print(f"New learning rate: {opt.lr.numpy()}", flush=True)
+                    print(f"New learning rate: {opt.learning_rate.numpy()}", flush=True)
                     continue
                 save_because_of_loss = losses[-1] < min_loss
                 save_this = (
@@ -304,7 +304,7 @@ def batched_minimize(
                         converged = True
                         continue
                     batches_since_plateau = 0
-                    print(f"New learning rate: {opt.lr}", flush=True)
+                    print(f"New learning rate: {opt.learning_rate}", flush=True)
 
                     if batches_since_checkpoint >= plateau_epochs_til_restore:
                         if batches_since_checkpoint >= max_plateau_epochs:
