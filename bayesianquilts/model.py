@@ -27,7 +27,7 @@ from bayesianquilts.tf.parameter import (
     Interactions,
     MultiwayContingencyTable,
 )
-from bayesianquilts.util import DummyObject, flatten, tf_data_cardinality
+from bayesianquilts.util import DummyObject, batched_minimize
 from bayesianquilts.vi.advi import build_surrogate_posterior
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
@@ -358,6 +358,27 @@ class BayesianModel(ABC):
         """Generic method for the unormalized log probability function"""
         return
 
+    def fit_projection(
+        self, other, batched_data_factory, num_steps, samples=32, **kwargs
+    ):
+        def objective(data):
+            this_prediction = self.predictive_distribution(
+                data, **self.sample(samples)
+            )["rv_outcome"]
+            other_prediction = other.predictive_distribution(
+                data, **other.sample(samples)
+            )["rv_outcome"]
+            delta = other_prediction.kl_divergence(this_prediction)
+            return tf.reduce_mean(delta)
+
+        return batched_minimize(
+            objective,
+            batched_data_factory=batched_data_factory,
+            num_steps=num_steps,
+            trainable_variables=self.surrogate_distribution.variables,
+            **kwargs,
+        )
+
     def reconstitute(self, state):
         surrogate_params = {t.name: t for t in state["surrogate_vars"]}
         if "max_order" in state.keys():
@@ -488,3 +509,4 @@ def generate_distributions(
             out["surrogate"].model = {}
 
     return out
+
