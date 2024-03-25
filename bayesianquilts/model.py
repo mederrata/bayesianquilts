@@ -399,15 +399,22 @@ class BayesianModel(ABC):
                 print("Was unable to set vars, check self.saved_state")
         else:
             self.create_distributions()
+            
+    def transform(self, params):
+        return params
 
     def sample(self, batch_shape=None, prior=False):
         if prior:
             if batch_shape is None:
-                return self.prior_distributions.sample()
-            return self.prior_distributions.sample(batch_shape)
-        if batch_shape is None:
+                params = self.prior_distribution.sample()
+            else:
+                params = self.prior_distribution.sample(batch_shape)
+        elif batch_shape is None:
             return self.surrogate_distribution.sample()
-        return self.surrogate_distribution.sample(batch_shape)
+        else:
+            params = self.surrogate_distribution.sample(batch_shape)
+        params = self.transform(params)
+        return params
 
     def to_arviz(self, data_factory=None):
         sample_stats = self.sample_stats(data_factory=data_factory)
