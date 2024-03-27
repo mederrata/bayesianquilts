@@ -107,7 +107,9 @@ def batched_minimize(
             loss = loss_fn(data=data)
         # watched_variables = tape.watched_variables()
         grads = tape.gradient(loss, trainable_variables)
+        
         flat_grads = tf.nest.flatten(grads)
+        flat_grads = [g if not (g is None) else tf.zeros_like(t) for g, t in zip(flat_grads, trainable_variables)]
         flat_grads = [
             tf.cond(tf.math.is_finite(loss), lambda: t, lambda: tf.zeros_like(t))
             for t in flat_grads
