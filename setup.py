@@ -41,9 +41,8 @@ setuptools.setup(
         'pandas',
         # We need to check for direct depends or we can delete scipy.
         'scipy',
-        'scikit_learn==1.3.2',
-        'tensorflow==2.15.0',
-        'tensorflow-probability==0.23.0',
+        'scikit_learn',
+        'tfp-nightly[tf]',
         'jax',
         'natsort',
         'tqdm',

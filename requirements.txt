@@ -1,0 +1,12 @@
+dill
+matplotlib
+arviz
+numpy
+pandas
+scipy
+scikit_learn
+tfp-nightly[tf]
+jax
+natsort
+tqdm
+
