@@ -22,6 +22,7 @@ from tensorflow.raw_ops import UniqueV2 as unique
 
 from tensorflow_probability import distributions as tfd
 from tensorflow_probability import bijectors as tfb
+from keras.src.optimizers.schedules import learning_rate_schedule
 
 
 def flatten(lst):
@@ -39,6 +40,22 @@ def _trace_loss(loss, grads, variables):
 build_trainable_InverseGamma_dist = None
 build_trainable_normal_dist = None
 
+
+class PatchedAdam(tf.keras.optimizers.Adam):
+    def _get_current_learning_rate(self):
+        if isinstance(
+            self._learning_rate, learning_rate_schedule.LearningRateSchedule
+        ):
+            try:
+                return self._learning_rate(self.iterations)
+            except TypeError:
+                return self._learning_rate()
+        elif callable(self._learning_rate):
+            try:
+                return self._learning_rate(self.iterations)
+            except TypeError:
+                return self._learning_rate()
+        return self._learning_rate
 
 def batched_minimize(
     loss_fn,
@@ -74,7 +91,7 @@ def batched_minimize(
 
     decay_step = 0
 
-    opt = tf.keras.optimizers.Adam(
+    opt = PatchedAdam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step),
         clipvalue=clip_value,
         global_clipnorm=clip_norm,
