@@ -99,7 +99,7 @@ def classification_metrics(
 
     probs = np.concatenate(probs, axis=0)
     for k in collected_data.keys():
-        collected_data[k] = np.squeeze(np.concatenate(collected_data[k], axis=0))
+        collected_data[k] = np.squeeze(np.concatenate([np.array(x).flatten() for x in collected_data[k]], axis=0))
 
     computed = pd.DataFrame({"probs": probs, **collected_data})
     if save_file:

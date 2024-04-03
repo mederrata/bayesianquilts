@@ -74,10 +74,12 @@ class LogisticRegression2(BayesianModel):
             reinterpreted_batch_ndims=1,
         )
         joint_prior_dict["tau"] = tfd.Independent(
-            tfd.StudentT(
-                self.nu_global * tf.ones((1), dtype=self.dtype),
-                tf.zeros((1), dtype=self.dtype),
-                self.scale_global * tf.ones((1), dtype=self.dtype),
+            tfb.AbsoluteValue()(
+                tfd.StudentT(
+                    self.nu_global * tf.ones((1), dtype=self.dtype),
+                    tf.zeros((1), dtype=self.dtype),
+                    self.scale_global * tf.ones((1), dtype=self.dtype),
+                )
             ),
             reinterpreted_batch_ndims=1,
         )
@@ -91,15 +93,17 @@ class LogisticRegression2(BayesianModel):
         joint_prior_dict["beta0"] = tfd.Independent(
             tfd.Normal(
                 tf.zeros((1), dtype=self.dtype),
-                self.scale_icept * tf.zeros((1), dtype=self.dtype),
+                self.scale_icept * tf.ones((1), dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=1,
         )
         bijectors = defaultdict(lambda: tfb.Identity())
-        bijectors['caux'] = tfb.Softplus()
-        bijectors['tau'] = tfb.Softplus()
+        bijectors["caux"] = tfb.Softplus()
+        bijectors["tau"] = tfb.Softplus()
         self.prior_distribution = tfd.JointDistributionNamed(joint_prior_dict)
-        self.surrogate_distribution = build_surrogate_posterior(self.prior_distribution, bijectors=bijectors)
+        self.surrogate_distribution = build_surrogate_posterior(
+            self.prior_distribution, bijectors=bijectors
+        )
         self.surrogate_vars = self.surrogate_distribution.variables
         self.var_list = list(self.surrogate_distribution.model.keys())
         return None
@@ -119,7 +123,7 @@ class LogisticRegression2(BayesianModel):
             processed["X"],
             self.dtype,
         )
-        mu = beta[..., tf.newaxis] * tf.transpose(X)
+        mu = beta[..., tf.newaxis, :] * X
         mu = tf.reduce_sum(mu, -1) + params["beta0"]
 
         # assemble outcome random vars
@@ -183,16 +187,24 @@ class LogisticRegression2(BayesianModel):
         """
 
         # scaled (theta - bar(theta))/Sigma
-        beta = params["beta__"]
-        intercept = params["intercept__"]
+        c = self.slab_scale * tf.math.sqrt(params["caux"])
+        lambda_tilde = tf.math.sqrt(
+            c**2
+            * params["lambda"] ** 2
+            / (c**2 + params["tau"] ** 2 * params["lambda"] ** 2)
+        )
+        beta = params["z"] * lambda_tilde * params["tau"]
+        intercept = params["beta0"]
         X = tf.cast(data["X"], self.dtype)
-        y = tf.squeeze(tf.cast(data["y"], self.dtype))
-        mu = tf.reduce_sum(beta * X, axis=-1) + intercept[..., 0]
+        y = tf.cast(data["y"], self.dtype)[:, 0]
+        mu = beta[..., tf.newaxis, :] * X
+        mu = tf.reduce_sum(mu, -1) + params["beta0"]
         sigma = tf.math.sigmoid(mu)
         ell = y * (sigma) + (1 - y) * (1 - sigma)
         log_ell = tf.math.xlogy(y, sigma) + tf.math.xlogy(1 - y, 1 - sigma)
         log_ell_prime = y * (1 - sigma) - (1 - y) * sigma
         log_ell_doubleprime = -sigma * (1 - sigma)
+        _, khat0 = nppsis.psislw(-log_ell)
 
         """
         sigma.shape is samples x datapoints
@@ -203,10 +215,7 @@ class LogisticRegression2(BayesianModel):
             # \nabla\log\pi = -\Sigma^{-1}(theta - \bar{\theta})
             grad_log_pi = tf.concat(
                 [
-                    -(
-                        intercept
-                        - self.surrogate_distribution.model["intercept__"].mean()
-                    )
+                    -(intercept - self.surrogate_distribution.model["intercept__"].mean())
                     / self.surrogate_distribution.model["intercept__"].variance(),
                     -(beta - self.surrogate_distribution.model["beta__"].mean())
                     / self.surrogate_distribution.model["beta__"].variance(),
@@ -224,6 +233,7 @@ class LogisticRegression2(BayesianModel):
                 params["intercept__"]
             )
             log_pi -= tf.reduce_max(log_pi, axis=0)
+            # log_pi.shape: [samples]
         else:
             """
             Recall Bayes rule:
@@ -233,44 +243,27 @@ class LogisticRegression2(BayesianModel):
             \nabla\log\pi(\btheta|\calD) = \sum_i (ell_i)'x + grad\log\pi(\btheta)
 
             """
+            log_prior = self.prior_distribution.log_prob_parts(params)
+            log_prior = log_prior["z"] + log_prior["beta0"]
+
             log_pi = tf.reduce_sum(log_ell, axis=1, keepdims=True)[:, 0]
-            log_pi += self.prior_distribution.log_prob(
-                {
-                    "regression_model": {
-                        k: tf.cast(params[k], self.dtype)
-                        for k in self.regression_var_list
-                    },
-                    "intercept_model": {
-                        k: tf.cast(params[k], self.dtype)
-                        for k in self.intercept_var_list
-                    },
-                }
-            )
 
             # pi \propto
-            # log_pi.shape: [samples]
-
-            # log_ell.shape  [samples, data]
-            # X.shape [data, features]
-            log_ell_tot = tf.reduce_sum(log_ell[..., tf.newaxis], axis=1, keepdims=True)
             grad_log_pi = tf.concat(
                 [
-                    log_ell_tot,
-                    tf.reduce_sum(log_ell[..., tf.newaxis] * X, axis=1, keepdims=True),
+                    tf.reduce_sum(log_ell_prime[..., tf.newaxis], axis=1, keepdims=True),
+                    tf.reduce_sum(
+                        log_ell_prime[..., tf.newaxis] * X, axis=1, keepdims=True
+                    ),
                 ],
                 axis=-1,
             )
-            # TODO NEED PRIOR TERM
 
-            # grad_log_pi.shape [samples, 1, parameters]
-
-            prior_intercept_sd = (
-                self.prior_distribution.model["intercept_model"]
-                .model["intercept__"]
-                .variance()
-                ** 0.5
+            grad_log_prior = -0.5 * tf.concat(
+                [(params["beta0"] / self.scale_icept) ** 2, (params["z"]) ** 2],
+                axis=-1,
             )
-            prior_beta_sd = params["global_scale"]
+            grad_log_pi += grad_log_prior[:, tf.newaxis, :]
 
             intercept_sd = tf.math.reduce_std(intercept, 0, keepdims=True)
             beta_sd = tf.math.reduce_std(beta, 0, keepdims=True)
@@ -293,29 +286,22 @@ class LogisticRegression2(BayesianModel):
             logJ = tf.math.log1p(
                 tf.math.abs(
                     h
-                    * (1 + tf.math.reduce_sum(X**2, -1, keepdims=True))[
-                        tf.newaxis, :, :
-                    ]
+                    * (1 + tf.math.reduce_sum(X**2, -1, keepdims=True))[tf.newaxis, :, :]
                     * (sigma * (1 - sigma))[..., tf.newaxis]
                 )[..., 0]
             )
-            beta_ll = beta + h * Q_beta
-            intercept_ll = intercept + h * Q_intercept
+            beta_ll = beta[..., tf.newaxis, :] + h * Q_beta
+            intercept_ll = intercept[..., tf.newaxis, :] + h * Q_intercept
             return beta_ll, intercept_ll, logJ
 
         def T_kl():
-            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0)
-
-            Q_beta = (
-                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * (1 - 2 * y))
-            )[..., tf.newaxis] * data["X"]
+            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0, keepdims=True)
+            Q_beta = ((-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * (1 - 2 * y)))[
+                ..., tf.newaxis
+            ] * X
             Q_intercept = (
-                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * (1 - 2 * y))
+                ((-1) ** y) * tf.math.exp(log_pi_[..., tf.newaxis] + mu * (1 - 2 * y))
             )[..., tf.newaxis]
-
-            # log_pi.shape: [samples]
-            # mu.shape: [samples, data]
-            # y.shape [data]
 
             dQ = (-1) ** y[tf.newaxis, :] * tf.math.exp(
                 log_pi_[..., tf.newaxis] + mu * (1 - 2 * y[tf.newaxis, :])
@@ -327,7 +313,7 @@ class LogisticRegression2(BayesianModel):
                     X
                     * (
                         grad_log_pi[..., 1:]
-                        + ((1 - 2 * y)[:, tf.newaxis] * X)[tf.newaxis, :, :]
+                        + (1 - 2 * y)[:, tf.newaxis] * X[tf.newaxis, ...]
                     ),
                     axis=-1,
                 )
@@ -343,8 +329,8 @@ class LogisticRegression2(BayesianModel):
 
             h = hbar / standardized
 
-            intercept_kl = intercept + h * Q_intercept
-            beta_kl = beta + h * Q_beta
+            intercept_kl = intercept[..., tf.newaxis] + h * Q_intercept
+            beta_kl = beta[..., tf.newaxis, :] + h * Q_beta
 
             logJ = tf.math.log1p(tf.math.abs(h[..., 0] * dQ))
             return beta_kl, intercept_kl, logJ
@@ -354,38 +340,33 @@ class LogisticRegression2(BayesianModel):
         def T_I():
             Q = tf.zeros_like(log_ell)
             return (
-                beta + Q[..., tf.newaxis],
-                intercept + Q[..., tf.newaxis],
+                beta[:, tf.newaxis, :] + Q[..., tf.newaxis],
+                intercept[..., tf.newaxis] + Q[..., tf.newaxis],
                 tf.zeros_like(Q),
             )
 
         def T_var():
-            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0)
+            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0, keepdims=True)
 
             Q_beta = (
-                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * 2 * (1 - 2 * y))
-            )[..., tf.newaxis] * data["X"]
+                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + 2 * mu * (1 - 2 * y))
+            )[..., tf.newaxis] * X
             Q_intercept = (
-                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * 2 * (1 - 2 * y))
+                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + 2 * mu * (1 - 2 * y))
             )[..., tf.newaxis]
 
-            # log_pi.shape: [samples]
-            # mu.shape: [samples, data]
-            # y.shape [data]
-
-            dQ = (-1) ** y[tf.newaxis, :] * tf.math.exp(
-                log_pi_[..., tf.newaxis] + mu * 2 * (1 - 2 * y[tf.newaxis, :])
-            )
-            dQ *= (
-                grad_log_pi[..., 0]
-                + 2 * (1 - 2 * y)[tf.newaxis, :]
-                + tf.reduce_sum(
-                    X
-                    * (
-                        grad_log_pi[..., 1:]
-                        + (2 * (1 - 2 * y)[:, tf.newaxis] * X)[tf.newaxis, :, :]
-                    ),
-                    axis=-1,
+            dQ = (
+                (-1) ** y[tf.newaxis, :]
+                * tf.math.exp(
+                    log_pi_[..., tf.newaxis] + 2 * mu * (1 - 2 * y[tf.newaxis, :])
+                )
+                * (
+                    grad_log_pi[..., 0]
+                    + (1 - 2 * y)[tf.newaxis, :]
+                    + tf.reduce_sum(
+                        X * (grad_log_pi[..., 1:] + 2 * (1 - 2 * y)[:, tf.newaxis] * X),
+                        axis=-1,
+                    )
                 )
             )
 
@@ -399,8 +380,8 @@ class LogisticRegression2(BayesianModel):
 
             h = hbar / standardized
 
-            intercept_kl = intercept + h * Q_intercept
-            beta_kl = beta + h * Q_beta
+            intercept_kl = intercept[..., tf.newaxis, :] + h * Q_intercept
+            beta_kl = beta[..., tf.newaxis, :] + h * Q_beta
 
             logJ = tf.math.log1p(tf.math.abs(h[..., 0] * dQ))
             return beta_kl, intercept_kl, logJ
@@ -410,18 +391,18 @@ class LogisticRegression2(BayesianModel):
             mu_new = tf.reduce_sum(beta_new * X, axis=-1) + intercept_new[..., 0]
             sigma_new = tf.math.sigmoid(mu_new)
             ell_new = y * (sigma_new) + (1 - y) * (1 - sigma_new)
-            log_ell_new = tf.math.xlogy(y, sigma_new) + tf.math.xlogy(
-                1 - y, 1 - sigma_new
+            log_ell_new = tf.math.xlogy(y, sigma_new) + tf.math.xlogy(1 - y, 1 - sigma_new)
+            c = self.slab_scale * tf.math.sqrt(params["caux"])
+            lambda_tilde = tf.math.sqrt(
+                c**2
+                * params["lambda"] ** 2
+                / (c**2 + params["tau"] ** 2 * params["lambda"] ** 2)
             )
             transformed = params.copy()
-            transformed["beta__"] = beta_new[..., tf.newaxis, :]
-            transformed["intercept__"] = intercept_new[..., tf.newaxis, :]
-            transformed["global_scale"] = transformed["global_scale"][
-                ..., tf.newaxis, :
-            ]
-            transformed["global_scale_aux"] = transformed["global_scale_aux"][
-                ..., tf.newaxis, :
-            ]
+            transformed["z"] = beta_new / (
+                lambda_tilde[:, tf.newaxis, :] * params["tau"][..., tf.newaxis]
+            )
+            transformed["beta0"] = intercept_new
 
             if variational:
                 # We trust the variational approximation, so \hat{pi} = pi
@@ -439,38 +420,26 @@ class LogisticRegression2(BayesianModel):
                 # Need to compute log_pi directly by summing over the likelihood
 
                 ell_cross = tf.math.sigmoid(
-                    tf.reduce_sum(beta_new[..., tf.newaxis, :] * data["X"], -1)
-                    + intercept_new
+                    tf.reduce_sum(beta_new[..., tf.newaxis, :] * X, -1) + intercept_new
                 )
                 ell_cross = tf.math.xlogy(y, ell_cross) + tf.math.xlogy(
                     1 - y, 1 - ell_cross
                 )
                 ell_cross = tf.math.reduce_sum(ell_cross, axis=-1)
 
-                log_pi_new = self.prior_distribution.log_prob(
-                    {
-                        "regression_model": {
-                            k: tf.cast(transformed[k], self.dtype)
-                            for k in self.regression_var_list
-                        },
-                        "intercept_model": {
-                            k: tf.cast(transformed[k], self.dtype)
-                            for k in self.intercept_var_list
-                        },
-                    }
-                )
-                log_pi_new += ell_cross
+                log_prior_new = self.prior_distribution.log_prob_parts(transformed)
+                log_prior_new = log_prior_new["z"] + log_prior_new["beta0"]
+                log_pi_new = ell_cross
+                delta_log_prior = log_prior_new - log_prior[:, tf.newaxis]
                 # Incorporate the prior
-                delta_log_pi = log_pi_new - log_pi[:, tf.newaxis]
-
+                delta_log_pi = log_pi_new - log_pi[:, tf.newaxis] + delta_log_prior
             log_eta_weights = delta_log_pi - log_ell_new + logJ
-            log_eta_weights -= tf.reduce_max(log_eta_weights, axis=0, keepdims=True)
+            log_eta_weights = log_eta_weights - tf.reduce_max(log_eta_weights, axis=0)
             psis_weights, khat = nppsis.psislw(log_eta_weights)
+            _, khat_test = nppsis.psislw(-log_ell_new - tf.reduce_max(-log_ell_new, axis=0))
 
             eta_weights = tf.math.exp(log_eta_weights)
-            eta_weights = eta_weights / tf.reduce_sum(
-                eta_weights, axis=0, keepdims=True
-            )
+            eta_weights = eta_weights / tf.reduce_sum(eta_weights, axis=0, keepdims=True)
 
             psis_weights = tf.math.exp(psis_weights)
             psis_weights = psis_weights / tf.math.reduce_sum(
@@ -511,6 +480,7 @@ class LogisticRegression2(BayesianModel):
             p_psis_I,
             ll_psis_I,
         ) = IS(T_I)
+
         (
             eta_kl,
             eta_kl_psis,
@@ -525,19 +495,6 @@ class LogisticRegression2(BayesianModel):
         ) = IS(T_kl)
 
         (
-            eta_ll,
-            eta_ll_psis,
-            p_loo_ll,
-            p_loo_ll_sd,
-            ll_loo_ll,
-            ll_loo_ll_sd,
-            S_ll,
-            k_ll,
-            p_psis_ll,
-            ll_psis_ll,
-        ) = IS(T_ll)
-
-        (
             eta_var,
             eta_var_psis,
             p_loo_var,
@@ -549,7 +506,18 @@ class LogisticRegression2(BayesianModel):
             p_psis_var,
             ll_psis_var,
         ) = IS(T_var)
-
+        (
+            eta_ll,
+            eta_ll_psis,
+            p_loo_ll,
+            p_loo_ll_sd,
+            ll_loo_ll,
+            ll_loo_ll_sd,
+            S_ll,
+            k_ll,
+            p_psis_ll,
+            ll_psis_ll,
+        ) = IS(T_ll)
         # kl descent
 
         return {
@@ -594,3 +562,5 @@ class LogisticRegression2(BayesianModel):
                 "ll_psis": ll_psis_var,
             },
         }
+
+
