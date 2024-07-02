@@ -14,7 +14,7 @@ from bayesianquilts.vi.advi import (build_surrogate_posterior,
                                     build_trainable_InverseGamma_dist,
                                     build_trainable_normal_dist)
 
-tfd = tfp.distributions
+from tensorflow_probability.python import distributions as tfd
 
 
 class Dense(object):
@@ -324,7 +324,12 @@ class DenseHorseshoe(BayesianModel):
         pass
 
 
-def main():
+def demo():
+    nn = Dense(input_size=5, layer_sizes=[10, 5, 1])
+    n = 30
+    p = 5
+    X = np.random.rand(n, p)
+    x = nn.eval(X)
     class AutoEncoder(DenseHorseshoe):
         def log_likelihood(self, data, **params):
             return super().log_likelihood(data, **params)
@@ -346,4 +351,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    demo()
