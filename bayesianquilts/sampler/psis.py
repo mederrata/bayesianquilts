@@ -16,10 +16,11 @@ def sumlogs(x, axis=None):
     out += tf.squeeze(maxx)
     return out
 
+
 def gpinv(p, k, sigma):
     """Inverse Generalized Pareto distribution function."""
-    x = tf.fill(tf.shape(p), tf.constant(float('nan')))
-    
+    x = tf.fill(tf.shape(p), tf.constant(float("nan")))
+
     if sigma <= 0:
         return x
 
@@ -41,13 +42,24 @@ def gpinv(p, k, sigma):
             temp = tf.math.expm1(temp) / k
             x = tf.tensor_scatter_nd_update(x, tf.where(ok)[:, tf.newaxis], temp)
         x *= sigma
-        x = tf.tensor_scatter_nd_update(x, tf.where(tf.equal(p, 0))[:, tf.newaxis], tf.zeros_like(tf.where(tf.equal(p, 0))))
+        x = tf.tensor_scatter_nd_update(
+            x,
+            tf.where(tf.equal(p, 0))[:, tf.newaxis],
+            tf.zeros_like(tf.where(tf.equal(p, 0))),
+        )
         if k >= 0:
-            x = tf.tensor_scatter_nd_update(x, tf.where(tf.equal(p, 1))[:, tf.newaxis], tf.fill(tf.shape(tf.where(tf.equal(p, 1))), tf.constant(float('inf'))))
+            x = tf.tensor_scatter_nd_update(
+                x,
+                tf.where(tf.equal(p, 1))[:, tf.newaxis],
+                tf.fill(tf.shape(tf.where(tf.equal(p, 1))), tf.constant(float("inf"))),
+            )
         else:
-            x = tf.tensor_scatter_nd_update(x, tf.where(tf.equal(p, 1))[:, tf.newaxis], -sigma / k)
+            x = tf.tensor_scatter_nd_update(
+                x, tf.where(tf.equal(p, 1))[:, tf.newaxis], -sigma / k
+            )
 
     return x
+
 
 def psisloo(log_lik, **kwargs):
     r"""PSIS leave-one-out log predictive densities.
@@ -81,7 +93,7 @@ def psisloo(log_lik, **kwargs):
 
     """
     # Ensure overwrite flag is passed in the arguments
-    kwargs['overwrite_lw'] = True
+    kwargs["overwrite_lw"] = True
     # Log raw weights from log_lik
     lw = -log_lik
     # Compute Pareto smoothed log weights given raw log weights
@@ -91,6 +103,7 @@ def psisloo(log_lik, **kwargs):
     loos = sumlogs(lw, axis=0)
     loo = tf.reduce_sum(loos)
     return loo, loos, ks
+
 
 def psislw(lw, Reff=1.0, overwrite_lw=False):
     """Pareto smoothed importance sampling (PSIS).
@@ -124,11 +137,15 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
         m = 1
     else:
         raise ValueError("Argument `lw` must be 1 or 2 dimensional.")
-    
+
     if n <= 1:
         raise ValueError("More than one log-weight needed.")
 
-    if overwrite_lw and tf.compat.dimension_value(lw.shape[-1]) == m and lw.dtype.is_floating:
+    if (
+        overwrite_lw
+        and tf.compat.dimension_value(lw.shape[-1]) == m
+        and lw.dtype.is_floating
+    ):
         # in-place operation
         lw_out = lw
     else:
@@ -139,10 +156,20 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
     kss = tf.TensorArray(dtype=tf.float64, size=m)
 
     # precalculate constants
-    cutoff_ind = -tf.cast(tf.math.ceil(tf.math.minimum(0.2 * tf.cast(n, tf.float32), 3 * tf.math.sqrt(n / Reff))), tf.int32) - 1
+    cutoff_ind = (
+        -tf.cast(
+            tf.math.ceil(
+                tf.math.minimum(
+                    0.2 * tf.cast(n, tf.float32), 3 * tf.math.sqrt(n / Reff)
+                )
+            ),
+            tf.int32,
+        )
+        - 1
+    )
     cutoffmin = tf.cast(-38, tf.float64)
     logn = tf.math.log(tf.cast(n, tf.float64))
-    k_min = 1/3
+    k_min = 1 / 3
 
     # loop over sets of log weights
     for i in range(m):
@@ -177,7 +204,9 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
             qq = tf.math.log(qq)
 
             # place the smoothed tail into the output tensor
-            x = tf.tensor_scatter_nd_update(x, tf.expand_dims(tailinds[x2si], axis=1), tf.expand_dims(qq, axis=1))
+            x = tf.tensor_scatter_nd_update(
+                x, tf.expand_dims(tailinds[x2si], axis=1), tf.expand_dims(qq, axis=1)
+            )
 
             # truncate smoothed values to the largest raw weight 0
             x = tf.where(x > 0, 0.0, x)
@@ -263,10 +292,10 @@ def gpdfitnew(x, sort=True, sort_in_place=False, return_quadrature=False):
     bs /= tf.sqrt(bs)
     bs = 1 - bs
     if xsorted:
-        bs /= PRIOR * x[tf.cast(n/4 + 0.5, dtype=tf.int32) - 1]
+        bs /= PRIOR * x[tf.cast(n / 4 + 0.5, dtype=tf.int32) - 1]
         bs += 1 / x[-1]
     else:
-        bs /= PRIOR * x[sort[tf.cast(n/4 + 0.5, dtype=tf.int32) - 1]]
+        bs /= PRIOR * x[sort[tf.cast(n / 4 + 0.5, dtype=tf.int32) - 1]]
         bs += 1 / x[sort[-1]]
 
     ks = -bs
@@ -310,7 +339,9 @@ def gpdfitnew(x, sort=True, sort_in_place=False, return_quadrature=False):
     sigma = -k / b * tf.cast(n, dtype=tf.float64) / (tf.cast(n, dtype=tf.float64) - 0)
     # weakly informative prior for k
     a = 10.0
-    k = k * tf.cast(n, dtype=tf.float64) / (tf.cast(n, dtype=tf.float64) + a) + a * 0.5 / (tf.cast(n, dtype=tf.float64) + a)
+    k = k * tf.cast(n, dtype=tf.float64) / (
+        tf.cast(n, dtype=tf.float64) + a
+    ) + a * 0.5 / (tf.cast(n, dtype=tf.float64) + a)
     if return_quadrature:
         ks *= tf.cast(n, dtype=tf.float64) / (tf.cast(n, dtype=tf.float64) + a)
         ks += a * 0.5 / (tf.cast(n, dtype=tf.float64) + a)
@@ -319,3 +350,11 @@ def gpdfitnew(x, sort=True, sort_in_place=False, return_quadrature=False):
         return k, sigma, ks, w
     else:
         return k, sigma
+
+
+def demo():
+    pass
+
+
+if __name__ == "__main__":
+    demo()

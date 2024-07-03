@@ -25,7 +25,7 @@ from tensorflow_probability.python import distributions as tfd
 from bayesianquilts.nn.dense import Dense
 
 
-class UnivariateNN(Dense):
+class UnivariateDense(Dense):
     """Univariate neural network, taking R^n to R^n with no variable mixing
 
     Args:
@@ -34,7 +34,7 @@ class UnivariateNN(Dense):
 
     def __init__(self, **kwargs):
         """Iniitialize univariate neural network"""
-        super(UnivariateNN, self).__init__(**kwargs)
+        super(UnivariateDense, self).__init__(**kwargs)
 
     def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
         """
@@ -97,7 +97,7 @@ def demo():
     n = 30
     p = 3
     X = np.random.rand(n, p)
-    nn = UnivariateNN(input_size=p, layer_sizes=[10, 5, 7])
+    nn = UnivariateDense(input_size=p, layer_sizes=[10, 5, 7])
 
     x = nn.eval(X)
     return
