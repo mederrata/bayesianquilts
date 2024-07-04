@@ -1,18 +1,26 @@
 import inspect
 from abc import abstractmethod
+from typing import Callable, Any
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
 from bayesianquilts.distributions import SqrtInverseGamma
-from bayesianquilts.metastrings import (cauchy_code, horseshoe_code,
-                                        horseshoe_lambda_code, igamma_code,
-                                        sq_igamma_code, weight_code)
+from bayesianquilts.metastrings import (
+    cauchy_code,
+    horseshoe_code,
+    horseshoe_lambda_code,
+    igamma_code,
+    sq_igamma_code,
+    weight_code,
+)
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.vi.advi import (build_surrogate_posterior,
-                                    build_trainable_InverseGamma_dist,
-                                    build_trainable_normal_dist)
+from bayesianquilts.vi.advi import (
+    build_surrogate_posterior,
+    build_trainable_InverseGamma_dist,
+    build_trainable_normal_dist,
+)
 
 from tensorflow_probability.python import distributions as tfd
 
@@ -24,13 +32,13 @@ class Dense(object):
 
     def __init__(
         self,
-        input_size=None,
-        layer_sizes=None,
-        weight_scale=1.0,
-        bias_scale=1.0,
-        activation_fn=None,
-        dtype=tf.float32,
-    ):
+        input_size: int = None,
+        layer_sizes: list[int] = None,
+        weight_scale: float = 1.0,
+        bias_scale: float = 1.0,
+        activation_fn: Callable[[tf.Tensor], tf.Tensor] = None,
+        dtype: tf.DType = tf.float32,
+    ) -> None:
 
         self.dtype = dtype
         self.weight_scale = weight_scale
@@ -38,27 +46,38 @@ class Dense(object):
         self.activation_fn = tf.nn.relu if (activation_fn is None) else activation_fn
         self.weight_tensors = self.sample_initial_nn_params(input_size, layer_sizes)
 
-    def dense(self, X, W, b, activation):
+    def dense(
+        self,
+        X: tf.Tensor,
+        W: tf.Tensor,
+        b: tf.Tensor,
+        activation: Callable[[tf.Tensor], tf.Tensor],
+    ) -> tf.Tensor:
         return activation(
             tf.matmul(tf.cast(X, self.dtype), tf.cast(W, self.dtype))
             + tf.cast(b[..., tf.newaxis, :], self.dtype)
         )
 
-    def set_weights(self, weight_tensors):
+    def set_weights(self, weight_tensors: list[tf.Tensor]) -> None:
         self.weight_tensors = weight_tensors
 
-    def eval(self, input, weight_tensors=None, activation=None):
+    def eval(
+        self,
+        tensor: tf.Tensor,
+        weight_tensors=None,
+        activation: Callable[[tf.Tensor], tf.Tensor] = None,
+    ) -> tf.Tensor:
         activation = self.activation_fn if (activation is None) else activation
         weight_tensors = (
             weight_tensors if weight_tensors is not None else self.weight_tensors
         )
 
-        net = input
+        net = tensor
         net = tf.cast(net, self.dtype)
         weights_list = weight_tensors[::2]
         biases_list = weight_tensors[1::2]
 
-        for (weights, biases) in zip(weights_list[:-1], biases_list[:-1]):
+        for weights, biases in zip(weights_list[:-1], biases_list[:-1]):
             net = self.dense(
                 net, self.weight_scale * weights, self.bias_scale * biases, activation
             )
@@ -70,7 +89,9 @@ class Dense(object):
         )
         return net
 
-    def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
+    def sample_initial_nn_params(
+        self, input_size, layer_sizes, priors=None
+    ) -> list[tf.Tensor]:
         """
         Priors should be either none or a list of tuples:
         [(weight prior, bias prior) for layer in layer_sizes]
@@ -93,11 +114,11 @@ class Dense(object):
 
         return architecture
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__ = state.copy()
         self.saved_state = state
 
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         keys = self.__dict__.keys()
         for k in keys:
@@ -330,6 +351,7 @@ def demo():
     p = 5
     X = np.random.rand(n, p)
     x = nn.eval(X)
+
     class AutoEncoder(DenseHorseshoe):
         def log_likelihood(self, data, **params):
             return super().log_likelihood(data, **params)
