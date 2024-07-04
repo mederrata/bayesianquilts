@@ -90,7 +90,10 @@ class Dense(object):
         return net
 
     def sample_initial_nn_params(
-        self, input_size, layer_sizes, priors=None
+        self,
+        input_size: int,
+        layer_sizes: list[int],
+        priors: list[tuple[float, float]] = None,
     ) -> list[tf.Tensor]:
         """
         Priors should be either none or a list of tuples:

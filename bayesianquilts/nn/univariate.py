@@ -12,7 +12,7 @@ from bayesianquilts.nn.dense import Dense
 
 
 class UnivariateDense(Dense):
-    """Univariate neural network, taking R^n to R^n with no variable mixing
+    """Univariate neural network, taking R^1 to R^p with no variable mixing
 
     Args:
         Dense (_type_): _description_
@@ -23,7 +23,10 @@ class UnivariateDense(Dense):
         super(UnivariateDense, self).__init__(**kwargs)
 
     def sample_initial_nn_params(
-        self, input_size, layer_sizes, priors=None
+        self,
+        input_size: int,
+        layer_sizes: list[int],
+        priors: list[tuple[float, float]] = None,
     ) -> list[tf.Tensor]:
         """
         layer_sizes correspond to each feature
