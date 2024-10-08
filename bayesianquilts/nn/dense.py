@@ -6,43 +6,27 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from bayesianquilts.distributions import SqrtInverseGamma
-from bayesianquilts.metastrings import (
-    cauchy_code,
-    horseshoe_code,
-    horseshoe_lambda_code,
-    igamma_code,
-    sq_igamma_code,
-    weight_code,
-)
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.vi.advi import (
-    build_surrogate_posterior,
-    build_trainable_InverseGamma_dist,
-    build_trainable_normal_dist,
-)
+from bayesianquilts.vi.advi import build_surrogate_posterior
 
 from tensorflow_probability.python import distributions as tfd
 
 
 class Dense(object):
-    fn = None
-    weights = None
-    dtype = tf.float32
-
     def __init__(
         self,
-        input_size: int = None,
-        layer_sizes: list[int] = None,
+        input_size: int | None = None,
+        layer_sizes: list[int] | None = None,
         weight_scale: float = 1.0,
         bias_scale: float = 1.0,
-        activation_fn: Callable[[tf.Tensor], tf.Tensor] = None,
+        activation_fn: Callable[[tf.Tensor], tf.Tensor] | None = None,
         dtype: tf.DType = tf.float32,
     ) -> None:
 
         self.dtype = dtype
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
+        self.input_size = input_size
         self.activation_fn = tf.nn.relu if (activation_fn is None) else activation_fn
         self.weight_tensors = self.sample_initial_nn_params(input_size, layer_sizes)
 
@@ -64,8 +48,8 @@ class Dense(object):
     def eval(
         self,
         tensor: tf.Tensor,
-        weight_tensors=None,
-        activation: Callable[[tf.Tensor], tf.Tensor] = None,
+        weight_tensors: dict[str, tf.Tensor] | None =None,
+        activation: Callable[[tf.Tensor], tf.Tensor]  | None = None,
     ) -> tf.Tensor:
         activation = self.activation_fn if (activation is None) else activation
         weight_tensors = (
@@ -93,7 +77,7 @@ class Dense(object):
         self,
         input_size: int,
         layer_sizes: list[int],
-        priors: list[tuple[float, float]] = None,
+        priors: list[tuple[float, float]]  | None = None,
     ) -> list[tf.Tensor]:
         """
         Priors should be either none or a list of tuples:
@@ -166,18 +150,16 @@ class DenseHorseshoe(BayesianModel):
 
     def __init__(
         self,
-        input_size=None,
-        layer_sizes=None,
-        decay=0.5,
-        activation_fn=None,
-        weight_scale=1.0,
-        bias_scale=1.0,
-        dtype=tf.float64,
-        *args,
+        input_size: int  | None = None,
+        layer_sizes: list[int]  | None = None,
+        decay: float = 0.5,
+        activation_fn: Callable[[tf.Tensor], tf.Tensor]  | None = None,
+        weight_scale: float = 1.0,
+        bias_scale: float = 1.0,
+        dtype: tf.DType = tf.float64,
         **kwargs,
-    ):
+    ) -> None:
         super(DenseHorseshoe, self).__init__(
-            *args,
             **kwargs,
         )
         self.dtype = dtype
@@ -197,20 +179,25 @@ class DenseHorseshoe(BayesianModel):
 
         self.create_distributions()
 
-    def set_weights(self, weights):
+    def set_weights(self, weights: list[tf.Tensor]):
         self.nn.set_weights(weights)
 
-    def log_prob(self, x):
+    def log_prob(self, x: dict[str, tf.Tensor]):
         return self.prior_distribution.log_prob(x)
 
     def sample_weights(self, *args, **kwargs):
         return self.prior_distribution.sample(*args, **kwargs)
 
-    def eval(self, input, sample, activation=tf.nn.relu):
+    def eval(
+        self,
+        tensor: tf.Tensor,
+        sample: dict[str, tf.Tensor],
+        activation: Callable[[tf.Tensor], tf.Tensor] = tf.nn.relu,
+    ):
         weight_tensors = []
         for j in range(int(len(self.nn.weight_tensors) / 2)):
             weight_tensors += [sample["w_" + str(j)]] + [sample["b_" + str(j)]]
-        net = self.nn.eval(input, weight_tensors, activation=activation)
+        net = self.nn.eval(tensor, weight_tensors, activation=activation)
         return net
 
     def create_distributions(self):
@@ -249,22 +236,9 @@ class DenseHorseshoe(BayesianModel):
                 ),
                 self.dtype,
             )
-            """
-            distribution_dict[f"w_{j}"] = eval(
-                horseshoe_lambda_code.format(
-                    f"w_{j}_tau", f"w_{j}_tau", 2, "tf." + self.dtype.name
-                )
-            )
-            """
+
             # bias
             bijectors[f"b_{j}"] = tfp.bijectors.Identity()
-            """
-            distribution_dict[f"b_{j}"] = eval(
-                horseshoe_lambda_code.format(
-                    f"b_{j}_tau", f"b_{j}_tau", 1, "tf." + self.dtype.name
-                )
-            )
-            """
 
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Horseshoe(
@@ -278,56 +252,6 @@ class DenseHorseshoe(BayesianModel):
                 reinterpreted_batch_ndims=1,
             )
 
-            """
-            initial[f"w_{j}"] = tf.convert_to_tensor(
-                1e-3*np.random.normal(
-                    np.zeros([self.layer_sizes[j+1], ]),
-                    np.ones([self.layer_sizes[j+1], ])
-                ), self.dtype)
-            
-            # using the auxiliary inverse-gamma parameterization for cauchy vars
-
-            # Scale
-            bijectors[f"w_{j}_tau"] = tfp.bijectors.Softplus()
-            distribution_dict[f"w_{j}_tau"] = eval(
-                sq_igamma_code.format(
-                    f"({self.layer_sizes[j]}, {self.layer_sizes[j+1]})",
-                    f"w_{j}_tau_a",
-                    2,
-                    "tf." + self.dtype.name,
-                )
-            )
-            bijectors[f"b_{j}_tau"] = tfp.bijectors.Softplus()
-            distribution_dict[f"b_{j}_tau"] = eval(
-                sq_igamma_code.format(
-                    f"({self.layer_sizes[j+1]}, )",
-                    f"b_{j}_tau_a",
-                    1,
-                    "tf." + self.dtype.name,
-                )
-            )
-
-            # auxiliary scale variables
-            bijectors[f"w_{j}_tau_a"] = tfp.bijectors.Softplus()
-            distribution_dict[f"w_{j}_tau_a"] = eval(
-                igamma_code.format(
-                    f"({self.layer_sizes[j]}, {self.layer_sizes[j+1]})",
-                    1.0,
-                    2,
-                    "tf." + self.dtype.name,
-                )
-            )
-
-            bijectors[f"b_{j}_tau_a"] = tfp.bijectors.Softplus()
-            distribution_dict[f"b_{j}_tau_a"] = eval(
-                igamma_code.format(
-                    f"({self.layer_sizes[j+1]}, )",
-                    1.0,
-                    1,
-                    "tf." + self.dtype.name,
-                )
-            )
-        """
         self.bijectors = bijectors
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
         self.surrogate_distribution = build_surrogate_posterior(
@@ -340,11 +264,11 @@ class DenseHorseshoe(BayesianModel):
         return self.surrogate_distribution.sample(*args, **kwargs)
 
     @abstractmethod
-    def predictive_distribution(data, **params):
+    def predictive_distribution(self, data: dict[str, tf.Tensor], **params):
         pass
 
     @abstractmethod
-    def log_likelihood(self, data, **params):
+    def log_likelihood(self, data: dict[str, tf.Tensor], **params):
         pass
 
 
@@ -367,11 +291,7 @@ def demo():
 
     denseH = AutoEncoder(10, [20, 12, 2])
     sample = denseH.prior_distribution.sample(10)
-    prob = denseH.log_prob(sample)
-    sample2 = denseH.surrogate_distribution.sample(10)
-    prob2 = denseH.log_prob(sample2)
-    networks = denseH.assemble_networks(sample)
-    networks(tf.ones((1, 2, 10)))
+
     return
 
 

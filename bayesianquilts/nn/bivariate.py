@@ -1,10 +1,7 @@
-import inspect
-from abc import abstractmethod
 from typing import Callable
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
 
 
 from tensorflow_probability.python import distributions as tfd
@@ -18,33 +15,34 @@ class PairwiseDense(Dense):
         Dense (_type_): _description_
     """
 
-    def __init__(self, pairs: list[int]=None, **kwargs) -> None:
+    def __init__(self, pairs: list[int] | None = None, **kwargs) -> None:
         """Iniitialize univariate neural network"""
         self.pairs = pairs
+        self.num_pairs = len(pairs)
         super(PairwiseDense, self).__init__(**kwargs)
 
     def sample_initial_nn_params(
         self,
         input_size: int,
         layer_sizes: list[int],
-        priors: list[tuple[float, float]] = None,
+        priors: list[tuple[float, float]] | None = None,
     ) -> list[tf.Tensor]:
         """
         layer_sizes correspond to each feature
         """
         architecture = []
-        layer_sizes = [1] + layer_sizes
+        layer_sizes = [2] + layer_sizes
 
         if priors is None:
             for j, layer_size in enumerate(layer_sizes[1:]):
                 weights = tfd.Normal(
                     loc=tf.zeros(
-                        (input_size, layer_sizes[j], layer_size), dtype=self.dtype
+                        (self.num_pairs, layer_sizes[j], layer_size), dtype=self.dtype
                     ),
                     scale=1e-1,
                 ).sample()
                 biases = tfd.Normal(
-                    loc=tf.zeros((input_size, layer_size), dtype=self.dtype), scale=1.0
+                    loc=tf.zeros((self.num_pairs, layer_size), dtype=self.dtype), scale=1.0
                 ).sample()
                 architecture += [weights, biases]
         else:
@@ -55,8 +53,8 @@ class PairwiseDense(Dense):
     def eval(
         self,
         tensor: tf.Tensor,
-        weight_tensors: tf.Tensor = None,
-        activation: Callable[[tf.Tensor], tf.Tensor] = None,
+        weight_tensors: tf.Tensor | None = None,
+        activation: Callable[[tf.Tensor], tf.Tensor] | None = None,
     ) -> tf.Tensor:
         """Evaluate the model
 
@@ -70,7 +68,8 @@ class PairwiseDense(Dense):
         )
         activation = tf.nn.relu if activation is None else activation
 
-        net = tensor[..., tf.newaxis, tf.newaxis]
+        net = tf.gather(tf.transpose(tensor), self.pairs)
+        net = tf.transpose(net, [2, 0, 1])
         net = tf.cast(net, self.dtype)
         weights_list = weight_tensors[::2]
         biases_list = weight_tensors[1::2]
@@ -92,9 +91,11 @@ class PairwiseDense(Dense):
 
 def demo():
     n = 30
-    p = 3
+    p = 8
     X = np.random.rand(n, p)
-    nn = UnivariateDense(input_size=p, layer_sizes=[10, 5, 7])
+    nn = PairwiseDense(
+        input_size=p, pairs=[[0, 1], [1, 2], [2, 3], [7, 0]], layer_sizes=[10, 5, 7]
+    )
 
     x = nn.eval(X)
     return

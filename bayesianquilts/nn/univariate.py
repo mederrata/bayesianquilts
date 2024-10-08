@@ -1,10 +1,7 @@
-import inspect
-from abc import abstractmethod
 from typing import Callable
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
 
 
 from tensorflow_probability.python import distributions as tfd
@@ -26,7 +23,7 @@ class UnivariateDense(Dense):
         self,
         input_size: int,
         layer_sizes: list[int],
-        priors: list[tuple[float, float]] = None,
+        priors: list[tuple[float, float]] | None = None,
     ) -> list[tf.Tensor]:
         """
         layer_sizes correspond to each feature
@@ -54,8 +51,8 @@ class UnivariateDense(Dense):
     def eval(
         self,
         tensor: tf.Tensor,
-        weight_tensors: tf.Tensor = None,
-        activation: Callable[[tf.Tensor], tf.Tensor] = None,
+        weight_tensors: tf.Tensor | None = None,
+        activation: Callable[[tf.Tensor], tf.Tensor] | None = None,
     ) -> tf.Tensor:
         """Evaluate the model
 
