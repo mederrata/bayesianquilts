@@ -1,30 +1,21 @@
 import gzip
 import inspect
-import os
 import tempfile
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from functools import partial
-from itertools import cycle
+from typing import Callable
 
-import arviz as az
 import dill
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
-import xarray as xr
 from arviz.data import InferenceData
 from arviz.data.base import dict_to_dataset
-from tensorflow.python.data.ops.dataset_ops import BatchDataset
-from tensorflow.python.distribute.input_lib import DistributedDataset
 from tensorflow_probability.python import distributions as tfd
 from tqdm import tqdm
 
 from bayesianquilts.distributions import FactorizedDistributionMoments
 from bayesianquilts.tf.parameter import (
-    Decomposed,
-    Interactions,
     MultiwayContingencyTable,
 )
 from bayesianquilts.util import DummyObject, batched_minimize
@@ -43,11 +34,10 @@ class BayesianModel(ABC):
 
     def __init__(
         self,
-        data=None,
-        data_transform_fn=None,
-        strategy=None,
-        dtype=tf.float64,
-        *args,
+        data: tf.data.Dataset | None = None,
+        data_transform_fn: Callable | None = None,
+        strategy: tf.distribute.Strategy | None = None,
+        dtype: tf.DType = tf.float64,
         **kwargs,
     ):
         """Instantiate Model object based on tensorflow dataset
@@ -68,11 +58,11 @@ class BayesianModel(ABC):
 
     def fit(self, *args, **kwargs):
         return self._calibrate_minibatch_advi(*args, **kwargs)
-    
+
     def set_data(self, data, data_transform_fn):
         self.data = data
         self.data_transform_fn = data_transform_fn
-        
+
     def preprocessor(self):
         return None
 
@@ -81,28 +71,28 @@ class BayesianModel(ABC):
 
     def _calibrate_minibatch_advi(
         self,
-        batched_data_factory,
-        batch_size,
-        dataset_size,
-        num_steps=100,
-        learning_rate=0.1,
-        opt=None,
-        abs_tol=1e-10,
-        rel_tol=1e-8,
-        clip_value=5.0,
-        clip_by="norm",
-        max_decay_steps=25,
-        lr_decay_factor=0.99,
-        check_every=1,
-        set_expectations=False,
-        sample_size=24,
-        sample_batches=1,
-        trainable_variables=None,
-        unormalized_log_prob_fn=None,
-        accumulate_batches=False,
-        batches_per_step=None,
-        temp_dir=tempfile.gettempdir(),
-        test_fn=None,
+        batched_data_factory: Callable,
+        batch_size: int,
+        dataset_size: int,
+        num_steps: int = 100,
+        learning_rate: float = 0.1,
+        opt: tf.keras.optimizers.Optimizer | None = None,
+        abs_tol: float = 1e-10,
+        rel_tol: float = 1e-8,
+        clip_value: float = 5.0,
+        clip_by: str = "norm",
+        max_decay_steps: int = 25,
+        lr_decay_factor: float = 0.99,
+        check_every: int = 1,
+        set_expectations: bool = False,
+        sample_size: int = 24,
+        sample_batches: int = 1,
+        trainable_variables: list[tf.Variable] | None = None,
+        unormalized_log_prob_fn: Callable | None = None,
+        accumulate_batches: bool = False,
+        batches_per_step: int | None = None,
+        temp_dir: str = tempfile.gettempdir(),
+        test_fn: Callable = None,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -127,9 +117,11 @@ class BayesianModel(ABC):
 
         def run_approximation(num_steps):
             losses = minibatch_fit_surrogate_posterior(
-                target_log_prob_fn=unormalized_log_prob_fn
-                if unormalized_log_prob_fn is not None
-                else self.unormalized_log_prob,
+                target_log_prob_fn=(
+                    unormalized_log_prob_fn
+                    if unormalized_log_prob_fn is not None
+                    else self.unormalized_log_prob
+                ),
                 surrogate_posterior=self.surrogate_distribution,
                 dataset_size=dataset_size,
                 batch_size=batch_size,
@@ -141,6 +133,7 @@ class BayesianModel(ABC):
                 decay_rate=lr_decay_factor,
                 abs_tol=abs_tol,
                 rel_tol=rel_tol,
+                opt=opt,
                 clip_value=clip_value,
                 clip_by=clip_by,
                 check_every=check_every,
@@ -161,7 +154,7 @@ class BayesianModel(ABC):
                 self.set_calibration_expectations()
         return losses
 
-    def set_calibration_expectations(self, samples=24, variational=True):
+    def set_calibration_expectations(self, samples: int = 24, variational: bool = True):
         if variational:
             mean, var = FactorizedDistributionMoments(
                 self.surrogate_distribution, samples=samples
@@ -354,7 +347,12 @@ class BayesianModel(ABC):
         )
 
     @abstractmethod
-    def unormalized_log_prob(self, data, prior_weight=tf.constant(1), *args, **kwargs):
+    def unormalized_log_prob(
+        self,
+        data: dict[str, tf.Tensor] = None,
+        prior_weight: tf.Tensor | float = tf.constant(1.0),
+        **params,
+    ):
         """Generic method for the unormalized log probability function"""
         return
 
@@ -399,7 +397,7 @@ class BayesianModel(ABC):
                 print("Was unable to set vars, check self.saved_state")
         else:
             self.create_distributions()
-            
+
     def transform(self, params):
         return params
 
@@ -516,4 +514,3 @@ def generate_distributions(
             out["surrogate"].model = {}
 
     return out
-

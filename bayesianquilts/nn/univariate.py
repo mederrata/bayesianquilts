@@ -1,42 +1,30 @@
-import inspect
-from abc import abstractmethod
+from typing import Callable
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
 
-from bayesianquilts.distributions import SqrtInverseGamma
-from bayesianquilts.metastrings import (
-    cauchy_code,
-    horseshoe_code,
-    horseshoe_lambda_code,
-    igamma_code,
-    sq_igamma_code,
-    weight_code,
-)
-from bayesianquilts.model import BayesianModel
-from bayesianquilts.vi.advi import (
-    build_surrogate_posterior,
-    build_trainable_InverseGamma_dist,
-    build_trainable_normal_dist,
-)
 
 from tensorflow_probability.python import distributions as tfd
 from bayesianquilts.nn.dense import Dense
 
 
 class UnivariateDense(Dense):
-    """Univariate neural network, taking R^n to R^n with no variable mixing
+    """Univariate neural network, taking R^1 to R^p with no variable mixing
 
     Args:
         Dense (_type_): _description_
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs) -> None:
         """Iniitialize univariate neural network"""
         super(UnivariateDense, self).__init__(**kwargs)
 
-    def sample_initial_nn_params(self, input_size, layer_sizes, priors=None):
+    def sample_initial_nn_params(
+        self,
+        input_size: int,
+        layer_sizes: list[int],
+        priors: list[tuple[float, float]] | None = None,
+    ) -> list[tf.Tensor]:
         """
         layer_sizes correspond to each feature
         """
@@ -60,11 +48,16 @@ class UnivariateDense(Dense):
 
         return architecture
 
-    def eval(self, input, weight_tensors=None, activation=None):
+    def eval(
+        self,
+        tensor: tf.Tensor,
+        weight_tensors: tf.Tensor | None = None,
+        activation: Callable[[tf.Tensor], tf.Tensor] | None = None,
+    ) -> tf.Tensor:
         """Evaluate the model
 
         Args:
-            input (self.dtype): [n x p]
+            tensor (self.dtype): [n x p]
             weight_tensors (_type_, optional): _description_. Defaults to None.
             activation (_type_, optional): _description_. Defaults to None.
         """
@@ -73,7 +66,7 @@ class UnivariateDense(Dense):
         )
         activation = tf.nn.relu if activation is None else activation
 
-        net = input[..., tf.newaxis, tf.newaxis]
+        net = tensor[..., tf.newaxis, tf.newaxis]
         net = tf.cast(net, self.dtype)
         weights_list = weight_tensors[::2]
         biases_list = weight_tensors[1::2]
