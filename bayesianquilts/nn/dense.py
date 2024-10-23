@@ -37,10 +37,11 @@ class Dense(object):
         b: tf.Tensor,
         activation: Callable[[tf.Tensor], tf.Tensor],
     ) -> tf.Tensor:
-        return activation(
+        out = activation(
             tf.matmul(tf.cast(X, self.dtype), tf.cast(W, self.dtype))
             + tf.cast(b[..., tf.newaxis, :], self.dtype)
         )
+        return out
 
     def set_weights(self, weight_tensors: list[tf.Tensor]) -> None:
         self.weight_tensors = weight_tensors
@@ -355,7 +356,7 @@ class DenseGaussian(BayesianModel):
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
             distribution_dict[f"w_{j}"] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeroes(
+                    loc=tf.zeros(
                         [self.layer_sizes[j], self.layer_sizes[j + 1]], dtype=self.dtype
                     ),
                     scale=tf.ones(
@@ -379,7 +380,7 @@ class DenseGaussian(BayesianModel):
 
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeroes(
+                    loc=tf.zeros(
                         [
                             self.layer_sizes[j + 1],
                         ],

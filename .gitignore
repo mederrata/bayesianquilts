@@ -137,3 +137,5 @@ dmypy.json
 *.pdf
 *.html
 *.gz
+ovarian_data.json
+
