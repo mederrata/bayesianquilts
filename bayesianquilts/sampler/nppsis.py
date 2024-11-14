@@ -34,6 +34,7 @@ smoothed importance sampling. https://arxiv.org/abs/arXiv:1507.02646v5
 
 from __future__ import division # For Python 2 compatibility
 import numpy as np
+np.seterr(all='ignore')
 
 # 3-Clause BSD License
 """
