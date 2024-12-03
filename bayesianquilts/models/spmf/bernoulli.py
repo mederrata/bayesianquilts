@@ -4,29 +4,20 @@ See main() for usage
 Note that you currently have to babysit the optimization a bit
 """
 
-from itertools import cycle
-import functools
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow.python.data.ops.dataset_ops import BatchDataset
+
 from tensorflow_probability import distributions as tfd
 
-from bayesianquilts.model import BayesianModel
-from bayesianquilts.distributions import SqrtInverseGamma, AbsHorseshoe
-from bayesianquilts.nn.dense import DenseHorseshoe
-
-
+from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
+from bayesianquilts.models.spmf.poisson import PoissonFactorization
 from bayesianquilts.vi.advi import (
-    build_surrogate_posterior,
     build_trainable_InverseGamma_dist,
     build_trainable_normal_dist,
 )
 
-from bayesianquilts.models.spmf.poisson import PoissonFactorization
-
-tfb = tfp.bijectors
+from tensorflow_probability.python import bijectors as tfb
 
 
 class BernoulliFactorization(PoissonFactorization):
@@ -203,15 +194,15 @@ class BernoulliFactorization(PoissonFactorization):
                     loc=0.1
                     * tf.zeros((self.latent_dim, self.feature_dim), dtype=self.dtype),
                     scale=0.1
-                    * tf.ones((self.latent_dim, self.feature_dim), dtype=self.dtype)
+                    * tf.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=2,
             ),
             "w": tfd.Independent(
                 tfd.Normal(
                     loc=tf.zeros((1, self.feature_dim), dtype=self.dtype),
-                    scale=tf.ones((1, self.feature_dim), dtype=self.dtype)
-                    ),
+                    scale=tf.ones((1, self.feature_dim), dtype=self.dtype),
+                ),
                 reinterpreted_batch_ndims=2,
             ),
         }

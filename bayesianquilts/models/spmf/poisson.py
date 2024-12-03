@@ -5,7 +5,6 @@ Note that you currently have to babysit the optimization a bit
 """
 
 from itertools import cycle
-import functools
 
 import numpy as np
 import tensorflow as tf

@@ -4,27 +4,16 @@ See main() for usage
 Note that you currently have to babysit the optimization a bit
 """
 
-from itertools import cycle
-import functools
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow.python.data.ops.dataset_ops import BatchDataset
 from tensorflow_probability import distributions as tfd
+from tensorflow_probability.python import bijectors as tfb
 
+from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.distributions import SqrtInverseGamma, AbsHorseshoe
-from bayesianquilts.nn.dense import DenseHorseshoe
-
-from bayesianquilts.vi.advi import (
-    build_trainable_InverseGamma_dist, build_trainable_normal_dist,
-    build_surrogate_posterior)
-
-from bayesianquilts.vi.minibatch import fit_surrogate_posterior
-
-
-tfb = tfp.bijectors
+from bayesianquilts.vi.advi import (build_trainable_InverseGamma_dist,
+                                    build_trainable_normal_dist)
 
 
 class GaussianFactorization(BayesianModel):
@@ -128,7 +117,7 @@ class GaussianFactorization(BayesianModel):
     def set_data(
             self, data, data_transform_fn=None, compute_normalization=True, n=None):
         super(GaussianFactorization, self).set_data(
-            data=data, data_transform_fn=data_transform_fn, n=n)
+            data=data, data_transform_fn=data_transform_fn)
         if self.scale_columns and compute_normalization:
             print("Looping through the entire dataset once to get some stats")
 
@@ -149,7 +138,7 @@ class GaussianFactorization(BayesianModel):
 
             colsums = tf.add_n(colsums)
             col_nonzero_N = tf.add_n(col_nonzero_Ns)
-            colmeans = colsums/N
+
             colmeans_nonzero = (
                 tf.cast(colsums, tf.float64) /
                 tf.cast(col_nonzero_N, tf.float64))
@@ -604,7 +593,7 @@ class GaussianFactorization(BayesianModel):
             list(prob_parts.values()))
         return value
 
-    def unormalized_log_prob_parts(self, data=None, prior_weight=1., **params):
+    def unormalized_log_prob_parts(self, data, prior_weight=1., **params):
         """Energy function
         Keyword Arguments:
             data {dict} -- Should be a single batch (default: {None})
@@ -613,13 +602,6 @@ class GaussianFactorization(BayesianModel):
         """
 
         # We don't use indices so let's just get rid of them
-        if data is None:
-            #  use self.data, taking the next batch
-            try:
-                data = next(self.dataset_cycler)
-            except tf.errors.OutOfRangeError:
-                self.dataset_iterator = cycle(iter(self.data))
-                data = next(self.dataset_iterator)
 
         prior_parts = self.prior_distribution.log_prob_parts(params)
         prior_parts = {k: prior_weight*v for k, v in prior_parts.items()}
