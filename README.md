@@ -3,7 +3,7 @@ This library provides tools for building truly interpretable input -> output map
 indirectly by building a ReLU-activated neural network, this library uses a 
 combination of representation learning, clustering, and multilevel linear regression modeling.
 
-Some examples of this class of models are in the literature:
+The API for this model may change and the backing (currently Tensorflow-probability) may change. It is our intention to stabilize the API as we write an eventual manuscript on this general methodology and the theory behind it. In the meantime, some examples of this class of models are in the literature:
 
 * Chang TL, Xia H, Mahajan S, Mahajan R, Maisog J, et al. (2024) Interpretable (not just posthoc-explainable) medical claims modeling for discharge placement to reduce preventable all-cause readmissions or death. PLOS ONE 19(5): e0302871. https://doi.org/10.1371/journal.pone.0302871
 
@@ -17,6 +17,3 @@ Additionally, this repository contains code for Gradient-flow adaptive importanc
 
 * Chang JC, Li X, Xu S, Yao HR, Porcino J, Chow CC. Gradient-flow adaptive importance sampling for Bayesian leave one out cross-validation with application to sigmoidal classification models. ArXiv [Preprint]. 2024 Oct 20:arXiv:2402.08151v2. PMID: 38711425; PMCID: PMC11071546.
 
-
-
- 
