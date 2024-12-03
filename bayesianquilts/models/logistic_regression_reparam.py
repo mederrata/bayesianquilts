@@ -20,7 +20,7 @@ import tensorflow_probability as tfp
 
 
 from bayesianquilts.model import BayesianModel
-from mederrata_spmf import PoissonFactorization
+from bayesianquilts.models.spmf import PoissonFactorization
 from bayesianquilts.tf.parameter import Interactions, Decomposed
 from bayesianquilts.vi.advi import build_surrogate_posterior
 
