@@ -1,28 +1,14 @@
-import functools
-import inspect
+import numbers
 import os
 import tempfile
 import uuid
-from collections import defaultdict
-from pathlib import Path
-import numbers
 
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow_probability.python import util as tfp_util
-from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.internal import (
-    dtype_util,
-    prefer_static,
-    tensorshape_util,
-)
-from tqdm import tqdm
-from tensorflow.raw_ops import UniqueV2 as unique
-
-from tensorflow_probability import distributions as tfd
-from tensorflow_probability import bijectors as tfb
 from keras.src.optimizers.schedules import learning_rate_schedule
+from tensorflow.raw_ops import UniqueV2 as unique
+from tensorflow_probability.python import util as tfp_util
+from tqdm import tqdm
 
 
 def flatten(lst):
@@ -94,7 +80,10 @@ def batched_minimize(
     opt = PatchedAdam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step),
         clipvalue=clip_value,
+<<<<<<< HEAD
         # global_clipnorm=clip_norm,
+=======
+>>>>>>> origin/ais
     )
 
     # opt = tfa.optimizers.Lookahead(opt)
