@@ -133,9 +133,13 @@ dmypy.json
 #scanpy cache directory
 /cache
 .DS_Store
+<<<<<<< HEAD
 
 *.pdf
 *.html
 *.gz
 ovarian_data.json
 
+=======
+.env*
+>>>>>>> origin/ais
