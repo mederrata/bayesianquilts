@@ -6,7 +6,6 @@ import sys
 import os
 import csv
 import itertools
-from collections import defaultdict
 from itertools import product
 import arviz as az
 from tqdm import tqdm
@@ -18,37 +17,80 @@ import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.models.spmf import PoissonFactorization
 from bayesianquilts.tf.parameter import Interactions, Decomposed
 from bayesianquilts.vi.advi import build_surrogate_posterior
 
-from tensorflow_probability.python import distributions as tfd
-from tensorflow_probability.python import bijectors as tfb
+
+tfd = tfp.distributions
 
 
-class LogisticRegression2(BayesianModel):
+def psis_smoothing(weights, threshold=0.7):
+    log_weights = tf.math.log(weights)
+    psis_weights = []
+
+    for log_weight in log_weights:
+        sorted_indices = tf.argsort(log_weight, axis=-1, direction="DESCENDING")
+        sorted_log_weight = tf.gather(log_weight, sorted_indices, axis=-1)
+        cumsum_log_weight = tf.cumsum(sorted_log_weight, axis=-1)
+        threshold_value = (1.0 - threshold) * tf.reduce_max(
+            cumsum_log_weight, axis=-1, keepdims=True
+        )
+        psis_weight = tf.exp(tf.math.minimum(sorted_log_weight - threshold_value, 0.0))
+        original_order_indices = tf.argsort(sorted_indices, axis=-1)
+        psis_weight = tf.gather(psis_weight, original_order_indices, axis=-1)
+        psis_weights.append(psis_weight)
+
+    return tf.stack(psis_weights)
+
+
+class LogisticRidgeRegression(BayesianModel):
     def __init__(
         self,
         dim_regressors,
-        scale_icept=1.0,
-        scale_global=1.0,
-        nu_global=1.0,
-        nu_local=1.0,
-        slab_scale=1.0,
-        slab_df=1.0,
+        regression_interact=None,
+        dim_decay_factor=0.5,
+        regressor_scales=None,
+        regressor_offsets=None,
         dtype=tf.float64,
     ):
-        super(LogisticRegression2, self).__init__(dtype=dtype)
+        super(LogisticRidgeRegression, self).__init__(dtype=dtype)
+        self.dim_decay_factor = dim_decay_factor
         self.dim_regressors = dim_regressors
-        self.scale_icept = scale_icept
-        self.scale_global = scale_global
-        self.nu_global = nu_global
-        self.nu_local = nu_local
-        self.slab_scale = slab_scale
-        self.slab_df = slab_df
+        if regressor_scales is None:
+            self.regressor_scales = 1
+        else:
+            self.regressor_scales = regressor_scales
+        self.regressor_offsets = (
+            regressor_offsets if regressor_offsets is not None else 0
+        )
 
+        if regression_interact is None:
+            self.regression_interact = Interactions(
+                [],
+                exclusions=[],
+            )
+        else:
+            self.regression_interact = regression_interact
+
+        self.intercept_interact = Interactions(
+            [],
+            exclusions=[],
+        )
+
+        self.regression_decomposition = Decomposed(
+            interactions=self.regression_interact,
+            param_shape=[self.dim_regressors],
+            name="beta",
+            dtype=self.dtype,
+        )
+
+        self.intercept_decomposition = Decomposed(
+            interactions=self.intercept_interact,
+            param_shape=[1],
+            name="intercept",
+            dtype=self.dtype,
+        )
         self.create_distributions()
 
     def preprocessor(self):
@@ -57,85 +99,107 @@ class LogisticRegression2(BayesianModel):
     def create_distributions(self):
         # distribution on regression problem
 
-        joint_prior_dict = {}
-        joint_prior_dict["z"] = tfd.Independent(
-            tfd.Normal(
-                tf.zeros((self.dim_regressors), dtype=self.dtype),
-                tf.ones((self.dim_regressors), dtype=self.dtype),
-            ),
-            reinterpreted_batch_ndims=1,
+        (
+            regressor_tensors,
+            regression_vars,
+            regression_shapes,
+        ) = self.regression_decomposition.generate_tensors(dtype=self.dtype)
+        regression_scales = {
+            k: self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
+            for k, v in regression_shapes.items()
+        }
+        self.regression_decomposition.set_scales(regression_scales)
+
+        regression_dict = {}
+
+        regression_dict["beta__"] = tfd.Independent(
+            tfd.Normal(loc=tf.zeros((1, self.dim_regressors), self.dtype), scale=10*tf.ones((1, self.dim_regressors), self.dtype)),
+            reinterpreted_batch_ndims=len(regressor_tensors["beta__"].shape.as_list()),
         )
-        joint_prior_dict["lambda"] = tfd.Independent(
-            tfd.StudentT(
-                self.nu_local * tf.ones((self.dim_regressors), dtype=self.dtype),
-                tf.zeros((self.dim_regressors), dtype=self.dtype),
-                tf.ones((self.dim_regressors), dtype=self.dtype),
-            ),
-            reinterpreted_batch_ndims=1,
+
+        regression_model = tfd.JointDistributionNamed(regression_dict)
+        regression_surrogate = build_surrogate_posterior(
+            regression_model, initializers=regressor_tensors
         )
-        joint_prior_dict["tau"] = tfd.Independent(
-            tfb.AbsoluteValue()(
-                tfd.StudentT(
-                    self.nu_global * tf.ones((1), dtype=self.dtype),
-                    tf.zeros((1), dtype=self.dtype),
-                    self.scale_global * tf.ones((1), dtype=self.dtype),
-                )
-            ),
-            reinterpreted_batch_ndims=1,
+
+        #  Exponential params
+        (
+            intercept_tensors,
+            intercept_vars,
+            intercept_shapes,
+        ) = self.intercept_decomposition.generate_tensors(dtype=self.dtype)
+        intercept_scales = {
+            k: self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
+            for k, v in intercept_shapes.items()
+        }
+        self.intercept_decomposition.set_scales(intercept_scales)
+
+        intercept_dict = {}
+        for label, tensor in intercept_tensors.items():
+            intercept_dict[label] = tfd.Independent(
+                tfd.Normal(
+                    loc=tf.zeros_like(tf.cast(tensor, self.dtype)),
+                    scale=3*tf.ones_like(tf.cast(tensor, self.dtype)),
+                ),
+                reinterpreted_batch_ndims=len(tensor.shape.as_list()),
+            )
+
+        intercept_prior = tfd.JointDistributionNamed(intercept_dict)
+        intercept_surrogate = build_surrogate_posterior(
+            intercept_prior, initializers=intercept_tensors
         )
-        joint_prior_dict["caux"] = tfd.Independent(
-            tfd.InverseGamma(
-                0.5 * self.slab_df * tf.ones((1), dtype=self.dtype),
-                0.5 * self.slab_df * tf.ones((1), dtype=self.dtype),
-            ),
-            reinterpreted_batch_ndims=1,
+
+        self.prior_distribution = tfd.JointDistributionNamed(
+            {"regression_model": regression_model, "intercept_model": intercept_prior}
         )
-        joint_prior_dict["beta0"] = tfd.Independent(
-            tfd.Normal(
-                tf.zeros((1), dtype=self.dtype),
-                self.scale_icept * tf.ones((1), dtype=self.dtype),
-            ),
-            reinterpreted_batch_ndims=1,
+        self.surrogate_distribution = tfd.JointDistributionNamed(
+            {**regression_surrogate.model, **intercept_surrogate.model}
         )
-        bijectors = defaultdict(lambda: tfb.Identity())
-        bijectors["caux"] = tfb.Softplus()
-        bijectors["tau"] = tfb.Softplus()
-        self.prior_distribution = tfd.JointDistributionNamed(joint_prior_dict)
-        self.surrogate_distribution = build_surrogate_posterior(
-            self.prior_distribution, bijectors=bijectors
-        )
+
+        self.regression_vars = regression_vars
+        self.regression_var_list = list(regression_surrogate.model.keys())
+        self.intercept_var_list = list(intercept_surrogate.model.keys())
+
         self.surrogate_vars = self.surrogate_distribution.variables
         self.var_list = list(self.surrogate_distribution.model.keys())
         return None
-    
-    def transform(self, params):
-        c = self.slab_scale * tf.math.sqrt(params["caux"])
-        lambda_tilde = tf.math.sqrt(
-            c**2
-            * params["lambda"] ** 2
-            / (c**2 + params["tau"] ** 2 * params["lambda"] ** 2)
-        )
-        beta = params["z"] * lambda_tilde * params["tau"]
-        params['beta'] = beta
-        return params
 
     def predictive_distribution(self, data, **params):
+        try:
+            regression_params = params["regression_params"]
+            intercept_params = params["intercept_params"]
+        except KeyError:
+            regression_params = {k: params[k] for k in self.regression_var_list}
+            intercept_params = {k: params[k] for k in self.intercept_var_list}
 
         processed = (self.preprocessor())(data)
-        c = self.slab_scale * tf.math.sqrt(params["caux"])
-        lambda_tilde = tf.math.sqrt(
-            c**2
-            * params["lambda"] ** 2
-            / (c**2 + params["tau"] ** 2 * params["lambda"] ** 2)
+
+        regression_indices = self.regression_decomposition.retrieve_indices(processed)
+        if isinstance(regression_indices, tf.RaggedTensor):
+            regression_indices = regression_indices.to_tensor()
+
+        intercept_indices = self.intercept_decomposition.retrieve_indices(processed)
+        if isinstance(intercept_indices, tf.RaggedTensor):
+            intercept_indices = intercept_indices.to_tensor()
+
+        coef_ = self.regression_decomposition.lookup(
+            regression_indices,
+            tensors=regression_params,
         )
-        beta = params["z"] * lambda_tilde * params["tau"]
+
+        intercept = self.intercept_decomposition.lookup(
+            intercept_indices, tensors=intercept_params
+        )
+
         # compute regression product
         X = tf.cast(
-            processed["X"],
+            (data["X"] - self.regressor_offsets) / self.regressor_scales,
             self.dtype,
         )
-        mu = beta[..., tf.newaxis, :] * X
-        mu = tf.reduce_sum(mu, -1) + params["beta0"]
+
+        X = X[tf.newaxis, ...]
+        mu = coef_ * X
+        mu = tf.reduce_sum(mu, -1) + intercept[..., 0]
 
         # assemble outcome random vars
 
@@ -174,7 +238,16 @@ class LogisticRegression2(BayesianModel):
             tf.ones_like(log_likelihood) * min_val,
         )
 
-        prior = self.prior_distribution.log_prob(params)
+        prior = self.prior_distribution.log_prob(
+            {
+                "regression_model": {
+                    k: tf.cast(params[k], self.dtype) for k in self.regression_var_list
+                },
+                "intercept_model": {
+                    k: tf.cast(params[k], self.dtype) for k in self.intercept_var_list
+                },
+            }
+        )
 
         return tf.reduce_sum(log_likelihood, axis=-1) + prior
 
@@ -198,24 +271,16 @@ class LogisticRegression2(BayesianModel):
         """
 
         # scaled (theta - bar(theta))/Sigma
-        c = self.slab_scale * tf.math.sqrt(params["caux"])
-        lambda_tilde = tf.math.sqrt(
-            c**2
-            * params["lambda"] ** 2
-            / (c**2 + params["tau"] ** 2 * params["lambda"] ** 2)
-        )
-        beta = params["z"] * lambda_tilde * params["tau"]
-        intercept = params["beta0"]
+        beta = params["beta__"]
+        intercept = params["intercept__"]
         X = tf.cast(data["X"], self.dtype)
-        y = tf.cast(data["y"], self.dtype)[:, 0]
-        mu = beta[..., tf.newaxis, :] * X
-        mu = tf.reduce_sum(mu, -1) + params["beta0"]
+        y = tf.squeeze(tf.cast(data["y"], self.dtype))
+        mu = tf.reduce_sum(beta * X, axis=-1) + intercept[..., 0]
         sigma = tf.math.sigmoid(mu)
         ell = y * (sigma) + (1 - y) * (1 - sigma)
         log_ell = tf.math.xlogy(y, sigma) + tf.math.xlogy(1 - y, 1 - sigma)
         log_ell_prime = y * (1 - sigma) - (1 - y) * sigma
         log_ell_doubleprime = -sigma * (1 - sigma)
-        _, khat0 = nppsis.psislw(-log_ell)
 
         """
         sigma.shape is samples x datapoints
@@ -244,7 +309,6 @@ class LogisticRegression2(BayesianModel):
                 params["intercept__"]
             )
             log_pi -= tf.reduce_max(log_pi, axis=0)
-            # log_pi.shape: [samples]
         else:
             """
             Recall Bayes rule:
@@ -254,27 +318,42 @@ class LogisticRegression2(BayesianModel):
             \nabla\log\pi(\btheta|\calD) = \sum_i (ell_i)'x + grad\log\pi(\btheta)
 
             """
-            log_prior = self.prior_distribution.log_prob_parts(params)
-            log_prior = log_prior["z"] + log_prior["beta0"]
-
             log_pi = tf.reduce_sum(log_ell, axis=1, keepdims=True)[:, 0]
+            log_pi += self.prior_distribution.log_prob(
+                {
+                    "regression_model": {
+                        k: tf.cast(params[k], self.dtype) for k in self.regression_var_list
+                    },
+                    "intercept_model": {
+                        k: tf.cast(params[k], self.dtype) for k in self.intercept_var_list
+                    },
+                }
+            )
 
             # pi \propto
+            # log_pi.shape: [samples]
+
+            # log_ell.shape  [samples, data]
+            # X.shape [data, features]
+            log_ell_tot = tf.reduce_sum(log_ell[..., tf.newaxis], axis=1, keepdims=True)
             grad_log_pi = tf.concat(
                 [
-                    tf.reduce_sum(log_ell_prime[..., tf.newaxis], axis=1, keepdims=True),
-                    tf.reduce_sum(
-                        log_ell_prime[..., tf.newaxis] * X, axis=1, keepdims=True
-                    ),
+                    log_ell_tot,
+                    tf.reduce_sum(log_ell[..., tf.newaxis] * X, axis=1, keepdims=True),
                 ],
                 axis=-1,
             )
+            # TODO NEED PRIOR TERM
 
-            grad_log_prior = -0.5 * tf.concat(
-                [(params["beta0"] / self.scale_icept) ** 2, (params["z"]) ** 2],
-                axis=-1,
+            # grad_log_pi.shape [samples, 1, parameters]
+
+            prior_intercept_sd = (
+                self.prior_distribution.model["intercept_model"]
+                .model["intercept__"]
+                .variance()
+                ** 0.5
             )
-            grad_log_pi += grad_log_prior[:, tf.newaxis, :]
+            prior_beta_sd = params["global_scale"]
 
             intercept_sd = tf.math.reduce_std(intercept, 0, keepdims=True)
             beta_sd = tf.math.reduce_std(beta, 0, keepdims=True)
@@ -301,18 +380,23 @@ class LogisticRegression2(BayesianModel):
                     * (sigma * (1 - sigma))[..., tf.newaxis]
                 )[..., 0]
             )
-            beta_ll = beta[..., tf.newaxis, :] + h * Q_beta
-            intercept_ll = intercept[..., tf.newaxis, :] + h * Q_intercept
+            beta_ll = beta + h * Q_beta
+            intercept_ll = intercept + h * Q_intercept
             return beta_ll, intercept_ll, logJ
 
         def T_kl():
-            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0, keepdims=True)
+            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0)
+
             Q_beta = ((-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * (1 - 2 * y)))[
                 ..., tf.newaxis
-            ] * X
+            ] * data["X"]
             Q_intercept = (
-                ((-1) ** y) * tf.math.exp(log_pi_[..., tf.newaxis] + mu * (1 - 2 * y))
+                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * (1 - 2 * y))
             )[..., tf.newaxis]
+
+            # log_pi.shape: [samples]
+            # mu.shape: [samples, data]
+            # y.shape [data]
 
             dQ = (-1) ** y[tf.newaxis, :] * tf.math.exp(
                 log_pi_[..., tf.newaxis] + mu * (1 - 2 * y[tf.newaxis, :])
@@ -324,7 +408,7 @@ class LogisticRegression2(BayesianModel):
                     X
                     * (
                         grad_log_pi[..., 1:]
-                        + (1 - 2 * y)[:, tf.newaxis] * X[tf.newaxis, ...]
+                        + ((1 - 2 * y)[:, tf.newaxis] * X)[tf.newaxis, :, :]
                     ),
                     axis=-1,
                 )
@@ -340,8 +424,8 @@ class LogisticRegression2(BayesianModel):
 
             h = hbar / standardized
 
-            intercept_kl = intercept[..., tf.newaxis] + h * Q_intercept
-            beta_kl = beta[..., tf.newaxis, :] + h * Q_beta
+            intercept_kl = intercept + h * Q_intercept
+            beta_kl = beta + h * Q_beta
 
             logJ = tf.math.log1p(tf.math.abs(h[..., 0] * dQ))
             return beta_kl, intercept_kl, logJ
@@ -351,33 +435,38 @@ class LogisticRegression2(BayesianModel):
         def T_I():
             Q = tf.zeros_like(log_ell)
             return (
-                beta[:, tf.newaxis, :] + Q[..., tf.newaxis],
-                intercept[..., tf.newaxis] + Q[..., tf.newaxis],
+                beta + Q[..., tf.newaxis],
+                intercept + Q[..., tf.newaxis],
                 tf.zeros_like(Q),
             )
 
         def T_var():
-            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0, keepdims=True)
+            log_pi_ = log_pi - tf.reduce_max(log_pi, axis=0)
 
             Q_beta = (
-                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + 2 * mu * (1 - 2 * y))
-            )[..., tf.newaxis] * X
+                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * 2 * (1 - 2 * y))
+            )[..., tf.newaxis] * data["X"]
             Q_intercept = (
-                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + 2 * mu * (1 - 2 * y))
+                (-1) ** y * tf.math.exp(log_pi_[..., tf.newaxis] + mu * 2 * (1 - 2 * y))
             )[..., tf.newaxis]
 
-            dQ = (
-                (-1) ** y[tf.newaxis, :]
-                * tf.math.exp(
-                    log_pi_[..., tf.newaxis] + 2 * mu * (1 - 2 * y[tf.newaxis, :])
-                )
-                * (
-                    grad_log_pi[..., 0]
-                    + (1 - 2 * y)[tf.newaxis, :]
-                    + tf.reduce_sum(
-                        X * (grad_log_pi[..., 1:] + 2 * (1 - 2 * y)[:, tf.newaxis] * X),
-                        axis=-1,
-                    )
+            # log_pi.shape: [samples]
+            # mu.shape: [samples, data]
+            # y.shape [data]
+
+            dQ = (-1) ** y[tf.newaxis, :] * tf.math.exp(
+                log_pi_[..., tf.newaxis] + mu * 2 * (1 - 2 * y[tf.newaxis, :])
+            )
+            dQ *= (
+                grad_log_pi[..., 0]
+                + 2 * (1 - 2 * y)[tf.newaxis, :]
+                + tf.reduce_sum(
+                    X
+                    * (
+                        grad_log_pi[..., 1:]
+                        + (2 * (1 - 2 * y)[:, tf.newaxis] * X)[tf.newaxis, :, :]
+                    ),
+                    axis=-1,
                 )
             )
 
@@ -391,8 +480,8 @@ class LogisticRegression2(BayesianModel):
 
             h = hbar / standardized
 
-            intercept_kl = intercept[..., tf.newaxis, :] + h * Q_intercept
-            beta_kl = beta[..., tf.newaxis, :] + h * Q_beta
+            intercept_kl = intercept + h * Q_intercept
+            beta_kl = beta + h * Q_beta
 
             logJ = tf.math.log1p(tf.math.abs(h[..., 0] * dQ))
             return beta_kl, intercept_kl, logJ
@@ -403,17 +492,13 @@ class LogisticRegression2(BayesianModel):
             sigma_new = tf.math.sigmoid(mu_new)
             ell_new = y * (sigma_new) + (1 - y) * (1 - sigma_new)
             log_ell_new = tf.math.xlogy(y, sigma_new) + tf.math.xlogy(1 - y, 1 - sigma_new)
-            c = self.slab_scale * tf.math.sqrt(params["caux"])
-            lambda_tilde = tf.math.sqrt(
-                c**2
-                * params["lambda"] ** 2
-                / (c**2 + params["tau"] ** 2 * params["lambda"] ** 2)
-            )
             transformed = params.copy()
-            transformed["z"] = beta_new / (
-                lambda_tilde[:, tf.newaxis, :] * params["tau"][..., tf.newaxis]
-            )
-            transformed["beta0"] = intercept_new
+            transformed["beta__"] = beta_new[..., tf.newaxis, :]
+            transformed["intercept__"] = intercept_new[..., tf.newaxis, :]
+            transformed["global_scale"] = transformed["global_scale"][..., tf.newaxis, :]
+            transformed["global_scale_aux"] = transformed["global_scale_aux"][
+                ..., tf.newaxis, :
+            ]
 
             if variational:
                 # We trust the variational approximation, so \hat{pi} = pi
@@ -431,23 +516,33 @@ class LogisticRegression2(BayesianModel):
                 # Need to compute log_pi directly by summing over the likelihood
 
                 ell_cross = tf.math.sigmoid(
-                    tf.reduce_sum(beta_new[..., tf.newaxis, :] * X, -1) + intercept_new
+                    tf.reduce_sum(beta_new[..., tf.newaxis, :] * X, -1)
+                    + intercept_new
                 )
                 ell_cross = tf.math.xlogy(y, ell_cross) + tf.math.xlogy(
                     1 - y, 1 - ell_cross
                 )
                 ell_cross = tf.math.reduce_sum(ell_cross, axis=-1)
 
-                log_prior_new = self.prior_distribution.log_prob_parts(transformed)
-                log_prior_new = log_prior_new["z"] + log_prior_new["beta0"]
-                log_pi_new = ell_cross
-                delta_log_prior = log_prior_new - log_prior[:, tf.newaxis]
+                log_pi_new = self.prior_distribution.log_prob(
+                    {
+                        "regression_model": {
+                            k: tf.cast(transformed[k], self.dtype)
+                            for k in self.regression_var_list
+                        },
+                        "intercept_model": {
+                            k: tf.cast(transformed[k], self.dtype)
+                            for k in self.intercept_var_list
+                        },
+                    }
+                )
+                log_pi_new += ell_cross
                 # Incorporate the prior
-                delta_log_pi = log_pi_new - log_pi[:, tf.newaxis] + delta_log_prior
+                delta_log_pi = log_pi_new - log_pi[:, tf.newaxis]
+
             log_eta_weights = delta_log_pi - log_ell_new + logJ
-            log_eta_weights = log_eta_weights - tf.reduce_max(log_eta_weights, axis=0)
+            log_eta_weights -= tf.reduce_max(log_eta_weights, axis=0, keepdims=True)
             psis_weights, khat = nppsis.psislw(log_eta_weights)
-            _, khat_test = nppsis.psislw(-log_ell_new - tf.reduce_max(-log_ell_new, axis=0))
 
             eta_weights = tf.math.exp(log_eta_weights)
             eta_weights = eta_weights / tf.reduce_sum(eta_weights, axis=0, keepdims=True)
@@ -491,7 +586,6 @@ class LogisticRegression2(BayesianModel):
             p_psis_I,
             ll_psis_I,
         ) = IS(T_I)
-
         (
             eta_kl,
             eta_kl_psis,
@@ -506,18 +600,6 @@ class LogisticRegression2(BayesianModel):
         ) = IS(T_kl)
 
         (
-            eta_var,
-            eta_var_psis,
-            p_loo_var,
-            p_loo_var_sd,
-            ll_loo_var,
-            ll_loo_var_sd,
-            S_var,
-            k_var,
-            p_psis_var,
-            ll_psis_var,
-        ) = IS(T_var)
-        (
             eta_ll,
             eta_ll_psis,
             p_loo_ll,
@@ -529,6 +611,20 @@ class LogisticRegression2(BayesianModel):
             p_psis_ll,
             ll_psis_ll,
         ) = IS(T_ll)
+
+        (
+            eta_var,
+            eta_var_psis,
+            p_loo_var,
+            p_loo_var_sd,
+            ll_loo_var,
+            ll_loo_var_sd,
+            S_var,
+            k_var,
+            p_psis_var,
+            ll_psis_var,
+        ) = IS(T_var)
+
         # kl descent
 
         return {
@@ -573,5 +669,3 @@ class LogisticRegression2(BayesianModel):
                 "ll_psis": ll_psis_var,
             },
         }
-
-
