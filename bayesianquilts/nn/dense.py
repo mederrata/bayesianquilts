@@ -1,16 +1,14 @@
 import inspect
 from abc import abstractmethod
-from typing import Callable, Any
+from typing import Any, Callable
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
+from tensorflow_probability.python import distributions as tfd
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.vi.advi import build_surrogate_posterior
-from bayesianquilts.vi.advi import build_surrogate_posterior
-
-from tensorflow_probability.python import distributions as tfd
 
 
 class Dense(object):
@@ -50,8 +48,8 @@ class Dense(object):
     def eval(
         self,
         tensor: tf.Tensor,
-        weight_tensors: dict[str, tf.Tensor] | None =None,
-        activation: Callable[[tf.Tensor], tf.Tensor]  | None = None,
+        weight_tensors: dict[str, tf.Tensor] | None = None,
+        activation: Callable[[tf.Tensor], tf.Tensor] | None = None,
     ) -> tf.Tensor:
         activation = self.activation_fn if (activation is None) else activation
         weight_tensors = (
@@ -63,7 +61,6 @@ class Dense(object):
         weights_list = weight_tensors[::2]
         biases_list = weight_tensors[1::2]
 
-        for weights, biases in zip(weights_list[:-1], biases_list[:-1]):
         for weights, biases in zip(weights_list[:-1], biases_list[:-1]):
             net = self.dense(
                 net, self.weight_scale * weights, self.bias_scale * biases, activation
@@ -80,7 +77,7 @@ class Dense(object):
         self,
         input_size: int,
         layer_sizes: list[int],
-        priors: list[tuple[float, float]]  | None = None,
+        priors: list[tuple[float, float]] | None = None,
     ) -> list[tf.Tensor]:
         """
         Priors should be either none or a list of tuples:
@@ -153,10 +150,10 @@ class DenseHorseshoe(BayesianModel):
 
     def __init__(
         self,
-        input_size: int  | None = None,
-        layer_sizes: list[int]  | None = None,
+        input_size: int | None = None,
+        layer_sizes: list[int] | None = None,
         decay: float = 0.5,
-        activation_fn: Callable[[tf.Tensor], tf.Tensor]  | None = None,
+        activation_fn: Callable[[tf.Tensor], tf.Tensor] | None = None,
         weight_scale: float = 1.0,
         bias_scale: float = 1.0,
         extra_batch_dims=0,
@@ -238,8 +235,14 @@ class DenseHorseshoe(BayesianModel):
             initial[f"w_{j}"] = tf.convert_to_tensor(
                 1e-3
                 * np.random.normal(
-                    np.zeros([self.layer_sizes[j], self.layer_sizes[j + 1]]),
-                    np.ones([self.layer_sizes[j], self.layer_sizes[j + 1]]),
+                    np.zeros(
+                        [1] * self.extra_batch_dims
+                        + [self.layer_sizes[j], self.layer_sizes[j + 1]]
+                    ),
+                    np.ones(
+                        [1] * self.extra_batch_dims
+                        + [self.layer_sizes[j], self.layer_sizes[j + 1]]
+                    ),
                 ),
                 self.dtype,
             )
@@ -279,6 +282,7 @@ class DenseHorseshoe(BayesianModel):
     def log_likelihood(self, data: dict[str, tf.Tensor], **params):
         pass
 
+
 class DenseGaussian(BayesianModel):
     """Dense horseshoe network of given layer sizes
 
@@ -292,10 +296,10 @@ class DenseGaussian(BayesianModel):
 
     def __init__(
         self,
-        input_size: int  | None = None,
-        layer_sizes: list[int]  | None = None,
+        input_size: int | None = None,
+        layer_sizes: list[int] | None = None,
         decay: float = 0.5,
-        activation_fn: Callable[[tf.Tensor], tf.Tensor]  | None = None,
+        activation_fn: Callable[[tf.Tensor], tf.Tensor] | None = None,
         weight_scale: float = 1.0,
         bias_scale: float = 1.0,
         dtype: tf.DType = tf.float64,
@@ -364,13 +368,15 @@ class DenseGaussian(BayesianModel):
             distribution_dict[f"w_{j}"] = tfd.Independent(
                 tfd.Normal(
                     loc=tf.zeros(
-                        [self.layer_sizes[j], self.layer_sizes[j + 1]], dtype=self.dtype
+                        [1] * self.extra_batch_dims
+                        + [self.layer_sizes[j], self.layer_sizes[j + 1]],
+                        dtype=self.dtype,
                     ),
                     scale=tf.ones(
                         [1] * self.extra_batch_dims
                         + [self.layer_sizes[j], self.layer_sizes[j + 1]],
                         dtype=self.dtype,
-                    )
+                    ),
                 ),
                 reinterpreted_batch_ndims=2 + self.extra_batch_dims,
             )
@@ -378,8 +384,14 @@ class DenseGaussian(BayesianModel):
             initial[f"w_{j}"] = tf.convert_to_tensor(
                 1e-3
                 * np.random.normal(
-                    np.zeros([self.layer_sizes[j], self.layer_sizes[j + 1]]),
-                    np.ones([self.layer_sizes[j], self.layer_sizes[j + 1]]),
+                    np.zeros(
+                        [1] * self.extra_batch_dims
+                        + [self.layer_sizes[j], self.layer_sizes[j + 1]]
+                    ),
+                    np.ones(
+                        [1] * self.extra_batch_dims
+                        + [self.layer_sizes[j], self.layer_sizes[j + 1]]
+                    ),
                 ),
                 self.dtype,
             )
@@ -390,7 +402,8 @@ class DenseGaussian(BayesianModel):
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Normal(
                     loc=tf.zeros(
-                        [
+                        [1] * self.extra_batch_dims
+                        + [
                             self.layer_sizes[j + 1],
                         ],
                         dtype=self.dtype,
@@ -401,7 +414,7 @@ class DenseGaussian(BayesianModel):
                             self.layer_sizes[j + 1],
                         ],
                         dtype=self.dtype,
-                    )
+                    ),
                 ),
                 reinterpreted_batch_ndims=1 + self.extra_batch_dims,
             )
@@ -425,6 +438,7 @@ class DenseGaussian(BayesianModel):
     def log_likelihood(self, data: dict[str, tf.Tensor], **params):
         pass
 
+
 class DenseGaussian(BayesianModel):
     """Dense horseshoe network of given layer sizes
 
@@ -438,10 +452,10 @@ class DenseGaussian(BayesianModel):
 
     def __init__(
         self,
-        input_size: int  | None = None,
-        layer_sizes: list[int]  | None = None,
+        input_size: int | None = None,
+        layer_sizes: list[int] | None = None,
         decay: float = 0.5,
-        activation_fn: Callable[[tf.Tensor], tf.Tensor]  | None = None,
+        activation_fn: Callable[[tf.Tensor], tf.Tensor] | None = None,
         weight_scale: float = 1.0,
         bias_scale: float = 1.0,
         dtype: tf.DType = tf.float64,
@@ -514,7 +528,7 @@ class DenseGaussian(BayesianModel):
                     ),
                     scale=tf.ones(
                         [self.layer_sizes[j], self.layer_sizes[j + 1]], dtype=self.dtype
-                    )
+                    ),
                 ),
                 reinterpreted_batch_ndims=2,
             )
@@ -544,7 +558,7 @@ class DenseGaussian(BayesianModel):
                             self.layer_sizes[j + 1],
                         ],
                         dtype=self.dtype,
-                    )
+                    ),
                 ),
                 reinterpreted_batch_ndims=1,
             )
