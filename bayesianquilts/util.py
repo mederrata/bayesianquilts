@@ -80,10 +80,6 @@ def batched_minimize(
     opt = PatchedAdam(
         learning_rate=lambda: learning_rate_schedule_fn(decay_step),
         clipvalue=clip_value,
-<<<<<<< HEAD
-        # global_clipnorm=clip_norm,
-=======
->>>>>>> origin/ais
     )
 
     # opt = tfa.optimizers.Lookahead(opt)
