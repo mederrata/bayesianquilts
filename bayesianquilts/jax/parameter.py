@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-import re
-from collections import Counter, defaultdict
-from itertools import product, chain, combinations
-import tensorflow as tf
-import jax
+from itertools import product
+
 import jax.numpy as jnp
 import numpy as np
-from jax.flatten_util import ravel_pytree
+from tensorflow_probability.python.internal.backend.numpy import gather_nd
 
 
 class Interactions(object):
@@ -125,8 +122,6 @@ class Decomposed(object):
             self._param_tensors[k] = tensors[k]
 
     def __add__(self, x):
-        if tf.is_tensor(x):
-            return x + self.constitute()
         return self.constitute().__add__(x)
 
     def __radd__(self, x):
@@ -152,18 +147,18 @@ class Decomposed(object):
 
     def query(self, interaction_indices):
         _global = self.constitute()
-        batch_ndims = tf.rank(_global) - len(self.shape())
+        batch_ndims = _global.ndim - len(self.shape())
         # stick batch axes on the  end
-        rank = tf.rank(_global)
+        rank = _global.ndim
 
-        _global = tf.transpose(
+        _global = jnp.transpose(
             _global,
             list(range(batch_ndims, rank)) + list(range(batch_ndims))
         )
-        localized = tf.gather_nd(_global, interaction_indices)
+        localized = gather_nd(_global, interaction_indices)
 
-        local_rank = tf.rank(localized)
-        localized = tf.transpose(
+        local_rank = localized.ndim
+        localized = jnp.transpose(
             localized,
             list(range(local_rank-batch_ndims, local_rank)) +
             list(range(local_rank-batch_ndims))
