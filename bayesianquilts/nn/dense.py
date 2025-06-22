@@ -89,11 +89,11 @@ class Dense(object):
         if priors is None:
             for j, layer_size in enumerate(layer_sizes[1:]):
                 weights = tfd.Normal(
-                    loc=tf.zeros((layer_sizes[j], layer_size), dtype=self.dtype),
+                    loc=jnp.zeros((layer_sizes[j], layer_size), dtype=self.dtype),
                     scale=1e-1,
                 ).sample()
                 biases = tfd.Normal(
-                    loc=tf.zeros((layer_size), dtype=self.dtype), scale=1.0
+                    loc=jnp.zeros((layer_size), dtype=self.dtype), scale=1.0
                 ).sample()
                 architecture += [weights, biases]
         else:
@@ -223,7 +223,7 @@ class DenseHorseshoe(BayesianModel):
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
             distribution_dict[f"w_{j}"] = tfd.Independent(
                 tfd.Horseshoe(
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         [1] * self.extra_batch_dims
                         + [self.layer_sizes[j], self.layer_sizes[j + 1]],
                         dtype=self.dtype,
@@ -252,7 +252,7 @@ class DenseHorseshoe(BayesianModel):
 
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Horseshoe(
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         [1] * self.extra_batch_dims
                         + [
                             self.layer_sizes[j + 1],
@@ -367,12 +367,12 @@ class DenseGaussian(BayesianModel):
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
             distribution_dict[f"w_{j}"] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         [1] * self.extra_batch_dims
                         + [self.layer_sizes[j], self.layer_sizes[j + 1]],
                         dtype=self.dtype,
                     ),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         [1] * self.extra_batch_dims
                         + [self.layer_sizes[j], self.layer_sizes[j + 1]],
                         dtype=self.dtype,
@@ -401,14 +401,14 @@ class DenseGaussian(BayesianModel):
 
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         [1] * self.extra_batch_dims
                         + [
                             self.layer_sizes[j + 1],
                         ],
                         dtype=self.dtype,
                     ),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         [1] * self.extra_batch_dims
                         + [
                             self.layer_sizes[j + 1],
@@ -523,10 +523,10 @@ class DenseGaussian(BayesianModel):
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
             distribution_dict[f"w_{j}"] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         [self.layer_sizes[j], self.layer_sizes[j + 1]], dtype=self.dtype
                     ),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         [self.layer_sizes[j], self.layer_sizes[j + 1]], dtype=self.dtype
                     ),
                 ),
@@ -547,13 +547,13 @@ class DenseGaussian(BayesianModel):
 
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         [
                             self.layer_sizes[j + 1],
                         ],
                         dtype=self.dtype,
                     ),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         [
                             self.layer_sizes[j + 1],
                         ],

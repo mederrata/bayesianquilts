@@ -4,13 +4,11 @@
 
 from collections import defaultdict
 
-
 import arviz as az
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
-
 from tensorflow.python.ops.math_ops import _bucketize as bucketize
 from tensorflow_probability.python import distributions as tfd
 
@@ -129,9 +127,9 @@ class LogisticBayesianquilt(BayesianModel):
         for label, tensor in regressor_tensors.items():
             regression_dict[label] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros_like(tf.cast(tensor, self.dtype)),
+                    loc=jnp.zeros_like(tf.cast(tensor, self.dtype)),
                     scale=regression_scales[label]
-                    * tf.ones_like(tf.cast(tensor, self.dtype)),
+                    * jnp.ones_like(tf.cast(tensor, self.dtype)),
                 ),
                 reinterpreted_batch_ndims=len(tensor.shape.as_list()),
             )
@@ -142,7 +140,7 @@ class LogisticBayesianquilt(BayesianModel):
             **regression_dict,
             "c2": tfd.Independent(
                 tfd.InverseGamma(
-                    tf.ones(
+                    jnp.ones(
                         [
                             np.prod(self.regression_decomposition._interaction_shape),
                             1,
@@ -150,7 +148,7 @@ class LogisticBayesianquilt(BayesianModel):
                         ],
                         dtype=self.dtype,
                     ),
-                    tf.ones(
+                    jnp.ones(
                         [
                             np.prod(self.regression_decomposition._interaction_shape),
                             1,
@@ -166,7 +164,7 @@ class LogisticBayesianquilt(BayesianModel):
                     df=2,
                     loc=0,
                     scale=self.regression_shrinkage_scale
-                    * tf.ones(
+                    * jnp.ones(
                         [
                             np.prod(self.regression_decomposition._interaction_shape),
                             1,
@@ -181,7 +179,7 @@ class LogisticBayesianquilt(BayesianModel):
                 tfd.HalfStudentT(
                     df=5,
                     loc=0,
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         [np.prod(self.regression_decomposition._interaction_shape)]
                         + self.regression_decomposition.shape()[-2:],
                         dtype=self.dtype,
@@ -196,7 +194,7 @@ class LogisticBayesianquilt(BayesianModel):
             * self.regression_shrinkage_scale
             * np.sqrt(2 / np.pi)
             * self.regression_shrinkage_scale
-            * tf.ones(
+            * jnp.ones(
                 [
                     np.prod(self.regression_decomposition._interaction_shape),
                     1,
@@ -206,7 +204,7 @@ class LogisticBayesianquilt(BayesianModel):
             )
         )
 
-        regressor_tensors["c2"] = tf.ones(
+        regressor_tensors["c2"] = jnp.ones(
             [
                 np.prod(self.regression_decomposition._interaction_shape),
                 1,
@@ -215,7 +213,7 @@ class LogisticBayesianquilt(BayesianModel):
             dtype=self.dtype,
         )
 
-        regressor_tensors["lambda_j"] = tf.ones(
+        regressor_tensors["lambda_j"] = jnp.ones(
             [np.prod(self.regression_decomposition._interaction_shape)]
             + self.regression_decomposition.shape()[-2:],
             dtype=self.dtype,
@@ -250,9 +248,9 @@ class LogisticBayesianquilt(BayesianModel):
         for label, tensor in intercept_tensors.items():
             intercept_dict[label] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros_like(tf.cast(tensor, self.dtype)),
+                    loc=jnp.zeros_like(tf.cast(tensor, self.dtype)),
                     scale=intercept_scales[label]
-                    * tf.ones_like(tf.cast(tensor, self.dtype)),
+                    * jnp.ones_like(tf.cast(tensor, self.dtype)),
                 ),
                 reinterpreted_batch_ndims=len(tensor.shape.as_list()),
             )
@@ -273,8 +271,8 @@ class LogisticBayesianquilt(BayesianModel):
             for label, tensor in random_intercept_tensors.items():
                 random_intercept_dict[label] = tfd.Independent(
                     tfd.Normal(
-                        loc=tf.zeros_like(tf.cast(tensor, self.dtype)),
-                        scale=1e-1 * tf.ones_like(tf.cast(tensor, self.dtype)),
+                        loc=jnp.zeros_like(tf.cast(tensor, self.dtype)),
+                        scale=1e-1 * jnp.ones_like(tf.cast(tensor, self.dtype)),
                     ),
                     reinterpreted_batch_ndims=len(tensor.shape.as_list()),
                 )
@@ -400,13 +398,13 @@ class LogisticBayesianquilt(BayesianModel):
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 1.0
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
         if self.random_intercept_interact is None:
             prior = self.prior_distribution.log_prob(
@@ -442,7 +440,7 @@ class LogisticBayesianquilt(BayesianModel):
         def regression_effective(lambda_j, c2, tau):
             return tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros_like(lambda_j),
+                    loc=jnp.zeros_like(lambda_j),
                     scale=(
                         tau
                         * lambda_j

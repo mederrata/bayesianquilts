@@ -1,37 +1,15 @@
 import functools
 import inspect
-import os
-import tempfile
-import uuid
 from collections import defaultdict
-from pathlib import Path
 
-import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow.python.data.ops.dataset_ops import BatchDataset
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import \
-    print_tensors_in_checkpoint_file
-from tensorflow.python.training import optimizer
-from tensorflow_probability.python import util as tfp_util
+from tensorflow_probability.python import bijectors as tfb
+from tensorflow_probability.python import distributions as tfd
 from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import \
-    TransformedDistribution
-from tensorflow_probability.python.internal import (dtype_util, prefer_static,
-                                                    tensorshape_util)
-from tensorflow_probability.python.vi import csiszar_divergence
-from tqdm import tqdm
-
-from tensorflow_probability.python.vi import GradientEstimators
+from tensorflow_probability.python.internal import dtype_util
 
 from bayesianquilts.distributions import SqrtInverseGamma
-
 from bayesianquilts.util import TransformedVariable
-
-tfd = tfp.distributions
-tfb = tfp.bijectors
 
 
 def build_trainable_concentration_scale_distribution(
@@ -227,8 +205,8 @@ def build_surrogate_posterior(
         )) and not gaussian_only:
             surrogate_dict[k] = bijectors[k](
                 build_trainable_InverseGamma_dist(
-                    2.0 * tf.ones(test_distribution.event_shape, dtype=dtype),
-                    tf.ones(test_distribution.event_shape, dtype=dtype),
+                    2.0 * jnp.ones(test_distribution.event_shape, dtype=dtype),
+                    jnp.ones(test_distribution.event_shape, dtype=dtype),
                     len(test_distribution.event_shape),
                     strategy=strategy,
                     name=label,
@@ -242,7 +220,7 @@ def build_surrogate_posterior(
             surrogate_dict[k] = bijectors[k](
                 build_trainable_normal_dist(
                     tfb.Invert(bijectors[k])(loc),
-                    1e-2 * tf.ones(test_distribution.event_shape, dtype=dtype),
+                    1e-2 * jnp.ones(test_distribution.event_shape, dtype=dtype),
                     len(test_distribution.event_shape),
                     strategy=strategy,
                     name=label,

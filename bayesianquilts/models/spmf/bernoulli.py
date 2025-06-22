@@ -7,17 +7,13 @@ Note that you currently have to babysit the optimization a bit
 
 import numpy as np
 import tensorflow as tf
-
 from tensorflow_probability import distributions as tfd
+from tensorflow_probability.python import bijectors as tfb
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
 from bayesianquilts.models.spmf.poisson import PoissonFactorization
-from bayesianquilts.vi.advi import (
-    build_trainable_InverseGamma_dist,
-    build_trainable_normal_dist,
-)
-
-from tensorflow_probability.python import bijectors as tfb
+from bayesianquilts.vi.advi import (build_trainable_InverseGamma_dist,
+                                    build_trainable_normal_dist)
 
 
 class BernoulliFactorization(PoissonFactorization):
@@ -192,16 +188,16 @@ class BernoulliFactorization(PoissonFactorization):
             "v": tfd.Independent(
                 tfd.Normal(
                     loc=0.1
-                    * tf.zeros((self.latent_dim, self.feature_dim), dtype=self.dtype),
+                    * jnp.zeros((self.latent_dim, self.feature_dim), dtype=self.dtype),
                     scale=0.1
-                    * tf.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
+                    * jnp.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=2,
             ),
             "w": tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros((1, self.feature_dim), dtype=self.dtype),
-                    scale=tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    loc=jnp.zeros((1, self.feature_dim), dtype=self.dtype),
+                    scale=jnp.ones((1, self.feature_dim), dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=2,
             ),
@@ -215,10 +211,10 @@ class BernoulliFactorization(PoissonFactorization):
                 ),
                 "u_eta": tfd.Independent(
                     tfd.HalfCauchy(
-                        loc=tf.zeros(
+                        loc=jnp.zeros(
                             (self.feature_dim, self.latent_dim), dtype=self.dtype
                         ),
-                        scale=tf.ones(
+                        scale=jnp.ones(
                             (self.feature_dim, self.latent_dim), dtype=self.dtype
                         ),
                     ),
@@ -226,8 +222,8 @@ class BernoulliFactorization(PoissonFactorization):
                 ),
                 "u_tau": tfd.Independent(
                     tfd.HalfCauchy(
-                        loc=tf.zeros((1, self.latent_dim), dtype=self.dtype),
-                        scale=tf.ones((1, self.latent_dim), dtype=self.dtype)
+                        loc=jnp.zeros((1, self.latent_dim), dtype=self.dtype),
+                        scale=jnp.ones((1, self.latent_dim), dtype=self.dtype)
                         * self.u_tau_scale,
                     ),
                     reinterpreted_batch_ndims=2,
@@ -238,15 +234,15 @@ class BernoulliFactorization(PoissonFactorization):
             )
             distribution_dict["s_eta"] = tfd.Independent(
                 tfd.HalfCauchy(
-                    loc=tf.zeros((2, self.feature_dim), dtype=self.dtype),
-                    scale=tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    loc=jnp.zeros((2, self.feature_dim), dtype=self.dtype),
+                    scale=jnp.ones((2, self.feature_dim), dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=2,
             )
             distribution_dict["s_tau"] = tfd.Independent(
                 tfd.HalfCauchy(
-                    loc=tf.zeros((1, self.feature_dim), dtype=self.dtype),
-                    scale=tf.ones((1, self.feature_dim), dtype=self.dtype)
+                    loc=jnp.zeros((1, self.feature_dim), dtype=self.dtype),
+                    scale=jnp.ones((1, self.feature_dim), dtype=self.dtype)
                     * self.s_tau_scale,
                 ),
                 reinterpreted_batch_ndims=2,
@@ -261,7 +257,7 @@ class BernoulliFactorization(PoissonFactorization):
             distribution_dict["u_eta"] = lambda u_eta_a: tfd.Independent(
                 SqrtInverseGamma(
                     concentration=0.5
-                    * tf.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
+                    * jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
                     scale=1.0 / u_eta_a,
                 ),
                 reinterpreted_batch_ndims=2,
@@ -269,8 +265,8 @@ class BernoulliFactorization(PoissonFactorization):
             distribution_dict["u_eta_a"] = tfd.Independent(
                 tfd.InverseGamma(
                     concentration=0.5
-                    * tf.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
-                    scale=tf.ones(
+                    * jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
+                    scale=jnp.ones(
                         (self.feature_dim, self.latent_dim), dtype=self.dtype
                     ),
                 ),
@@ -278,15 +274,15 @@ class BernoulliFactorization(PoissonFactorization):
             )
             distribution_dict["u_tau"] = lambda u_tau_a: tfd.Independent(
                 SqrtInverseGamma(
-                    concentration=0.5 * tf.ones((1, self.latent_dim), dtype=self.dtype),
+                    concentration=0.5 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
                     scale=1.0 / u_tau_a,
                 ),
                 reinterpreted_batch_ndims=2,
             )
             distribution_dict["u_tau_a"] = tfd.Independent(
                 tfd.InverseGamma(
-                    concentration=0.5 * tf.ones((1, self.latent_dim), dtype=self.dtype),
-                    scale=tf.ones((1, self.latent_dim), dtype=self.dtype)
+                    concentration=0.5 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
+                    scale=jnp.ones((1, self.latent_dim), dtype=self.dtype)
                     / self.u_tau_scale**2,
                 ),
                 reinterpreted_batch_ndims=2,
@@ -295,7 +291,7 @@ class BernoulliFactorization(PoissonFactorization):
             distribution_dict["s_eta"] = lambda s_eta_a: tfd.Independent(
                 SqrtInverseGamma(
                     concentration=0.5
-                    * tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    * jnp.ones((2, self.feature_dim), dtype=self.dtype),
                     scale=1.0 / s_eta_a,
                 ),
                 reinterpreted_batch_ndims=2,
@@ -303,15 +299,15 @@ class BernoulliFactorization(PoissonFactorization):
             distribution_dict["s_eta_a"] = tfd.Independent(
                 tfd.InverseGamma(
                     concentration=0.5
-                    * tf.ones((2, self.feature_dim), dtype=self.dtype),
-                    scale=tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    * jnp.ones((2, self.feature_dim), dtype=self.dtype),
+                    scale=jnp.ones((2, self.feature_dim), dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=2,
             )
             distribution_dict["s_tau"] = lambda s_tau_a: tfd.Independent(
                 SqrtInverseGamma(
                     concentration=0.5
-                    * tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    * jnp.ones((1, self.feature_dim), dtype=self.dtype),
                     scale=1.0 / s_tau_a,
                 ),
                 reinterpreted_batch_ndims=2,
@@ -319,8 +315,8 @@ class BernoulliFactorization(PoissonFactorization):
             distribution_dict["s_tau_a"] = tfd.Independent(
                 tfd.InverseGamma(
                     concentration=0.5
-                    * tf.ones((1, self.feature_dim), dtype=self.dtype),
-                    scale=tf.ones((1, self.feature_dim), dtype=self.dtype)
+                    * jnp.ones((1, self.feature_dim), dtype=self.dtype),
+                    scale=jnp.ones((1, self.feature_dim), dtype=self.dtype)
                     / self.s_tau_scale**2,
                 ),
                 reinterpreted_batch_ndims=2,
@@ -333,7 +329,7 @@ class BernoulliFactorization(PoissonFactorization):
                         scale=(
                             self.u_tau_scale
                             * symmetry_breaking_decay
-                            * tf.ones(
+                            * jnp.ones(
                                 (self.feature_dim, self.latent_dim), dtype=self.dtype
                             )
                         ),
@@ -343,7 +339,7 @@ class BernoulliFactorization(PoissonFactorization):
                 "s": tfd.Independent(
                     AbsHorseshoe(
                         scale=self.s_tau_scale
-                        * tf.ones((1, self.feature_dim), dtype=self.dtype)
+                        * jnp.ones((1, self.feature_dim), dtype=self.dtype)
                     ),
                     reinterpreted_batch_ndims=2,
                 ),
@@ -355,17 +351,17 @@ class BernoulliFactorization(PoissonFactorization):
             "v": self.bijectors["v"](
                 build_trainable_normal_dist(
                     -6.0
-                    * tf.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
+                    * jnp.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
                     5e-4
-                    * tf.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
+                    * jnp.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy,
                 )
             ),
             "w": self.bijectors["w"](
                 build_trainable_normal_dist(
-                    -6 * tf.ones((1, self.feature_dim), dtype=self.dtype),
-                    5e-4 * tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    -6 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
+                    5e-4 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy,
                 )
@@ -377,11 +373,11 @@ class BernoulliFactorization(PoissonFactorization):
                 "u": self.bijectors["u"](
                     build_trainable_normal_dist(
                         -6.0
-                        * tf.ones(
+                        * jnp.ones(
                             (self.feature_dim, self.latent_dim), dtype=self.dtype
                         ),
                         5e-4
-                        * tf.ones(
+                        * jnp.ones(
                             (self.feature_dim, self.latent_dim), dtype=self.dtype
                         ),
                         2,
@@ -391,18 +387,18 @@ class BernoulliFactorization(PoissonFactorization):
                 "u_eta": self.bijectors["u_eta"](
                     build_trainable_InverseGamma_dist(
                         3
-                        * tf.ones(
+                        * jnp.ones(
                             (self.feature_dim, self.latent_dim), dtype=self.dtype
                         ),
-                        tf.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
+                        jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
                         2,
                         strategy=self.strategy,
                     )
                 ),
                 "u_tau": self.bijectors["u_tau"](
                     build_trainable_InverseGamma_dist(
-                        3 * tf.ones((1, self.latent_dim), dtype=self.dtype),
-                        tf.ones((1, self.latent_dim), dtype=self.dtype),
+                        3 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
+                        jnp.ones((1, self.latent_dim), dtype=self.dtype),
                         2,
                         strategy=self.strategy,
                     )
@@ -411,25 +407,25 @@ class BernoulliFactorization(PoissonFactorization):
 
             surrogate_dict["s_eta"] = self.bijectors["s_eta"](
                 build_trainable_InverseGamma_dist(
-                    tf.ones((2, self.feature_dim), dtype=self.dtype),
-                    tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy,
                 )
             )
             surrogate_dict["s_tau"] = self.bijectors["s_tau"](
                 build_trainable_InverseGamma_dist(
-                    1 * tf.ones((1, self.feature_dim), dtype=self.dtype),
-                    tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    1 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((1, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy,
                 )
             )
             surrogate_dict["s"] = self.bijectors["s"](
                 build_trainable_normal_dist(
-                    tf.ones((2, self.feature_dim), dtype=self.dtype)
+                    jnp.ones((2, self.feature_dim), dtype=self.dtype)
                     * tf.cast([[-2.0], [-1.0]], dtype=self.dtype),
-                    1e-3 * tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    1e-3 * jnp.ones((2, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy,
                 )
@@ -440,16 +436,16 @@ class BernoulliFactorization(PoissonFactorization):
             surrogate_dict["u_eta_a"] = self.bijectors["u_eta_a"](
                 build_trainable_InverseGamma_dist(
                     2.0
-                    * tf.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
-                    tf.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
+                    * jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
+                    jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy,
                 )
             )
             surrogate_dict["u_tau_a"] = self.bijectors["u_tau_a"](
                 build_trainable_InverseGamma_dist(
-                    2.0 * tf.ones((1, self.latent_dim), dtype=self.dtype),
-                    tf.ones((1, self.latent_dim), dtype=self.dtype)
+                    2.0 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
+                    jnp.ones((1, self.latent_dim), dtype=self.dtype)
                     / self.u_tau_scale**2,
                     2,
                     strategy=self.strategy,
@@ -460,17 +456,17 @@ class BernoulliFactorization(PoissonFactorization):
             self.bijectors["s_tau_a"] = tfb.Softplus()
             surrogate_dict["s_eta_a"] = self.bijectors["s_eta_a"](
                 build_trainable_InverseGamma_dist(
-                    2.0 * tf.ones((2, self.feature_dim), dtype=self.dtype),
-                    tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    2.0 * jnp.ones((2, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy,
                 )
             )
             surrogate_dict["s_tau_a"] = self.bijectors["s_tau_a"](
                 build_trainable_InverseGamma_dist(
-                    2.0 * tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    2.0 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
                     (
-                        tf.ones((1, self.feature_dim), dtype=self.dtype)
+                        jnp.ones((1, self.feature_dim), dtype=self.dtype)
                         / self.s_tau_scale**2
                     ),
                     2,
@@ -482,9 +478,9 @@ class BernoulliFactorization(PoissonFactorization):
                 **surrogate_dict,
                 "s": self.bijectors["s"](
                     build_trainable_normal_dist(
-                        tf.ones((2, self.feature_dim), dtype=self.dtype)
+                        jnp.ones((2, self.feature_dim), dtype=self.dtype)
                         * tf.cast([[-2.0], [-1.0]], dtype=self.dtype),
-                        1e-3 * tf.ones((2, self.feature_dim), dtype=self.dtype),
+                        1e-3 * jnp.ones((2, self.feature_dim), dtype=self.dtype),
                         2,
                         strategy=self.strategy,
                     )
@@ -492,11 +488,11 @@ class BernoulliFactorization(PoissonFactorization):
                 "u": self.bijectors["u"](
                     build_trainable_normal_dist(
                         -9.0
-                        * tf.ones(
+                        * jnp.ones(
                             (self.feature_dim, self.latent_dim), dtype=self.dtype
                         ),
                         5e-4
-                        * tf.ones(
+                        * jnp.ones(
                             (self.feature_dim, self.latent_dim), dtype=self.dtype
                         ),
                         2,
@@ -535,7 +531,7 @@ class BernoulliFactorization(PoissonFactorization):
         s = params["s"]
         theta = self.encode(x=data[self.count_key], u=params["u"], s=s)
         rv_theta = tfd.Independent(
-            tfd.HalfNormal(scale=tf.ones_like(theta, dtype=self.dtype)),
+            tfd.HalfNormal(scale=jnp.ones_like(theta, dtype=self.dtype)),
             reinterpreted_batch_ndims=2,
         )
 
@@ -544,7 +540,7 @@ class BernoulliFactorization(PoissonFactorization):
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 10.0
         max_val = 0.0
@@ -552,7 +548,7 @@ class BernoulliFactorization(PoissonFactorization):
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
         log_likelihood = tf.reduce_sum(log_likelihood, -1)
         log_likelihood = tf.reduce_sum(log_likelihood, -1)

@@ -4,7 +4,7 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from bayesianquilts.nn.dense import DenseHorseshoe, DenseGaussian
+from bayesianquilts.nn.dense import DenseGaussian, DenseHorseshoe
 
 tfd = tfp.distributions
 
@@ -75,7 +75,7 @@ class LogisticRelunet(DenseHorseshoe):
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 1.0
         max_val = 0.0
@@ -83,7 +83,7 @@ class LogisticRelunet(DenseHorseshoe):
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
         prior = self.prior_distribution.log_prob(params)
         return (
@@ -157,7 +157,7 @@ class ShallowGaussianRelunet(DenseGaussian):
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 1.0
         max_val = 0.0
@@ -165,7 +165,7 @@ class ShallowGaussianRelunet(DenseGaussian):
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
         prior = self.prior_distribution.log_prob(params)
         return (

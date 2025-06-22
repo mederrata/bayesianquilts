@@ -1,7 +1,7 @@
-import tensorflow as tf
-import tensorflow_probability as tfp
 import numpy as np
 import pandas as pd
+import tensorflow as tf
+import tensorflow_probability as tfp
 from sklearn import metrics as skmetrics
 from tqdm import tqdm
 
@@ -57,7 +57,7 @@ def accuracy(probs, labels, n_thresholds=200):
     precision = tf.where(
         tf.math.is_finite(precision),
         precision,
-        tf.zeros_like(precision)
+        jnp.zeros_like(precision)
     )
     recall = TP/(TP+FN)
     auroc = auc(FPR, TPR)

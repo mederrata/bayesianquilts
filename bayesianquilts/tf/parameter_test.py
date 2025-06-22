@@ -1,7 +1,9 @@
 
-import tensorflow as tf
+import jax
+import jax.numpy as jnp
 
-from bayesianquilts.tf.parameter import Decomposed, Interactions
+from bayesianquilts.jax.parameter import Decomposed, Interactions
+
 
 def demo():
     interaction = Interactions(
@@ -29,14 +31,14 @@ def demo():
     beta_effective = beta.lookup(indices)
     print(beta_effective.shape)
 
-    @tf.function
+    @jax.jit
     def test_lookup_graph():
         return beta.lookup(indices)
 
-    x = tf.ones([100])
+    x = jnp.ones([100])
     print(beta.dot_sum(indices, x))
 
-    @tf.function
+    @jax.jit
     def test_sumparts_graph():
         return beta.dot_sum(indices, x)
 

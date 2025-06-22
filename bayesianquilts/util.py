@@ -3,10 +3,10 @@ import os
 import tempfile
 import uuid
 
+import jax.numpy as jnp
 import numpy as np
 import tensorflow as tf
 from keras.src.optimizers.schedules import learning_rate_schedule
-from tensorflow.raw_ops import UniqueV2 as unique
 from tensorflow_probability.python import util as tfp_util
 from tqdm import tqdm
 
@@ -111,14 +111,14 @@ def batched_minimize(
         grads = tape.gradient(loss, trainable_variables)
         
         flat_grads = tf.nest.flatten(grads)
-        flat_grads = [g if not (g is None) else tf.zeros_like(t) for g, t in zip(flat_grads, trainable_variables)]
+        flat_grads = [g if not (g is None) else jnp.zeros_like(t) for g, t in zip(flat_grads, trainable_variables)]
         flat_grads = [
-            tf.cond(tf.math.is_finite(loss), lambda: t, lambda: tf.zeros_like(t))
+            tf.cond(tf.math.is_finite(loss), lambda: t, lambda: jnp.zeros_like(t))
             for t in flat_grads
         ]
 
         for i, t in enumerate(flat_grads):
-            t = tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
+            t = tf.where(tf.math.is_finite(t), t, jnp.zeros_like(t))
             gradient_accumulation[i].assign_add(t, read_value=False)
 
         state = trace_fn(
@@ -192,7 +192,7 @@ def batched_minimize(
                 batch_losses += [[]]
                 gradient_accumulation = [
                     tf.Variable(
-                        tf.zeros_like(v),
+                        jnp.zeros_like(v),
                         trainable=False,
                         name="grad_accum_" + str(i),
                         synchronization=tf.VariableSynchronization.ON_READ,
@@ -497,7 +497,8 @@ class CountEncoder(object):
         # x = tf.strings.split(x, ",")
         shape = tf.constant([self.N_keys + 1])
         x = self.table.lookup(x)
-        y, idx, count = tf.unique_with_counts(x)
+        y, idx, count = jnp.unique(x, return_index=True, return_counts=True)
+        count = tf.gather(x)
         counts = tf.scatter_nd(y[..., tf.newaxis], tf.cast(count, tf.int32), shape)
         return tf.cast(counts, tf.float64)
 
@@ -530,7 +531,7 @@ class PiecewiseFunction(object):
             last = 1
 
         if len(values.shape.as_list()) > len(breakpoints.shape.as_list()):
-            breakpoints += tf.zeros(
+            breakpoints += jnp.zeros(
                 values.shape.as_list()[:-1] + [last],
                 breakpoints.dtype,
             )
@@ -560,9 +561,9 @@ class PiecewiseFunction(object):
         right_batch_shape = right.shape.as_list()[:-1]
 
         if len(left_batch_shape) < len(right_batch_shape):
-            left += tf.zeros(right_batch_shape + left.shape.as_list()[-1:], self.dtype)
+            left += jnp.zeros(right_batch_shape + left.shape.as_list()[-1:], self.dtype)
         elif len(left_batch_shape) > len(right_batch_shape):
-            right += tf.zeros(left_batch_shape + right.shape.as_list()[-1:], self.dtype)
+            right += jnp.zeros(left_batch_shape + right.shape.as_list()[-1:], self.dtype)
 
         breakpoints = tf.concat([left, right], axis=-1)
         breakpoints, _ = unique(x=breakpoints, axis=[-1])

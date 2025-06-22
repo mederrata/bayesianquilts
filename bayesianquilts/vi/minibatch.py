@@ -1,40 +1,12 @@
 import functools
-import inspect
-import os
-import tempfile
-import uuid
-from collections import defaultdict
-from pathlib import Path
 
-import numpy as np
+import jax.numpy as jnp
 import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow.python.data.ops.dataset_ops import BatchDataset
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import control_flow_ops, math_ops, state_ops
-from tensorflow.python.tools.inspect_checkpoint import print_tensors_in_checkpoint_file
-from tensorflow.python.training import optimizer
-from tensorflow_probability.python import util as tfp_util
-from tensorflow_probability.python.bijectors import softplus as softplus_lib
-from tensorflow_probability.python.distributions.transformed_distribution import (
-    TransformedDistribution,
-)
-from tensorflow_probability.python.internal import (
-    dtype_util,
-    prefer_static,
-    tensorshape_util,
-)
-from tensorflow_probability.python.vi import csiszar_divergence, kl_reverse
-from tqdm import tqdm
-
-from tensorflow_probability.python.vi import GradientEstimators
 from tensorflow_probability.python import monte_carlo
+from tensorflow_probability.python.vi import (GradientEstimators,
+                                              csiszar_divergence, kl_reverse)
 
-from bayesianquilts.util import (
-    batched_minimize,
-    TransformedVariable,
-)
-from bayesianquilts.util import _trace_loss
+from bayesianquilts.util import _trace_loss, batched_minimize
 
 
 # @tf.function(autograph=False)
@@ -84,7 +56,7 @@ def minibatch_mc_variational_loss(
     reweighted = functools.partial(
         target_log_prob_fn,
         data=data,
-        prior_weight=tf.cast(batch_size / dataset_size, tf.float64),
+        prior_weight=jnp.astype(batch_size / dataset_size, jnp.float64),
     )
 
     def sample_expected_elbo(q_samples, q_lp):
@@ -94,7 +66,7 @@ def minibatch_mc_variational_loss(
             prior_weight=tf.constant(batch_size / dataset_size),
             **q_samples,
         )
-        expected_elbo = tf.reduce_mean(q_lp * batch_size / dataset_size - penalized_ll)
+        expected_elbo = jnp.mean(q_lp * batch_size / dataset_size - penalized_ll)
 
         return expected_elbo
 
@@ -122,7 +94,7 @@ def minibatch_mc_variational_loss(
             ]
         else:
             batch_expectations += [sample_expected_elbo(q_samples, q_lp)]
-    batch_expectations = tf.reduce_mean(batch_expectations, axis=0)
+    batch_expectations = jnp.mean(batch_expectations, axis=0)
     return batch_expectations
 
 

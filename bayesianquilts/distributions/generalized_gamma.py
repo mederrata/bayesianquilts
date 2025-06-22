@@ -14,30 +14,23 @@
 # ============================================================================
 """The GeneralizedGamma distribution class."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+from __future__ import absolute_import, division, print_function
 
 import tensorflow.compat.v2 as tf
 import tensorflow_probability as tfp
-
-from tensorflow_probability.python.distributions import distribution
-
-from tensorflow_probability.python.internal import assert_util
-from tensorflow_probability.python.internal import distribution_util
-from tensorflow_probability.python.internal import dtype_util
-from tensorflow_probability.python.internal import prefer_static
-from tensorflow_probability.python.internal import reparameterization
-from tensorflow_probability.python.internal import tensor_util
-from tensorflow_probability.python.bijectors import softplus as softplus_bijector
-from tensorflow_probability.python.internal import parameter_properties
-
-from tensorflow_probability.python.distributions import kullback_leibler
-
-import tensorflow_probability.python.distributions as tfd
 import tensorflow_probability.python.bijectors as tfb
-
+import tensorflow_probability.python.distributions as tfd
+from tensorflow_probability.python.bijectors import \
+    softplus as softplus_bijector
+from tensorflow_probability.python.distributions import (distribution,
+                                                         kullback_leibler)
+from tensorflow_probability.python.internal import (assert_util,
+                                                    distribution_util,
+                                                    dtype_util,
+                                                    parameter_properties,
+                                                    prefer_static,
+                                                    reparameterization,
+                                                    tensor_util)
 
 __all__ = [
     'GeneralizedGamma',
@@ -168,7 +161,7 @@ class GeneralizedGamma(distribution.Distribution):
         mode = tf.where(
             concentration > 1.,
             mode,
-            tf.zeros_like(mode)
+            jnp.zeros_like(mode)
         )
         return mode
 

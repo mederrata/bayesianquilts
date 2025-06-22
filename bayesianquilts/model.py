@@ -6,18 +6,17 @@ from collections import defaultdict
 from typing import Callable
 
 import dill
+import jax
+import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
-import tensorflow_probability as tfp
+import tensorflow_probability.substrates.jax as tfp
 from arviz.data import InferenceData
 from arviz.data.base import dict_to_dataset
 from tensorflow_probability.python import distributions as tfd
 from tqdm import tqdm
 
 from bayesianquilts.distributions import FactorizedDistributionMoments
-from bayesianquilts.tf.parameter import (
-    MultiwayContingencyTable,
-)
+from bayesianquilts.tf.parameter import MultiwayContingencyTable
 from bayesianquilts.util import DummyObject, batched_minimize
 from bayesianquilts.vi.advi import build_surrogate_posterior
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
@@ -37,7 +36,7 @@ class BayesianModel(ABC):
         data: tf.data.Dataset | None = None,
         data_transform_fn: Callable | None = None,
         strategy: tf.distribute.Strategy | None = None,
-        dtype: tf.DType = tf.float64,
+        dtype: jnp.dtype =jnp.float64,
         **kwargs,
     ):
         """Instantiate Model object based on tensorflow dataset
@@ -76,7 +75,7 @@ class BayesianModel(ABC):
         dataset_size: int,
         num_steps: int = 100,
         learning_rate: float = 0.1,
-        opt: tf.keras.optimizers.Optimizer | None = None,
+        opt: jax.optimizers.Optimizer | None = None,
         abs_tol: float = 1e-10,
         rel_tol: float = 1e-8,
         clip_value: float = 5.0,
@@ -87,7 +86,7 @@ class BayesianModel(ABC):
         set_expectations: bool = False,
         sample_size: int = 24,
         sample_batches: int = 1,
-        trainable_variables: list[tf.Variable] | None = None,
+        trainable_variables: list[jax.typing.ArrayLike] | None = None,
         unormalized_log_prob_fn: Callable | None = None,
         accumulate_batches: bool = False,
         batches_per_step: int | None = None,
@@ -159,74 +158,22 @@ class BayesianModel(ABC):
             mean, var = FactorizedDistributionMoments(
                 self.surrogate_distribution, samples=samples
             )
-            self.calibrated_expectations = {k: tf.Variable(v) for k, v in mean.items()}
+            self.calibrated_expectations = {k: v for k, v in mean.items()}
             self.calibrated_sd = {
-                k: tf.Variable(tf.math.sqrt(v)) for k, v in var.items()
+                k: jnp.sqrt(v) for k, v in var.items()
             }
         else:
             self.calibrated_expectations = {
-                k: tf.Variable(tf.reduce_mean(v, axis=0, keepdims=True))
+                k: jnp.mean(v, axis=0, keepdims=True)
                 for k, v in self.surrogate_sample.items()
             }
 
             self.calibrated_sd = {
-                k: tf.Variable(tf.math.reduce_std(v, axis=0, keepdims=True))
+                k: jnp.std(v, axis=0, keepdims=True)
                 for k, v in self.surrogate_sample.items()
             }
 
-    def calibrate_mcmc(
-        self,
-        batched_data_factory,
-        dataset_size,
-        batch_size,
-        num_steps=1000,
-        burnin=500,
-        init_state=None,
-        step_size=1e-1,
-        nuts=True,
-        data_batches=10,
-        clip=None,
-    ):
-        """Calibrate using HMC/NUT
-        Keyword Arguments:
-            num_chains {int} -- [description] (default: {1})
-        """
 
-        if init_state is None:
-            init_state = self.calibrated_expectations
-
-        step_size = tf.cast(step_size, self.dtype)
-
-        initial_list = [init_state[v] for v in self.var_list]
-        bijectors = [self.bijectors[k] for k in self.var_list]
-
-        dataset = batched_data_factory()
-
-        @tf.function(autograph=True)
-        def energy(*x):
-            energies = [
-                self.unormalized_log_prob_list(
-                    batch, x, prior_weight=tf.constant(batch_size / dataset_size)
-                )
-                for batch in dataset
-            ]
-
-            return tf.add_n(energies)
-
-        samples, sampler_stat = run_chain(
-            init_state=initial_list,
-            step_size=step_size,
-            target_log_prob_fn=(
-                energy if clip is None else clip_gradients(energy, clip)
-            ),
-            unconstraining_bijectors=bijectors,
-            num_steps=num_steps,
-            burnin=burnin,
-        )
-        self.surrogate_sample = {k: sample for k, sample in zip(self.var_list, samples)}
-        self.set_calibration_expectations()
-
-        return samples, sampler_stat
 
     @abstractmethod
     def predictive_distribution(self, data, **params):
@@ -273,18 +220,18 @@ class BayesianModel(ABC):
             batch_log_likelihoods = [
                 self.log_likelihood(**this_split, data=batch) for this_split in splits
             ]
-            batch_log_likelihoods = tf.concat(batch_log_likelihoods, axis=0)
-            finite_part = tf.where(
-                tf.math.is_finite(batch_log_likelihoods),
+            batch_log_likelihoods = jnp.concatenate(batch_log_likelihoods, axis=0)
+            finite_part = jnp.where(
+                jnp.isfinite(batch_log_likelihoods),
                 batch_log_likelihoods,
-                tf.zeros_like(batch_log_likelihoods),
+                jnp.zeros_like(batch_log_likelihoods),
             )
-            min_val = tf.math.reduce_min(finite_part)
+            min_val =jnp.min(finite_part)
             #  batch_ll = tf.clip_by_value(batch_ll, min_val-1000, 0.)
-            batch_log_likelihoods = tf.where(
-                tf.math.is_finite(batch_log_likelihoods),
+            batch_log_likelihoods = jnp.where(
+                jnp.finite.is_finite(batch_log_likelihoods),
                 batch_log_likelihoods,
-                tf.ones_like(batch_log_likelihoods) * min_val * 1.01,
+                jnp.ones_like(batch_log_likelihoods) * min_val * 1.01,
             )
             ll += [batch_log_likelihoods.numpy()]
         ll = np.concatenate(ll, axis=1)
@@ -310,18 +257,18 @@ class BayesianModel(ABC):
         state["surrogate_sample"] = None
         for k in keys:
             # print(k)
-            if isinstance(state[k], tf.Tensor) or isinstance(state[k], tf.Variable):
-                state[k] = state[k].numpy()
+            if isinstance(state[k], jax.typing.ArrayLike):
+                state[k] = state[k]
             elif isinstance(state[k], dict) or isinstance(state[k], list):
                 try:
                     flat = tf.nest.flatten(state[k])
                     new = []
                     for t in flat:
-                        if isinstance(t, tf.Tensor) or isinstance(t, tf.Variable):
+                        if isinstance(t, jax.typing.ArrayLike):
                             new += [t.numpy()]
                         elif hasattr(inspect.getmodule(t), "__name__"):
                             if inspect.getmodule(t).__name__.startswith("tensorflow"):
-                                if not isinstance(t, tf.dtypes.DType):
+                                if not isinstance(t, jnp.dtype):
                                     new += [None]
                                 else:
                                     new += [None]
@@ -329,28 +276,28 @@ class BayesianModel(ABC):
                                 new += [t]
                         else:
                             new += [t]
-                    state[k] = tf.nest.pack_sequence_as(state[k], new)
+                    state[k] = jax.tree_util.tree_unflatten(state[k], new)
                 except TypeError:
                     state[k] = None
                     print(f"failed serializing {k}")
             elif hasattr(inspect.getmodule(state[k]), "__name__"):
                 if inspect.getmodule(state[k]).__name__.startswith("tensorflow"):
-                    if not isinstance(state[k], tf.dtypes.DType):
+                    if not isinstance(state[k], jnp.dtypes.DType):
                         del state[k]
         state["strategy"] = None
         return state
 
-    def unormalized_log_prob_list(self, data, params, prior_weight=tf.constant(1)):
+    def unormalized_log_prob_list(self, data, params, prior_weight=1.):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
         return self.unormalized_log_prob(
-            data=data, prior_weight=tf.cast(prior_weight, self.dtype), **dict_params
+            data=data, prior_weight=jnp.astype(prior_weight, self.dtype), **dict_params
         )
 
     @abstractmethod
     def unormalized_log_prob(
         self,
-        data: dict[str, tf.Tensor] = None,
-        prior_weight: tf.Tensor | float = tf.constant(1.0),
+        data: dict[str, jax.typing.ArrayLike] = None,
+        prior_weight: jax.typing.ArrayLike| float = jnp.array(1.0),
         **params,
     ):
         """Generic method for the unormalized log probability function"""
@@ -367,7 +314,7 @@ class BayesianModel(ABC):
                 data, **other.sample(samples)
             )["rv_outcome"]
             delta = other_prediction.kl_divergence(this_prediction)
-            return tf.reduce_mean(delta)
+            return jnp.mean(delta)
 
         return batched_minimize(
             objective,
@@ -390,7 +337,7 @@ class BayesianModel(ABC):
             try:
                 for j, value in tqdm(enumerate(state["surrogate_vars"])):
                     self.surrogate_distribution.trainable_variables[j].assign(
-                        tf.cast(value, self.dtype)
+                        jnp.astype(value, self.dtype)
                     )
             except KeyError:
                 self.state = state
@@ -429,7 +376,6 @@ class BayesianModel(ABC):
 
     def __setstate__(self, state):
         self.__dict__ = state.copy()
-        #  self.dtype = tf.float64
         self.reconstitute(state)
         self.saved_state = state
 
@@ -441,7 +387,7 @@ def generate_distributions(
     dim_decay_factor=1.0,
     scale=1.0,
     gaussian_only=True,
-    dtype=tf.float32,
+    dtype=jnp.float32,
     surrogate_params=None,
     gen_surrogate=True,
 ):
@@ -480,8 +426,8 @@ def generate_distributions(
     for label, tensor in tensors.items():
         prior_dict[label] = tfd.Independent(
             tfd.Normal(
-                loc=tf.zeros_like(tf.cast(tensor, dtype)),
-                scale=tf.ones_like(tf.cast(tensor, dtype)),
+                loc=jnp.zeros_like(jnp.astype(tensor, dtype)),
+                scale=jnp.ones_like(jnp.astype(tensor, dtype)),
             ),
             reinterpreted_batch_ndims=len(tensor.shape.as_list()),
         )

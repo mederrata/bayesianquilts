@@ -45,7 +45,7 @@ def gpinv(p, k, sigma):
         x = tf.tensor_scatter_nd_update(
             x,
             tf.where(tf.equal(p, 0))[:, tf.newaxis],
-            tf.zeros_like(tf.where(tf.equal(p, 0))),
+            jnp.zeros_like(tf.where(tf.equal(p, 0))),
         )
         if k >= 0:
             x = tf.tensor_scatter_nd_update(

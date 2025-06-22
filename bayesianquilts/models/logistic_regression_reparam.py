@@ -1,31 +1,14 @@
 #!/usr/bin/env python3
 """Example quilt model
 """
-import argparse
-import sys
-import os
-import csv
-import itertools
 from collections import defaultdict
-from itertools import product
-import arviz as az
-from tqdm import tqdm
-import json
-
-import numpy as np
-import pandas as pd
 
 import tensorflow as tf
-import tensorflow_probability as tfp
-
+from tensorflow_probability.python import bijectors as tfb
+from tensorflow_probability.python import distributions as tfd
 
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.models.spmf import PoissonFactorization
-from bayesianquilts.tf.parameter import Interactions, Decomposed
 from bayesianquilts.vi.advi import build_surrogate_posterior
-
-from tensorflow_probability.python import distributions as tfd
-from tensorflow_probability.python import bijectors as tfb
 
 
 class LogisticRegression2(BayesianModel):
@@ -60,40 +43,40 @@ class LogisticRegression2(BayesianModel):
         joint_prior_dict = {}
         joint_prior_dict["z"] = tfd.Independent(
             tfd.Normal(
-                tf.zeros((self.dim_regressors), dtype=self.dtype),
-                tf.ones((self.dim_regressors), dtype=self.dtype),
+                jnp.zeros((self.dim_regressors), dtype=self.dtype),
+                jnp.ones((self.dim_regressors), dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=1,
         )
         joint_prior_dict["lambda"] = tfd.Independent(
             tfd.StudentT(
-                self.nu_local * tf.ones((self.dim_regressors), dtype=self.dtype),
-                tf.zeros((self.dim_regressors), dtype=self.dtype),
-                tf.ones((self.dim_regressors), dtype=self.dtype),
+                self.nu_local * jnp.ones((self.dim_regressors), dtype=self.dtype),
+                jnp.zeros((self.dim_regressors), dtype=self.dtype),
+                jnp.ones((self.dim_regressors), dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=1,
         )
         joint_prior_dict["tau"] = tfd.Independent(
             tfb.AbsoluteValue()(
                 tfd.StudentT(
-                    self.nu_global * tf.ones((1), dtype=self.dtype),
-                    tf.zeros((1), dtype=self.dtype),
-                    self.scale_global * tf.ones((1), dtype=self.dtype),
+                    self.nu_global * jnp.ones((1), dtype=self.dtype),
+                    jnp.zeros((1), dtype=self.dtype),
+                    self.scale_global * jnp.ones((1), dtype=self.dtype),
                 )
             ),
             reinterpreted_batch_ndims=1,
         )
         joint_prior_dict["caux"] = tfd.Independent(
             tfd.InverseGamma(
-                0.5 * self.slab_df * tf.ones((1), dtype=self.dtype),
-                0.5 * self.slab_df * tf.ones((1), dtype=self.dtype),
+                0.5 * self.slab_df * jnp.ones((1), dtype=self.dtype),
+                0.5 * self.slab_df * jnp.ones((1), dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=1,
         )
         joint_prior_dict["beta0"] = tfd.Independent(
             tfd.Normal(
-                tf.zeros((1), dtype=self.dtype),
-                self.scale_icept * tf.ones((1), dtype=self.dtype),
+                jnp.zeros((1), dtype=self.dtype),
+                self.scale_icept * jnp.ones((1), dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=1,
         )
@@ -165,13 +148,13 @@ class LogisticRegression2(BayesianModel):
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 10.0
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
 
         prior = self.prior_distribution.log_prob(params)
@@ -349,11 +332,11 @@ class LogisticRegression2(BayesianModel):
         # variance descent -(log ell)'/l
 
         def T_I():
-            Q = tf.zeros_like(log_ell)
+            Q = jnp.zeros_like(log_ell)
             return (
                 beta[:, tf.newaxis, :] + Q[..., tf.newaxis],
                 intercept[..., tf.newaxis] + Q[..., tf.newaxis],
-                tf.zeros_like(Q),
+                jnp.zeros_like(Q),
             )
 
         def T_var():
