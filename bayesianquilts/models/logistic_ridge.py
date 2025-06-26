@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """Example quilt model
 """
-import argparse
-import csv
-import itertools
-import json
-import os
-import sys
-from itertools import product
 
-import arviz as az
-import numpy as np
-import pandas as pd
-import tensorflow as tf
-import tensorflow_probability as tfp
-from tqdm import tqdm
+import jax.numpy as jnp
+import tensorflow_probability.substrates.jax as tfp
+import tensorflow_probability.substrates.jax.distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.tf.parameter import Decomposed, Interactions

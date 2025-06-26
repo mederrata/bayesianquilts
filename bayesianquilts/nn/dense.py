@@ -2,13 +2,14 @@ import inspect
 from abc import abstractmethod
 from typing import Any, Callable
 
+import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
-import tensorflow_probability as tfp
+import tensorflow_probability.substrates.jax as tfp
 from tensorflow_probability.python import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.vi.advi import build_surrogate_posterior
+from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 
 class Dense(object):
@@ -421,7 +422,7 @@ class DenseGaussian(BayesianModel):
 
         self.bijectors = bijectors
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
-        self.surrogate_distribution = build_surrogate_posterior(
+        self.surrogate_distribution = build_factored_surrogate_posterior_generator(
             self.prior_distribution, bijectors, dtype=self.dtype, initializers=initial
         )
         self.var_list = list(self.surrogate_distribution.model.keys())

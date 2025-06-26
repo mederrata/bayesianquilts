@@ -7,9 +7,9 @@ Note that you currently have to babysit the optimization a bit
 from itertools import cycle
 
 import numpy as np
-import tensorflow as tf
 import tensorflow_probability as tfp
 from tensorflow_probability import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
 from bayesianquilts.model import BayesianModel

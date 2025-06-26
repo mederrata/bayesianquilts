@@ -1,9 +1,9 @@
 import numpy as np
-import tensorflow as tf
 import tensorflow_probability as tfp
-
-from tensorflow_probability.python import distributions as tfd
 from tensorflow_probability.python import bijectors as tfb
+from tensorflow_probability.python import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
+
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.models.logistic_relunet import LogisticRelunet
 

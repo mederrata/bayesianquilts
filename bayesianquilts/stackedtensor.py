@@ -31,7 +31,7 @@ def broadcast_tensors(tensors):
 
     # Broadcast the tensors
     for axis, dimension in enumerate(broadcast_shape):
-        tensors = [jnp.concat([t] * dimension, axis=axis)
+        tensors = [jnp.concatenate([t] * dimension, axis=axis)
                    if t.shape[axis] == 1 else t for t in tensors]
 
     return tensors

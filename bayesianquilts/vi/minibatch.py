@@ -1,15 +1,15 @@
 import functools
+import typing
 
 import jax.numpy as jnp
-import tensorflow as tf
-from tensorflow_probability.python import monte_carlo
-from tensorflow_probability.python.vi import (GradientEstimators,
-                                              csiszar_divergence, kl_reverse)
+from tensorflow_probability.substrates.jax import monte_carlo
+from tensorflow_probability.substrates.jax.vi import (GradientEstimators,
+                                                      csiszar_divergence,
+                                                      kl_reverse)
 
-from bayesianquilts.util import _trace_loss, batched_minimize
+from bayesianquilts.util import training_loop
 
 
-# @tf.function(autograph=False)
 def minibatch_mc_variational_loss(
     target_log_prob_fn,
     surrogate_posterior,
@@ -43,14 +43,12 @@ def minibatch_mc_variational_loss(
     Returns:
         _type_: _description_
     """
-    # @tf.function
     def sample_elbo():
         q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
             sample_size, seed=seed
         )
         return q_samples, q_lp
 
-    # @tf.function(autograph=False)
     batch_expectations = []
 
     reweighted = functools.partial(
@@ -63,7 +61,7 @@ def minibatch_mc_variational_loss(
 
         penalized_ll = target_log_prob_fn(
             data=data,
-            prior_weight=tf.constant(batch_size / dataset_size),
+            prior_weight= batch_size / dataset_size,
             **q_samples,
         )
         expected_elbo = jnp.mean(q_lp * batch_size / dataset_size - penalized_ll)
@@ -101,41 +99,28 @@ def minibatch_mc_variational_loss(
 def minibatch_fit_surrogate_posterior(
     target_log_prob_fn,
     surrogate_posterior,
-    batched_data_factory,
-    batch_size,
-    dataset_size,
-    num_steps=1000,
-    trace_fn=_trace_loss,
+    data_iterator,
+    dataset_size: int,
+    batch_size: int = 1,
+    steps_per_epoch: int = 1,
+    num_epochs: int = 1,
+    accumulation_steps: int = 1,
     sample_size=8,
     sample_batches=1,
-    check_every=1,
-    decay_rate=0.9,
+    lr_decay_factor: float = 0.5,
     learning_rate=1.0,
-    clip_value=10.0,
-    clip_by="norm",
-    trainable_variables=None,
-    jit_compile=None,
-    accumulate_batches=False,
-    batches_per_step=1,
-    abs_tol=None,
-    rel_tol=None,
-    strategy=None,
+    patience: int = 3,
+    trainable_variables: typing.List[str] = None,
     name=None,
     test_fn=None,
     **kwargs,
 ):
     if trainable_variables is None:
-        trainable_variables = surrogate_posterior.trainable_variables
+        trainable_variables = list(surrogate_posterior.parameters['model'].keys())
 
     def complete_variational_loss_fn(data=None):
         """This becomes the loss function called in the
-        optimization loop
-
-        Keyword Arguments:
-            data {tf.data.Datasets batch} -- [description] (default: {None})
-
-        Returns:
-            [type] -- [description]
+        optimization loop. It gets called on each minibatch of data.
         """
         return minibatch_mc_variational_loss(
             target_log_prob_fn,
@@ -145,26 +130,24 @@ def minibatch_fit_surrogate_posterior(
             data=data,
             dataset_size=dataset_size,
             batch_size=batch_size,
-            strategy=strategy,
             name=name,
             **kwargs,
         )
 
-    return batched_minimize(
-        complete_variational_loss_fn,
-        batched_data_factory=batched_data_factory,
-        num_steps=num_steps,
-        trace_fn=trace_fn,
+    return training_loop(
+        loss_fn=complete_variational_loss_fn,
+        base_optimizer_fn=None,
+        trainable_filter=None,
+        params=None,
+        data_iterator=data_iterator,
+        num_epochs=num_epochs,
+        steps_per_epoch=steps_per_epoch,
+        accumulation_steps=accumulation_steps,
         learning_rate=learning_rate,
-        trainable_variables=trainable_variables,
-        abs_tol=abs_tol,
-        rel_tol=rel_tol,
-        clip_value=clip_value,
-        clip_by=clip_by,
-        accumulate_batches=accumulate_batches,
-        batches_per_step=batches_per_step,
-        decay_rate=decay_rate,
-        check_every=check_every,
-        test_fn=test_fn,
+        # trainable_variables=trainable_variables,
+        # clip_value=clip_value,
+        # clip_by=clip_by,
+        patience=patience,
+        lr_decay_factor=lr_decay_factor,
         **kwargs,
     )

@@ -4,18 +4,16 @@
 
 from collections import defaultdict
 
-import arviz as az
+import jax.numpy as jnp
 import numpy as np
-import pandas as pd
-import tensorflow as tf
-import tensorflow_probability as tfp
+import tensorflow_probability.substrates.jax as tfp
 from tensorflow.python.ops.math_ops import _bucketize as bucketize
 from tensorflow_probability.python import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.tf.parameter import Decomposed
 from bayesianquilts.util import flatten
-from bayesianquilts.vi.advi import build_surrogate_posterior
 
 
 class LogisticBayesianquilt(BayesianModel):
@@ -225,7 +223,7 @@ class LogisticBayesianquilt(BayesianModel):
         bijectors["c2"] = tfp.bijectors.Softplus()
         bijectors["lambda_j"] = tfp.bijectors.Softplus()
 
-        regression_surrogate = build_surrogate_posterior(
+        regression_surrogate = build_factored_surrogate_posterior(
             regression_model,
             initializers=regressor_tensors,
             bijectors=bijectors,

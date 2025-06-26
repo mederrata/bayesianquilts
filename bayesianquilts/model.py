@@ -1,6 +1,5 @@
 import gzip
 import inspect
-import tempfile
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable
@@ -9,20 +8,21 @@ import dill
 import jax
 import jax.numpy as jnp
 import numpy as np
-import tensorflow_probability.substrates.jax as tfp
+import tensorflow_probability.substrates.jax.distributions as tfd
 from arviz.data import InferenceData
 from arviz.data.base import dict_to_dataset
-from tensorflow_probability.python import distributions as tfd
+from flax import nnx
+from jax import random
+from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 from bayesianquilts.distributions import FactorizedDistributionMoments
 from bayesianquilts.tf.parameter import MultiwayContingencyTable
-from bayesianquilts.util import DummyObject, batched_minimize
-from bayesianquilts.vi.advi import build_surrogate_posterior
+from bayesianquilts.util import DummyObject, training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
 
-class BayesianModel(ABC):
+class BayesianModel(ABC, nnx.Module):
     surrogate_distribution = None
     surrogate_sample = None
     prior_distribution = None
@@ -33,10 +33,8 @@ class BayesianModel(ABC):
 
     def __init__(
         self,
-        data: tf.data.Dataset | None = None,
         data_transform_fn: Callable | None = None,
-        strategy: tf.distribute.Strategy | None = None,
-        dtype: jnp.dtype =jnp.float64,
+        dtype: jax.typing.DTypeLike = jnp.float64,
         **kwargs,
     ):
         """Instantiate Model object based on tensorflow dataset
@@ -49,10 +47,8 @@ class BayesianModel(ABC):
             AttributeError: [description]
         """
         super(BayesianModel, self).__init__()
-        if data is not None:
-            self.set_data(data, data_transform_fn)
+        self.data_transform_fn = data_transform_fn
 
-        self.strategy = strategy
         self.dtype = dtype
 
     def fit(self, *args, **kwargs):
@@ -73,25 +69,17 @@ class BayesianModel(ABC):
         batched_data_factory: Callable,
         batch_size: int,
         dataset_size: int,
-        num_steps: int = 100,
-        learning_rate: float = 0.1,
-        opt: jax.optimizers.Optimizer | None = None,
-        abs_tol: float = 1e-10,
-        rel_tol: float = 1e-8,
-        clip_value: float = 5.0,
-        clip_by: str = "norm",
-        max_decay_steps: int = 25,
-        lr_decay_factor: float = 0.99,
-        check_every: int = 1,
-        set_expectations: bool = False,
-        sample_size: int = 24,
-        sample_batches: int = 1,
+        steps_per_epoch: int = 1,
+        num_epochs: int = 1,
+        accumulation_steps: int = 1,
+        sample_size=8,
+        sample_batches=1,
+        lr_decay_factor: float = 0.5,
+        learning_rate=1.0,
+        patience: int = 3,
         trainable_variables: list[jax.typing.ArrayLike] | None = None,
         unormalized_log_prob_fn: Callable | None = None,
-        accumulate_batches: bool = False,
-        batches_per_step: int | None = None,
-        temp_dir: str = tempfile.gettempdir(),
-        test_fn: Callable = None,
+        set_expectations=True,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -105,7 +93,6 @@ class BayesianModel(ABC):
             abs_tol ([type], optional): [description]. Defaults to 1e-10.
             rel_tol ([type], optional): [description]. Defaults to 1e-8.
             clip_value ([type], optional): [description]. Defaults to 5..
-            max_decay_steps (int, optional): [description]. Defaults to 25.
             lr_decay_factor (float, optional): [description]. Defaults to 0.99.
             check_every (int, optional): [description]. Defaults to 25.
             set_expectations (bool, optional): [description]. Defaults to True.
@@ -114,7 +101,7 @@ class BayesianModel(ABC):
         if trainable_variables is None:
             trainable_variables = self.surrogate_distribution.variables
 
-        def run_approximation(num_steps):
+        def run_approximation():
             losses = minibatch_fit_surrogate_posterior(
                 target_log_prob_fn=(
                     unormalized_log_prob_fn
@@ -124,29 +111,20 @@ class BayesianModel(ABC):
                 surrogate_posterior=self.surrogate_distribution,
                 dataset_size=dataset_size,
                 batch_size=batch_size,
-                num_steps=num_steps,
                 sample_size=sample_size,
                 sample_batches=sample_batches,
                 learning_rate=learning_rate,
-                max_decay_steps=max_decay_steps,
-                decay_rate=lr_decay_factor,
-                abs_tol=abs_tol,
-                rel_tol=rel_tol,
-                opt=opt,
-                clip_value=clip_value,
-                clip_by=clip_by,
-                check_every=check_every,
-                strategy=self.strategy,
-                accumulate_batches=accumulate_batches,
-                batches_per_step=batches_per_step,
-                trainable_variables=trainable_variables,
-                batched_data_factory=batched_data_factory,
-                test_fn=test_fn,
+                patience=patience,
+                lr_decay_factor=lr_decay_factor,
+                steps_per_epoch=steps_per_epoch,
+                num_epochs=num_epochs,
+                accumulation_steps=accumulation_steps,
+                data_iterator=batched_data_factory,
                 **kwargs,
             )
             return losses
 
-        losses = run_approximation(num_steps)
+        losses = run_approximation()
         if set_expectations:
             if (not np.isnan(losses[-1])) and (not np.isinf(losses[-1])):
                 self.surrogate_sample = self.surrogate_distribution.sample(100)
@@ -316,7 +294,7 @@ class BayesianModel(ABC):
             delta = other_prediction.kl_divergence(this_prediction)
             return jnp.mean(delta)
 
-        return batched_minimize(
+        return training_loop(
             objective,
             batched_data_factory=batched_data_factory,
             num_steps=num_steps,
@@ -349,15 +327,16 @@ class BayesianModel(ABC):
         return params
 
     def sample(self, batch_shape=None, prior=False):
+        _, sample_key = random.split(random.PRNGKey(0))
         if prior:
             if batch_shape is None:
-                params = self.prior_distribution.sample()
+                params = self.prior_distribution.sample(seed=sample_key)
             else:
-                params = self.prior_distribution.sample(batch_shape)
+                params = self.prior_distribution.sample(batch_shape, seed=sample_key)
         elif batch_shape is None:
-            return self.surrogate_distribution.sample()
+            return self.surrogate_distribution.sample(seed=sample_key)
         else:
-            params = self.surrogate_distribution.sample(batch_shape)
+            params = self.surrogate_distribution.sample(batch_shape, seed=sample_key)
         params = self.transform(params)
         return params
 

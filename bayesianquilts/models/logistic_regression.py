@@ -2,12 +2,13 @@
 """Example quilt model
 """
 
-import tensorflow as tf
-import tensorflow_probability as tfp
+import jax.numpy as jnp
+import tensorflow_probability.substrates.jax as tfp
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.tf.parameter import Decomposed, Interactions
-from bayesianquilts.vi.advi import build_surrogate_posterior
+from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 tfd = tfp.distributions
 
@@ -131,9 +132,11 @@ class LogisticRegression(BayesianModel):
         )
 
         regression_model = tfd.JointDistributionNamed(regression_dict)
-        regression_surrogate = build_surrogate_posterior(
+        regression_surrogate_generator, regression_surrogate_param_init = build_factored_surrogate_posterior_generator(
             regression_model, initializers=regressor_tensors
         )
+        
+        
 
         #  Exponential params
         (
@@ -158,24 +161,20 @@ class LogisticRegression(BayesianModel):
             )
 
         intercept_prior = tfd.JointDistributionNamed(intercept_dict)
-        intercept_surrogate = build_surrogate_posterior(
+        intercept_surrogate_gen, intercept_param_init = build_factored_surrogate_posterior_generator(
             intercept_prior, initializers=intercept_tensors
         )
 
         self.prior_distribution = tfd.JointDistributionNamed(
             {"regression_model": regression_model, "intercept_model": intercept_prior}
         )
-        self.surrogate_distribution = tfd.JointDistributionNamed(
-            {**regression_surrogate.model, **intercept_surrogate.model}
+        self.surrogate_distribution_gen = lambda params: tfd.JointDistributionNamed(
+            {**regression_surrogate_generator(params).model, **intercept_surrogate_gen(params).model}
         )
-
-        self.regression_vars = regression_vars
-        self.regression_var_list = list(regression_surrogate.model.keys())
-        self.intercept_var_list = list(intercept_surrogate.model.keys())
-
-        self.surrogate_vars = self.surrogate_distribution.variables
-        self.var_list = list(self.surrogate_distribution.model.keys())
-        return None
+        self.surrogate_parameter_initializer = lambda: {
+            **regression_surrogate_param_init(),
+            **intercept_param_init(),
+        }
 
     def predictive_distribution(self, data, **params):
         try:

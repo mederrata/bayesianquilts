@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 
-import tensorflow as tf
 import tensorflow_probability as tfp
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.nn.dense import DenseGaussian, DenseHorseshoe
 

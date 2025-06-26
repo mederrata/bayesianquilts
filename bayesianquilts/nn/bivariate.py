@@ -1,8 +1,8 @@
 from typing import Callable
 
 import numpy as np
-import tensorflow as tf
 from tensorflow_probability.python import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.nn.dense import Dense
 

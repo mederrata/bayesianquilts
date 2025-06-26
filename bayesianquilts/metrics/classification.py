@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 import tensorflow_probability as tfp
 from sklearn import metrics as skmetrics
+from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 
