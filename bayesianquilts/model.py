@@ -301,7 +301,13 @@ class BayesianModel(ABC, nnx.Module):
             trainable_variables=self.surrogate_distribution.variables,
             **kwargs,
         )
-
+    @abstractmethod
+    def create_distributions():
+        """Create the prior and surrogate distributions for the model."""
+        raise NotImplementedError(
+            "This method should be implemented in subclasses to create the "
+            "prior and surrogate distributions."
+        )
     def reconstitute(self, state):
         surrogate_params = {t.name: t for t in state["surrogate_vars"]}
         if "max_order" in state.keys():
@@ -328,15 +334,16 @@ class BayesianModel(ABC, nnx.Module):
 
     def sample(self, batch_shape=None, prior=False):
         _, sample_key = random.split(random.PRNGKey(0))
+        surrogate = self.surrogate_distribution_generator(self.params)
         if prior:
             if batch_shape is None:
                 params = self.prior_distribution.sample(seed=sample_key)
             else:
                 params = self.prior_distribution.sample(batch_shape, seed=sample_key)
         elif batch_shape is None:
-            return self.surrogate_distribution.sample(seed=sample_key)
+            return surrogate.sample(seed=sample_key)
         else:
-            params = self.surrogate_distribution.sample(batch_shape, seed=sample_key)
+            params = surrogate.sample(batch_shape, seed=sample_key)
         params = self.transform(params)
         return params
 

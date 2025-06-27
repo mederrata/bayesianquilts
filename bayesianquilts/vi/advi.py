@@ -216,20 +216,21 @@ def build_factored_surrogate_posterior_generator(
             if k in bijectors.keys():
                 label += bijectors[k].name
             else:
-                label += "\\softplus"
+                label += f"\\{bijectors.get(k, tfb.Identity()).name}"
             label += "\\igamma"
             var_labels += [label + "\\concentration", label + "\\scale"]
         else:
             if k in bijectors.keys():
                 label += bijectors[k].name
             else:
-                label += "\\identity"
+                label += f"\\{bijectors.get(k, tfb.Identity()).name}"
             label += "\\normal"
             var_labels += [label + "\\loc", label + "\\scale"]
 
-    means = {k: jnp.mean(v, axis=0).astype(dtype) for k, v in prior_sample.items()}
 
-    prior_sample = joint_distribution_named.sample(seed=random.PRNGKey(0))
+    target_sample = joint_distribution_named.sample(num_samples, seed=random.PRNGKey(0))
+    means = {k: jnp.mean(v, axis=0).astype(dtype) for k, v in target_sample.items()}
+
     bijectors = defaultdict(tfb.Identity) if bijectors is None else bijectors
 
     def _init_params_fn():
@@ -272,8 +273,8 @@ def build_factored_surrogate_posterior_generator(
                 if k in bijectors.keys():
                     label += bijectors[k].name
                 else:
-                    label += "\\softplus"
-                label += "\\igamma"
+                    label += f"\\{bijectors.get(k, tfb.Identity()).name}"
+                label += f"\\igamma"
                 # Inverse Gamma distribution
                 surrogate_dict[k] = bijectors.get(k, tfb.Identity())(
                     build_trainable_InverseGamma_dist(
@@ -284,6 +285,7 @@ def build_factored_surrogate_posterior_generator(
                     )
                 )
             else:
+                label += f"\\{bijectors.get(k, tfb.Identity()).name}\\normal"
                 surrogate_dict[k] = bijectors.get(k, tfb.Identity())(
                     build_trainable_normal_dist(
                         tfb.Invert(bijectors.get(k, tfb.Identity()))(surrogate_params[label+"\\loc"]),
