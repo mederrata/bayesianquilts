@@ -17,7 +17,7 @@ class LogisticRegression2(BayesianModel):
     def __init__(
         self,
         dim_regressors,
-        scale_icept=1.0,
+        scale_icept: float=1.0,
         scale_global=1.0,
         nu_global=1.0,
         nu_local=1.0,

@@ -54,7 +54,6 @@ def build_trainable_concentration_scale_distribution(
     )
     with scope:
     """
-    scope = None
     name = "" if None else name
 
     dtype = dtype_util.common_dtype(
@@ -171,8 +170,7 @@ def build_factored_surrogate_posterior_generator(
     bijectors=None,
     exclude: typing.List[str] = [],
     num_samples: int = 25,
-    surrogate_params: dict[str, jax.typing.ArrayLike] = None,
-    initializers: dict[str, jax.typing.ArrayLike] = {},
+    surrogate_initializers: dict[str, jax.typing.ArrayLike] = None,
     prefix: str = None,
     gaussian_only: bool = False,
     dtype=jnp.float32,
@@ -188,43 +186,78 @@ def build_factored_surrogate_posterior_generator(
         name (_type_, optional): _description_. Defaults to None.
         gaussian_only (bool, optional): _description_. Defaults to False.
         dtype (_type_, optional): _description_. Defaults to jnp.float32.
-        surrogate_params (_type_, optional): Values for the underlying surrogate parameters. Defaults to None.
+        surrogate_params (_type_, optional): Values for the underlying surrogate parameters. Defaults to None. We'll use these values for initialization.
 
     Returns:
         _type_: _description_
     """
-    if surrogate_params is None:
-        surrogate_params = {}
+    if surrogate_initializers is None:
+        surrogate_initializers = {}
     _, sample_key = random.split(random.PRNGKey(0))
     prior_sample = joint_distribution_named.sample(seed=random.PRNGKey(0))
     # create the parameters for the surrogate posterior
-
+    var_labels = []
+    if bijectors is None: bijectors = defaultdict(tfb.Identity)
     for k, v in joint_distribution_named.model.items():
         if k in exclude:
             continue
-        # variable name is name_bijector_distribution_param
-        # for example, intercept_identity_normal_loc
-        label = k if prefix is None else f"{prefix}__{k}"
+        # variable name is prefix\name\distribution\param
+        # for example, prefix\intercept\normal\loc
+        label = k if prefix is None else f"{prefix}\\{k}"
         if callable(v):
             test_input = {a: prior_sample[a] for a in inspect.getfullargspec(v).args}
             test_distribution = v(**test_input)
+        else:
+            test_distribution = v
+        if (
+            isinstance(test_distribution.distribution, tfd.InverseGamma)
+            or isinstance(test_distribution.distribution, SqrtInverseGamma)
+        ) and not gaussian_only:
+            if k in bijectors.keys():
+                label += bijectors[k].name
+            else:
+                label += "\\softplus"
+            label += "\\igamma"
+            var_labels += [label + "\\concentration", label + "\\scale"]
+        else:
+            if k in bijectors.keys():
+                label += bijectors[k].name
+            else:
+                label += "\\identity"
+            label += "\\normal"
+            var_labels += [label + "\\loc", label + "\\scale"]
 
-    target_sample = joint_distribution_named.sample(int(num_samples), seed=sample_key)
-
-    surrogate_dict = {}
-    means = {}
-    for k, v in prior_sample.items():
-        pass
     means = {k: jnp.mean(v, axis=0).astype(dtype) for k, v in prior_sample.items()}
 
     prior_sample = joint_distribution_named.sample(seed=random.PRNGKey(0))
     bijectors = defaultdict(tfb.Identity) if bijectors is None else bijectors
 
-    def make_fn():
+    def _init_params_fn():
+        _params = {}
+        for label in var_labels:
+            if label in surrogate_initializers.keys():
+                _params[label] = surrogate_initializers[label]
+                continue
+            _config = label.split("\\")
+            k = _config[-4]
+            if _config[-1] == "loc":
+                _params[label] = jnp.zeros_like(means[k])
+            elif _config[-1] == "scale":
+                _params[label] = 5e-3*jnp.ones_like(means[k])
+            elif _config[-1] == "concentration":
+                _params[label] = jnp.ones_like(means[k]) * 2.0
+            else:
+                raise ValueError(f"Unknown parameter type: {_config[-1]}")
+        return _params
+    
+
+    def _make_dist_fn(surrogate_params: dict[str, jax.typing.ArrayLike]):
+        surrogate_dict = {}
+
         for k, v in joint_distribution_named.model.items():
             if k in exclude:
                 continue
-            label = k if prefix is None else f"{prefix}__{k}"
+            label = k if prefix is None else f"{prefix}\\{k}"
             if callable(v):
                 test_input = {
                     a: prior_sample[a] for a in inspect.getfullargspec(v).args
@@ -236,45 +269,41 @@ def build_factored_surrogate_posterior_generator(
                 isinstance(test_distribution.distribution, tfd.InverseGamma)
                 or isinstance(test_distribution.distribution, SqrtInverseGamma)
             ) and not gaussian_only:
-                surrogate_dict[k] = bijectors[k](
+                if k in bijectors.keys():
+                    label += bijectors[k].name
+                else:
+                    label += "\\softplus"
+                label += "\\igamma"
+                # Inverse Gamma distribution
+                surrogate_dict[k] = bijectors.get(k, tfb.Identity())(
                     build_trainable_InverseGamma_dist(
-                        2.0 * jnp.ones(test_distribution.event_shape, dtype=dtype),
-                        jnp.ones(test_distribution.event_shape, dtype=dtype),
+                        surrogate_params[label+"\\concentration"], # 2.0 * jnp.ones(test_distribution.event_shape, dtype=dtype),
+                        surrogate_params[label+"\\scale"],# jnp.ones(test_distribution.event_shape, dtype=dtype),
                         len(test_distribution.event_shape),
-                        strategy=strategy,
                         name=label,
                     )
                 )
             else:
-                if k in initializers.keys():
-                    loc = initializers[k]
-                else:
-                    loc = means[k]
-                surrogate_dict[k] = bijectors[k](
+                surrogate_dict[k] = bijectors.get(k, tfb.Identity())(
                     build_trainable_normal_dist(
-                        tfb.Invert(bijectors[k])(loc),
-                        1e-2 * jnp.ones(test_distribution.event_shape, dtype=dtype),
+                        tfb.Invert(bijectors.get(k, tfb.Identity()))(surrogate_params[label+"\\loc"]),
+                        surrogate_params[label+"\\scale"],
                         len(test_distribution.event_shape),
-                        strategy=strategy,
                         name=label,
                     )
                 )
         surrogate = tfd.JointDistributionNamed(surrogate_dict)
-        for j, var in enumerate(surrogate.trainable_variables):
-            if var.name in surrogate_params.keys():
-                surrogate.trainable_variables[j].assign(surrogate_params[var.name])
         return surrogate
 
-    return make_fn
+    return _make_dist_fn, _init_params_fn
 
 
 def build_trainable_concentration_distribution(
-    initial_concentration,
-    event_ndims,
-    distribution_fn=tfd.Dirichlet,
-    validate_args=False,
-    strategy=None,
-    name=None,
+    initial_concentration: jax.typing.ArrayLike,
+    event_ndims: int,
+    distribution_fn: tfd.Distribution=tfd.Dirichlet,
+    validate_args: bool=False,
+    name: str | None=None,
 ):
     """Builds a variational distribution from a location-scale family.
     Args:
@@ -307,8 +336,6 @@ def build_trainable_concentration_distribution(
 
     scope = None
     name = "" if None else name
-
-    dtype = dtype_util.common_dtype([initial_concentration], dtype_hint=tf.float32)
 
     loc = tfp_util.TransformedVariable(
         initial_concentration,
