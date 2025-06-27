@@ -1,5 +1,4 @@
 import functools
-import typing
 
 import jax.numpy as jnp
 from tensorflow_probability.substrates.jax import monte_carlo
@@ -110,13 +109,10 @@ def minibatch_fit_surrogate_posterior(
     lr_decay_factor: float = 0.5,
     learning_rate=1.0,
     patience: int = 3,
-    trainable_variables: typing.List[str] = None,
     name=None,
     test_fn=None,
     **kwargs,
 ):
-    if trainable_variables is None:
-        trainable_variables = list(surrogate_posterior.parameters['model'].keys())
 
     def complete_variational_loss_fn(data=None):
         """This becomes the loss function called in the

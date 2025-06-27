@@ -77,7 +77,6 @@ class BayesianModel(ABC, nnx.Module):
         lr_decay_factor: float = 0.5,
         learning_rate=1.0,
         patience: int = 3,
-        trainable_variables: list[jax.typing.ArrayLike] | None = None,
         unormalized_log_prob_fn: Callable | None = None,
         set_expectations=True,
         **kwargs,
@@ -98,8 +97,6 @@ class BayesianModel(ABC, nnx.Module):
             set_expectations (bool, optional): [description]. Defaults to True.
             sample_size (int, optional): [description]. Defaults to 4.
         """
-        if trainable_variables is None:
-            trainable_variables = self.surrogate_distribution.variables
 
         def run_approximation():
             losses = minibatch_fit_surrogate_posterior(
