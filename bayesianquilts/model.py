@@ -2,7 +2,7 @@ import gzip
 import inspect
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Callable
+from typing import Callable, Dict
 
 import dill
 import jax
@@ -51,8 +51,15 @@ class BayesianModel(ABC, nnx.Module):
 
         self.dtype = dtype
 
-    def fit(self, *args, **kwargs):
-        return self._calibrate_minibatch_advi(*args, **kwargs)
+    def fit(
+        self,
+        batched_data_factory,
+        initial_values: Dict[str, jax.typing.ArrayLike] = None,
+        **kwargs,
+    ):
+        return self._calibrate_minibatch_advi(
+            iter(batched_data_factory()), initial_values=initial_values, **kwargs
+        )
 
     def set_data(self, data, data_transform_fn):
         self.data = data
@@ -77,6 +84,7 @@ class BayesianModel(ABC, nnx.Module):
         lr_decay_factor: float = 0.5,
         learning_rate=1.0,
         patience: int = 3,
+        initial_values: Dict[str, jax.typing.ArrayLike] | None = None,
         unormalized_log_prob_fn: Callable | None = None,
         set_expectations=True,
         **kwargs,
@@ -105,7 +113,9 @@ class BayesianModel(ABC, nnx.Module):
                     if unormalized_log_prob_fn is not None
                     else self.unormalized_log_prob
                 ),
-                surrogate_posterior=self.surrogate_distribution,
+                initial_values=initial_values,
+                surrogate_generator=self.surrogate_distribution_generator,
+                surrogate_initializer=self.surrogate_parameter_initializer,
                 dataset_size=dataset_size,
                 batch_size=batch_size,
                 sample_size=sample_size,
@@ -134,9 +144,7 @@ class BayesianModel(ABC, nnx.Module):
                 self.surrogate_distribution, samples=samples
             )
             self.calibrated_expectations = {k: v for k, v in mean.items()}
-            self.calibrated_sd = {
-                k: jnp.sqrt(v) for k, v in var.items()
-            }
+            self.calibrated_sd = {k: jnp.sqrt(v) for k, v in var.items()}
         else:
             self.calibrated_expectations = {
                 k: jnp.mean(v, axis=0, keepdims=True)
@@ -147,8 +155,6 @@ class BayesianModel(ABC, nnx.Module):
                 k: jnp.std(v, axis=0, keepdims=True)
                 for k, v in self.surrogate_sample.items()
             }
-
-
 
     @abstractmethod
     def predictive_distribution(self, data, **params):
@@ -201,7 +207,7 @@ class BayesianModel(ABC, nnx.Module):
                 batch_log_likelihoods,
                 jnp.zeros_like(batch_log_likelihoods),
             )
-            min_val =jnp.min(finite_part)
+            min_val = jnp.min(finite_part)
             #  batch_ll = tf.clip_by_value(batch_ll, min_val-1000, 0.)
             batch_log_likelihoods = jnp.where(
                 jnp.finite.is_finite(batch_log_likelihoods),
@@ -262,7 +268,7 @@ class BayesianModel(ABC, nnx.Module):
         state["strategy"] = None
         return state
 
-    def unormalized_log_prob_list(self, data, params, prior_weight=1.):
+    def unormalized_log_prob_list(self, data, params, prior_weight=1.0):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
         return self.unormalized_log_prob(
             data=data, prior_weight=jnp.astype(prior_weight, self.dtype), **dict_params
@@ -272,7 +278,7 @@ class BayesianModel(ABC, nnx.Module):
     def unormalized_log_prob(
         self,
         data: dict[str, jax.typing.ArrayLike] = None,
-        prior_weight: jax.typing.ArrayLike| float = jnp.array(1.0),
+        prior_weight: jax.typing.ArrayLike | float = jnp.array(1.0),
         **params,
     ):
         """Generic method for the unormalized log probability function"""
@@ -298,6 +304,7 @@ class BayesianModel(ABC, nnx.Module):
             trainable_variables=self.surrogate_distribution.variables,
             **kwargs,
         )
+
     @abstractmethod
     def create_distributions():
         """Create the prior and surrogate distributions for the model."""
@@ -305,6 +312,7 @@ class BayesianModel(ABC, nnx.Module):
             "This method should be implemented in subclasses to create the "
             "prior and surrogate distributions."
         )
+
     def reconstitute(self, state):
         surrogate_params = {t.name: t for t in state["surrogate_vars"]}
         if "max_order" in state.keys():

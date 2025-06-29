@@ -6,8 +6,11 @@ import jax
 import jax.numpy as jnp
 import tensorflow_probability.substrates.jax.bijectors as tfb
 import tensorflow_probability.substrates.jax.distributions as tfd
+from jax.scipy.special import xlogy
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
+from bayesianquilts.sampler import nppsis
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 jax.config.update("jax_enable_x64", True)
@@ -88,7 +91,8 @@ class LogisticRegression2(BayesianModel):
         self.prior_distribution = tfd.JointDistributionNamed(joint_prior_dict)
         self.surrogate_distribution_generator, self.surrogate_parameter_initializer = (
             build_factored_surrogate_posterior_generator(
-                self.prior_distribution
+                self.prior_distribution,
+                dtype=self.dtype,
             )
         )
         self.params = self.surrogate_parameter_initializer()
@@ -232,7 +236,7 @@ class LogisticRegression2(BayesianModel):
             log_pi -= jnp.max(log_pi, axis=0)
             # log_pi.shape: [samples]
         else:
-            """
+            r"""
             Recall Bayes rule:
             \log pi(\btheta|\calD) = \sum_i\log ell_i(\btheta) + \log\pi(\btheta) + const
 

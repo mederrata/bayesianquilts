@@ -1,6 +1,8 @@
 import functools
+import typing
 
 import jax.numpy as jnp
+from jax import random
 from tensorflow_probability.substrates.jax import monte_carlo
 from tensorflow_probability.substrates.jax.vi import (GradientEstimators,
                                                       csiszar_divergence,
@@ -30,7 +32,7 @@ def minibatch_mc_variational_loss(
 
     Args:
         target_log_prob_fn (_type_): log_likelihood + prior_weight*log_prior
-        surrogate_posterior (_type_): _description_
+        surrogate_generator (_type_): _description_
         dataset_size (_type_): _description_
         batch_size (_type_): _description_
         sample_size (int, optional): _description_. Defaults to 1.
@@ -43,8 +45,9 @@ def minibatch_mc_variational_loss(
         _type_: _description_
     """
     def sample_elbo():
+        _, sample_key = random.split(random.PRNGKey(0))
         q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
-            sample_size, seed=seed
+            sample_size, seed=sample_key
         )
         return q_samples, q_lp
 
@@ -91,15 +94,18 @@ def minibatch_mc_variational_loss(
             ]
         else:
             batch_expectations += [sample_expected_elbo(q_samples, q_lp)]
+            batch_expectations = jnp.atleast_1d(batch_expectations)
     batch_expectations = jnp.mean(batch_expectations, axis=0)
     return batch_expectations
 
 
 def minibatch_fit_surrogate_posterior(
     target_log_prob_fn,
-    surrogate_posterior,
+    surrogate_generator,
+    surrogate_initializer,
     data_iterator,
     dataset_size: int,
+    initial_values: typing.Dict = None,
     batch_size: int = 1,
     steps_per_epoch: int = 1,
     num_epochs: int = 1,
@@ -113,14 +119,19 @@ def minibatch_fit_surrogate_posterior(
     test_fn=None,
     **kwargs,
 ):
+    if initial_values is None:
+        initial_values = surrogate_initializer()
 
-    def complete_variational_loss_fn(data=None):
+    def complete_variational_loss_fn(data=None, params=None):
         """This becomes the loss function called in the
         optimization loop. It gets called on each minibatch of data.
         """
+        if params is None:
+            params = initial_values
+            
         return minibatch_mc_variational_loss(
             target_log_prob_fn,
-            surrogate_posterior,
+            surrogate_generator(params),
             sample_size=sample_size,
             sample_batches=sample_batches,
             data=data,
@@ -134,15 +145,12 @@ def minibatch_fit_surrogate_posterior(
         loss_fn=complete_variational_loss_fn,
         base_optimizer_fn=None,
         trainable_filter=None,
-        params=None,
+        initial_values=initial_values,
         data_iterator=data_iterator,
         num_epochs=num_epochs,
         steps_per_epoch=steps_per_epoch,
         accumulation_steps=accumulation_steps,
         learning_rate=learning_rate,
-        # trainable_variables=trainable_variables,
-        # clip_value=clip_value,
-        # clip_by=clip_by,
         patience=patience,
         lr_decay_factor=lr_decay_factor,
         **kwargs,

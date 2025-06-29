@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 
-import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from itertools import groupby, product
 from operator import itemgetter
 
 import numpy as np
-import tensorflow_probability as tfp
-from tensorflow_probability import bijectors as tfb
-from tensorflow_probability import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 

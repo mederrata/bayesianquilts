@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import optax
 from flax.core import unfreeze
 from flax.training import checkpoints
-from flax.traverse_util import path_aware_map
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
@@ -22,44 +21,18 @@ def flatten(lst):
 
 # --- Core Training Components ---
 
-def create_optimizer(base_optimizer: optax.GradientTransformation, trainable_filter: Callable[[str, Any], bool]):
-    """
-    Creates a partitioned optimizer that only applies updates to parameters
-    matching the trainable_filter.
-
-    Args:
-        base_optimizer: The core Optax optimizer (e.g., optax.adam).
-        trainable_filter: A function that returns True for parameters that should be trained.
-                          It receives the parameter's path and value.
-
-    Returns:
-        An Optax multi_transform optimizer.
-    """
-    # Use path_aware_map to label parameters as 'trainable' or 'frozen'
-    param_labels = path_aware_map(
-        lambda path, _: 'trainable' if trainable_filter(path, _) else 'frozen',
-        # We pass a dummy param structure here just to build the label tree.
-        # The actual params will be used during the update.
-        {'layer1': {'kernel': True, 'bias': True}, 'layer2': {'kernel': True, 'bias': True}}
-    )
-
-    # multi_transform applies different optimizers to different partitions of the parameters.
-    # We apply the base_optimizer to 'trainable' params and set gradients for 'frozen' params to zero.
-    return optax.multi_transform(
-        {'trainable': base_optimizer, 'frozen': optax.set_to_zero()},
-        param_labels
-    )
-
-@jax.jit
-def train_step(params: Any, opt_state: Any, optimizer: optax.GradientTransformation, grads: Any):
-    """JIT-compiled function to apply a single optimizer update."""
-    updates, new_opt_state = optimizer.update(grads, opt_state, params)
-    new_params = optax.apply_updates(params, updates)
-    return new_params, new_opt_state
+def mk_train_step_fn(optimizer: optax.GradientTransformation):
+    @jax.jit
+    def train_step(params: Any, opt_state: Any, grads: Any):
+        """JIT-compiled function to apply a single optimizer update."""
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
+        return new_params, new_opt_state
+    return train_step
 
 def training_loop(
-    params: Any,
-    loss_fn: Callable[[Any, Any, Any], float],
+    initial_values: Any,
+    loss_fn: Callable[[Any, Any], float],
     data_iterator: Iterator,
     steps_per_epoch: int,
     num_epochs: int,
@@ -69,7 +42,7 @@ def training_loop(
     patience: int = 3,
     lr_decay_factor: float = 0.5,
     learning_rate: float = 0.001,
-    checkpoint_dir: str = './checkpoints',
+    checkpoint_dir: str = '/tmp/checkpoints',
 ):
     """
     Advanced training loop with checkpointing, early stopping, and LR decay on plateau.
@@ -79,33 +52,35 @@ def training_loop(
     best_loss = float('inf')
     epochs_no_improve = 0
     current_lr = learning_rate
-
+    if base_optimizer_fn is None:
+        base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
     # 2. Initial Optimizer Setup
-    optimizer = create_optimizer(lambda: base_optimizer_fn(current_lr), trainable_filter)
-    opt_state = optimizer.init(params)
-    value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+    optimizer = base_optimizer_fn(current_lr)
+    opt_state = optimizer.init(initial_values)
+    value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
 
     print("--- Starting Training ---")
     print(f"Patience for early stopping: {patience} epochs")
     print(f"LR decay factor on plateau: {lr_decay_factor}")
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
     print("-------------------------")
-
+    params = initial_values
     # 3. Main training loop
+    train_step_fn = mk_train_step_fn(optimizer)
+    total_steps = 0
     for epoch in range(num_epochs):
         epoch_loss = 0.0
         grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
-        
         with tqdm(range(steps_per_epoch), desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})", unit="batch") as pbar:
-            for step in pbar:
-                x_batch, y_batch = next(data_iterator)
-                loss_val, grads = value_and_grad_fn(params, x_batch, y_batch)
+            for _ in pbar:
+                batch = next(data_iterator)
+                loss_val, grads = value_and_grad_fn(batch, params)
                 epoch_loss += loss_val
-                grad_accumulator = jax.tree_util.tree_map(lambda acc, g: acc + g, grad_accumulator, grads)
-
-                if (step + 1) % accumulation_steps == 0:
+                grad_accumulator = jax.tree_util.tree_map(lambda acc, g: acc + g, grad_accumulator, grads[0])
+                total_steps += 1
+                if (total_steps + 1) % accumulation_steps == 0:
                     avg_grads = jax.tree_util.tree_map(lambda g: g / accumulation_steps, grad_accumulator)
-                    params, opt_state = train_step(params, opt_state, optimizer, avg_grads)
+                    params, opt_state = train_step_fn(params, opt_state, avg_grads)
                     grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
                 
                 pbar.set_postfix(loss=f"{loss_val:.4f}", best_loss=f"{best_loss:.4f}")
@@ -125,7 +100,7 @@ def training_loop(
             print(f"  -> No improvement in loss for {epochs_no_improve} epoch(s).")
             # Decay learning rate
             current_lr *= lr_decay_factor
-            optimizer = create_optimizer(lambda: base_optimizer_fn(current_lr), trainable_filter)
+            optimizer = base_optimizer_fn(current_lr)
             opt_state = optimizer.init(params) # Re-initialize optimizer state with new LR
             print(f"  -> Decaying learning rate to: {current_lr:.6f}")
 
