@@ -1,22 +1,13 @@
-import tensorflow_probability as tfp
-from tensorflow_probability.python.bijectors import \
-    identity as identity_bijector
-from tensorflow_probability.python.bijectors import \
-    softplus as softplus_bijector
-from tensorflow_probability.python.distributions import (
-    JointDistributionNamed, TransformedDistribution, distribution,
-    kullback_leibler)
-from tensorflow_probability.python.internal import (assert_util,
-                                                    distribution_util,
-                                                    dtype_util,
+import tensorflow_probability.substrates.jax.bijectors as tfb
+import tensorflow_probability.substrates.jax.distributions as tfd
+from tensorflow_probability.python.internal import (dtype_util,
                                                     parameter_properties,
-                                                    prefer_static,
-                                                    reparameterization,
                                                     tensor_util)
 from tensorflow_probability.substrates.jax import tf2jax as tf
-
-tfd = tfp.distributions
-tfb = tfp.bijectors
+from tensorflow_probability.substrates.jax.bijectors import \
+    softplus as softplus_bijector
+from tensorflow_probability.substrates.jax.distributions import \
+    TransformedDistribution
 
 convert_nonref_to_tensor = tensor_util.convert_nonref_to_tensor
 

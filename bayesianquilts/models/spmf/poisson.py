@@ -6,9 +6,10 @@ Note that you currently have to babysit the optimization a bit
 
 from itertools import cycle
 
+import jax.numpy as jnp
 import numpy as np
-import tensorflow_probability as tfp
-from tensorflow_probability import distributions as tfd
+from tensorflow_probability.substrates.jax import bijectors as tfb
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
@@ -17,8 +18,6 @@ from bayesianquilts.nn.dense import DenseHorseshoe
 from bayesianquilts.vi.advi import (build_surrogate_posterior,
                                     build_trainable_InverseGamma_dist,
                                     build_trainable_normal_dist)
-
-tfb = tfp.bijectors
 
 
 class PoissonFactorization(BayesianModel):

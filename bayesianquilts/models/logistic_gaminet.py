@@ -1,11 +1,9 @@
-import numpy as np
-import tensorflow_probability as tfp
-from tensorflow_probability.python import bijectors as tfb
-from tensorflow_probability.python import distributions as tfd
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
-from bayesianquilts.model import BayesianModel
 from bayesianquilts.models.logistic_relunet import LogisticRelunet
+
+jax.config.update("jax_enable_x64", True)
 
 
 class GamiNetUnivarite(LogisticRelunet):

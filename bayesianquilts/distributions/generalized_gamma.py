@@ -16,21 +16,15 @@
 
 from __future__ import absolute_import, division, print_function
 
-import tensorflow.compat.v2 as tf
-import tensorflow_probability as tfp
-import tensorflow_probability.python.bijectors as tfb
-import tensorflow_probability.python.distributions as tfd
-from tensorflow_probability.python.bijectors import \
+import jax.numpy as jnp
+from tensorflow_probability.python.internal import reparameterization
+from tensorflow_probability.substrates.jax import tf2jax as tf
+from tensorflow_probability.substrates.jax.bijectors import \
     softplus as softplus_bijector
-from tensorflow_probability.python.distributions import (distribution,
-                                                         kullback_leibler)
-from tensorflow_probability.python.internal import (assert_util,
-                                                    distribution_util,
-                                                    dtype_util,
-                                                    parameter_properties,
-                                                    prefer_static,
-                                                    reparameterization,
-                                                    tensor_util)
+from tensorflow_probability.substrates.jax.distributions import (
+    distribution, kullback_leibler)
+from tensorflow_probability.substrates.jax.internal import (
+    assert_util, dtype_util, parameter_properties, prefer_static, tensor_util)
 
 __all__ = [
     'GeneralizedGamma',

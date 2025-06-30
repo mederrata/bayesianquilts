@@ -6,8 +6,8 @@ Note that you currently have to babysit the optimization a bit
 
 
 import numpy as np
-from tensorflow_probability import distributions as tfd
-from tensorflow_probability.python import bijectors as tfb
+from tensorflow_probability.substrates.jax import bijectors as tfb
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
@@ -15,7 +15,7 @@ from bayesianquilts.models.spmf.poisson import PoissonFactorization
 from bayesianquilts.vi.advi import (build_trainable_InverseGamma_dist,
                                     build_trainable_normal_dist)
 
-
+import jax.numpy as jnp
 class BernoulliFactorization(PoissonFactorization):
     """Sparse (horseshoe) poisson matrix factorization
     Arguments:

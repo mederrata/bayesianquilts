@@ -1,10 +1,7 @@
 from abc import ABC, abstractclassmethod
 
 import numpy as np
-from tensorflow_probability.substrates.jax import tf2jax as tf
 
-from bayesianquilts import BayesianModel
-from bayesianquilts.tf.parameter import Decomposed
 
 
 class Ensemble(ABC):

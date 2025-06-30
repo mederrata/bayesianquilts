@@ -68,6 +68,7 @@ def training_loop(
     # 3. Main training loop
     train_step_fn = mk_train_step_fn(optimizer)
     total_steps = 0
+    epoch_losses = []
     for epoch in range(num_epochs):
         epoch_loss = 0.0
         grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
@@ -86,6 +87,7 @@ def training_loop(
                 pbar.set_postfix(loss=f"{loss_val:.4f}", best_loss=f"{best_loss:.4f}")
         
         avg_epoch_loss = epoch_loss / steps_per_epoch
+        epoch_losses += [avg_epoch_loss]
         print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
 
         # 4. Check for improvement, save checkpoints, and decay LR
@@ -116,7 +118,7 @@ def training_loop(
     if final_params is not params:
          print("Restored model from the best checkpoint.")
     
-    return final_params
+    return epoch_losses, final_params
 
 class IndexMapper(object):
     def __init__(self, vocab):

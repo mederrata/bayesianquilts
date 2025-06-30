@@ -4,17 +4,19 @@
 
 from collections import defaultdict
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import tensorflow_probability.substrates.jax as tfp
 from tensorflow.python.ops.math_ops import _bucketize as bucketize
-from tensorflow_probability.python import distributions as tfd
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.tf.parameter import Decomposed
 from bayesianquilts.util import flatten
 
+jax.config.update("jax_enable_x64", True)
 
 class LogisticBayesianquilt(BayesianModel):
     def __init__(

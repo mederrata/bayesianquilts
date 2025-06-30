@@ -131,12 +131,12 @@ class BayesianModel(ABC, nnx.Module):
             )
             return losses
 
-        losses = run_approximation()
+        losses, params = run_approximation()
         if set_expectations:
             if (not np.isnan(losses[-1])) and (not np.isinf(losses[-1])):
-                self.surrogate_sample = self.surrogate_distribution.sample(100)
+                self.surrogate_distribution = self.surrogate_distribution_generator(params)
                 self.set_calibration_expectations()
-        return losses
+        return losses, params
 
     def set_calibration_expectations(self, samples: int = 24, variational: bool = True):
         if variational:

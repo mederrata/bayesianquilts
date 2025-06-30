@@ -5,9 +5,10 @@ Note that you currently have to babysit the optimization a bit
 """
 
 
+import jax.numpy as jnp
 import numpy as np
-from tensorflow_probability import distributions as tfd
-from tensorflow_probability.python import bijectors as tfb
+from tensorflow_probability.substrates.jax import bijectors as tfb
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
