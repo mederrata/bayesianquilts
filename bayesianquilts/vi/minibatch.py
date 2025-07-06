@@ -144,7 +144,6 @@ def minibatch_fit_surrogate_posterior(
     return training_loop(
         loss_fn=complete_variational_loss_fn,
         base_optimizer_fn=None,
-        trainable_filter=None,
         initial_values=initial_values,
         data_iterator=data_iterator,
         num_epochs=num_epochs,

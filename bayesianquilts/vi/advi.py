@@ -214,14 +214,14 @@ def build_factored_surrogate_posterior_generator(
             or isinstance(test_distribution.distribution, SqrtInverseGamma)
         ) and not gaussian_only:
             if k in bijectors.keys():
-                label += bijectors[k].name
+                label += f"\\{bijectors[k].name}"
             else:
                 label += f"\\{bijectors.get(k, tfb.Identity()).name}"
             label += "\\igamma"
             var_labels += [label + "\\concentration", label + "\\scale"]
         else:
             if k in bijectors.keys():
-                label += bijectors[k].name
+                label += f"\\{bijectors[k].name}"
             else:
                 label += f"\\{bijectors.get(k, tfb.Identity()).name}"
             label += "\\normal"

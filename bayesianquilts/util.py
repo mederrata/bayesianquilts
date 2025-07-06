@@ -37,8 +37,8 @@ def training_loop(
     steps_per_epoch: int,
     num_epochs: int,
     base_optimizer_fn: Callable[[float], optax.GradientTransformation],
-    trainable_filter: Callable[[str, Any], bool],
     accumulation_steps: int,
+    check_convergence_every: int = 1,
     patience: int = 3,
     lr_decay_factor: float = 0.5,
     learning_rate: float = 0.001,
@@ -50,7 +50,7 @@ def training_loop(
     # 1. Setup for new features
     os.makedirs(checkpoint_dir, exist_ok=True)
     best_loss = float('inf')
-    epochs_no_improve = 0
+    checks_no_improve = 0
     current_lr = learning_rate
     if base_optimizer_fn is None:
         base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
@@ -62,6 +62,7 @@ def training_loop(
     print("--- Starting Training ---")
     print(f"Patience for early stopping: {patience} epochs")
     print(f"LR decay factor on plateau: {lr_decay_factor}")
+    print(f"Convergence will be checked every: {check_convergence_every} epoch(s)")
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
     print("-------------------------")
     params = initial_values
@@ -74,42 +75,60 @@ def training_loop(
         grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
         with tqdm(range(steps_per_epoch), desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})", unit="batch") as pbar:
             for _ in pbar:
-                batch = next(data_iterator)
-                loss_val, grads = value_and_grad_fn(batch, params)
-                epoch_loss += loss_val
-                grad_accumulator = jax.tree_util.tree_map(lambda acc, g: acc + g, grad_accumulator, grads[0])
-                total_steps += 1
-                if (total_steps + 1) % accumulation_steps == 0:
-                    avg_grads = jax.tree_util.tree_map(lambda g: g / accumulation_steps, grad_accumulator)
-                    params, opt_state = train_step_fn(params, opt_state, avg_grads)
-                    grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
-                
-                pbar.set_postfix(loss=f"{loss_val:.4f}", best_loss=f"{best_loss:.4f}")
-        
+                try:
+                    batch = next(data_iterator)
+                    loss_val, grads = value_and_grad_fn(batch, params)
+                    epoch_loss += loss_val
+                    if jnp.isnan(loss_val) or jnp.isinf(loss_val):
+                        print(f"Skipping batch due to NaN/Inf loss at epoch {epoch + 1}, step {total_steps + 1}.")
+                        current_lr *= lr_decay_factor
+                        optimizer = base_optimizer_fn(current_lr)
+                        opt_state = optimizer.init(params) # Re-initialize optimizer state with new LR
+                        print(f"  -> Decaying learning rate to: {current_lr:.6f}")
+                        continue
+                    try:
+                        ave_grad = jnp.mean(jnp.array([jnp.mean(x) for x in grads[0]]))
+                    except TypeError:
+                        ave_grad = jnp.isnan(jnp.mean(jnp.array([jnp.mean(x) for x in grads[0].values()])))
+                    if jnp.isnan(ave_grad) or jnp.isinf(ave_grad):
+                        print(f"Skipping batch due to NaN/Inf gradients at epoch {epoch + 1}, step {total_steps + 1}.")
+                        continue
+                    grad_accumulator = jax.tree_util.tree_map(lambda acc, g: acc + g, grad_accumulator, grads[0])
+                    total_steps += 1
+                    if (total_steps + 1) % accumulation_steps == 0:
+                        tot_grads = jax.tree_util.tree_map(lambda g: g, grad_accumulator)
+                        params, opt_state = train_step_fn(params, opt_state, tot_grads)
+                        grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
+                    
+                    pbar.set_postfix(loss=f"{loss_val:.4f}", best_loss=f"{best_loss:.4f}")
+                except KeyboardInterrupt:
+                    print("\nTraining interrupted by user.")
+                    return epoch_losses, params
         avg_epoch_loss = epoch_loss / steps_per_epoch
         epoch_losses += [avg_epoch_loss]
         print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
-
         # 4. Check for improvement, save checkpoints, and decay LR
-        if avg_epoch_loss < best_loss:
-            best_loss = avg_epoch_loss
-            epochs_no_improve = 0
-            # Save the best model parameters
-            checkpoints.save_checkpoint(ckpt_dir=checkpoint_dir, target=params, step=epoch, prefix='best_model_', overwrite=True)
-            print(f"  -> New best loss found. Checkpoint saved.")
-        else:
-            epochs_no_improve += 1
-            print(f"  -> No improvement in loss for {epochs_no_improve} epoch(s).")
-            # Decay learning rate
-            current_lr *= lr_decay_factor
-            optimizer = base_optimizer_fn(current_lr)
-            opt_state = optimizer.init(params) # Re-initialize optimizer state with new LR
-            print(f"  -> Decaying learning rate to: {current_lr:.6f}")
+        if (epoch + 1) % check_convergence_every == 0:
+            print(f"--- Running convergence check at epoch {epoch + 1} ---")
+            if avg_epoch_loss < best_loss:
+                best_loss = avg_epoch_loss
+                checks_no_improve = 0
+                # Save the best model parameters
+                checkpoints.save_checkpoint(ckpt_dir=checkpoint_dir, target=params, step=epoch, prefix='best_model_', overwrite=True)
+                print(f"  -> New best loss found. Checkpoint saved.")
+            else:
+                checks_no_improve += 1
+                print(f"  -> No improvement in loss for {checks_no_improve} check(s).")
+                # Decay learning rate
+                current_lr *= lr_decay_factor
+                optimizer = base_optimizer_fn(current_lr)
+                opt_state = optimizer.init(params) # Re-initialize optimizer state with new LR
+                print(f"  -> Decaying learning rate to: {current_lr:.6f}")
 
-        # 5. Early stopping check
-        if epochs_no_improve >= patience:
-            print(f"\nEarly stopping triggered after {patience} epochs with no improvement.")
-            break
+            # 5. Early stopping check
+            if checks_no_improve >= patience:
+                print(f"\nEarly stopping triggered after {patience} epochs with no improvement.")
+                break
             
     print("\n--- Training Finished ---")
 

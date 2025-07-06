@@ -5,6 +5,7 @@ Note that you currently have to babysit the optimization a bit
 """
 
 
+import jax.numpy as jnp
 import numpy as np
 from tensorflow_probability.substrates.jax import bijectors as tfb
 from tensorflow_probability.substrates.jax import distributions as tfd
@@ -12,10 +13,9 @@ from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
 from bayesianquilts.models.spmf.poisson import PoissonFactorization
-from bayesianquilts.vi.advi import (build_trainable_InverseGamma_dist,
-                                    build_trainable_normal_dist)
+from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
-import jax.numpy as jnp
+
 class BernoulliFactorization(PoissonFactorization):
     """Sparse (horseshoe) poisson matrix factorization
     Arguments:
@@ -34,8 +34,8 @@ class BernoulliFactorization(PoissonFactorization):
             [type]: [description]
         """
         if self.log_transform:
-            return tf.math.log(x / self.eta_i + 1.0)
-        return tf.cast(x, self.dtype) / tf.cast(self.eta_i, self.dtype)
+            return jnp.log(x / self.eta_i + 1.0)
+        return jnp.array(x).astype(self.dtype) / self.eta_i
 
     def decoder_function(self, x):
         """Decoder function (f)
@@ -46,7 +46,7 @@ class BernoulliFactorization(PoissonFactorization):
         """
         if self.log_transform:
             return tf.math.exp(x * self.eta_i) - 1.0
-        return tf.cast(x, self.dtype) * tf.cast(self.eta_i, self.dtype)
+        return jnp.array(x).cast(self.dtype) * self.eta_i
 
     def __init__(
         self,
@@ -62,7 +62,7 @@ class BernoulliFactorization(PoissonFactorization):
         horshoe_plus=True,
         column_norms=None,
         count_key="counts",
-        dtype=tf.float64,
+        dtype=jnp.float64,
         **kwargs,
     ):
         """Instantiate PMF object
@@ -80,7 +80,6 @@ class BernoulliFactorization(PoissonFactorization):
         """
 
         super(BernoulliFactorization, self).__init__(
-            data=None,
             data_transform_fn=None,
             initialize_distributions=False,
             strategy=strategy,
@@ -274,14 +273,16 @@ class BernoulliFactorization(PoissonFactorization):
             )
             distribution_dict["u_tau"] = lambda u_tau_a: tfd.Independent(
                 SqrtInverseGamma(
-                    concentration=0.5 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
+                    concentration=0.5
+                    * jnp.ones((1, self.latent_dim), dtype=self.dtype),
                     scale=1.0 / u_tau_a,
                 ),
                 reinterpreted_batch_ndims=2,
             )
             distribution_dict["u_tau_a"] = tfd.Independent(
                 tfd.InverseGamma(
-                    concentration=0.5 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
+                    concentration=0.5
+                    * jnp.ones((1, self.latent_dim), dtype=self.dtype),
                     scale=jnp.ones((1, self.latent_dim), dtype=self.dtype)
                     / self.u_tau_scale**2,
                 ),
@@ -347,165 +348,14 @@ class BernoulliFactorization(PoissonFactorization):
 
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
 
-        surrogate_dict = {
-            "v": self.bijectors["v"](
-                build_trainable_normal_dist(
-                    -6.0
-                    * jnp.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
-                    5e-4
-                    * jnp.ones((self.latent_dim, self.feature_dim), dtype=self.dtype),
-                    2,
-                    strategy=self.strategy,
-                )
-            ),
-            "w": self.bijectors["w"](
-                build_trainable_normal_dist(
-                    -6 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
-                    5e-4 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
-                    2,
-                    strategy=self.strategy,
-                )
-            ),
-        }
-        if self.horseshoe_plus:
-            surrogate_dict = {
-                **surrogate_dict,
-                "u": self.bijectors["u"](
-                    build_trainable_normal_dist(
-                        -6.0
-                        * jnp.ones(
-                            (self.feature_dim, self.latent_dim), dtype=self.dtype
-                        ),
-                        5e-4
-                        * jnp.ones(
-                            (self.feature_dim, self.latent_dim), dtype=self.dtype
-                        ),
-                        2,
-                        strategy=self.strategy,
-                    )
-                ),
-                "u_eta": self.bijectors["u_eta"](
-                    build_trainable_InverseGamma_dist(
-                        3
-                        * jnp.ones(
-                            (self.feature_dim, self.latent_dim), dtype=self.dtype
-                        ),
-                        jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
-                        2,
-                        strategy=self.strategy,
-                    )
-                ),
-                "u_tau": self.bijectors["u_tau"](
-                    build_trainable_InverseGamma_dist(
-                        3 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
-                        jnp.ones((1, self.latent_dim), dtype=self.dtype),
-                        2,
-                        strategy=self.strategy,
-                    )
-                ),
-            }
-
-            surrogate_dict["s_eta"] = self.bijectors["s_eta"](
-                build_trainable_InverseGamma_dist(
-                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
-                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
-                    2,
-                    strategy=self.strategy,
-                )
+        self.surrogate_distribution_generator, self.surrogate_parameter_initializer = (
+            build_factored_surrogate_posterior_generator(
+                prior_distribution=self.prior_distribution,
+                bijectors=self.bijectors,
+                dtype=self.dtype,
             )
-            surrogate_dict["s_tau"] = self.bijectors["s_tau"](
-                build_trainable_InverseGamma_dist(
-                    1 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
-                    jnp.ones((1, self.feature_dim), dtype=self.dtype),
-                    2,
-                    strategy=self.strategy,
-                )
-            )
-            surrogate_dict["s"] = self.bijectors["s"](
-                build_trainable_normal_dist(
-                    jnp.ones((2, self.feature_dim), dtype=self.dtype)
-                    * tf.cast([[-2.0], [-1.0]], dtype=self.dtype),
-                    1e-3 * jnp.ones((2, self.feature_dim), dtype=self.dtype),
-                    2,
-                    strategy=self.strategy,
-                )
-            )
-
-            self.bijectors["u_eta_a"] = tfb.Softplus()
-            self.bijectors["u_tau_a"] = tfb.Softplus()
-            surrogate_dict["u_eta_a"] = self.bijectors["u_eta_a"](
-                build_trainable_InverseGamma_dist(
-                    2.0
-                    * jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
-                    jnp.ones((self.feature_dim, self.latent_dim), dtype=self.dtype),
-                    2,
-                    strategy=self.strategy,
-                )
-            )
-            surrogate_dict["u_tau_a"] = self.bijectors["u_tau_a"](
-                build_trainable_InverseGamma_dist(
-                    2.0 * jnp.ones((1, self.latent_dim), dtype=self.dtype),
-                    jnp.ones((1, self.latent_dim), dtype=self.dtype)
-                    / self.u_tau_scale**2,
-                    2,
-                    strategy=self.strategy,
-                )
-            )
-
-            self.bijectors["s_eta_a"] = tfb.Softplus()
-            self.bijectors["s_tau_a"] = tfb.Softplus()
-            surrogate_dict["s_eta_a"] = self.bijectors["s_eta_a"](
-                build_trainable_InverseGamma_dist(
-                    2.0 * jnp.ones((2, self.feature_dim), dtype=self.dtype),
-                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
-                    2,
-                    strategy=self.strategy,
-                )
-            )
-            surrogate_dict["s_tau_a"] = self.bijectors["s_tau_a"](
-                build_trainable_InverseGamma_dist(
-                    2.0 * jnp.ones((1, self.feature_dim), dtype=self.dtype),
-                    (
-                        jnp.ones((1, self.feature_dim), dtype=self.dtype)
-                        / self.s_tau_scale**2
-                    ),
-                    2,
-                    strategy=self.strategy,
-                )
-            )
-        else:
-            surrogate_dict = {
-                **surrogate_dict,
-                "s": self.bijectors["s"](
-                    build_trainable_normal_dist(
-                        jnp.ones((2, self.feature_dim), dtype=self.dtype)
-                        * tf.cast([[-2.0], [-1.0]], dtype=self.dtype),
-                        1e-3 * jnp.ones((2, self.feature_dim), dtype=self.dtype),
-                        2,
-                        strategy=self.strategy,
-                    )
-                ),
-                "u": self.bijectors["u"](
-                    build_trainable_normal_dist(
-                        -9.0
-                        * jnp.ones(
-                            (self.feature_dim, self.latent_dim), dtype=self.dtype
-                        ),
-                        5e-4
-                        * jnp.ones(
-                            (self.feature_dim, self.latent_dim), dtype=self.dtype
-                        ),
-                        2,
-                        strategy=self.strategy,
-                    )
-                ),
-            }
-
-        self.surrogate_distribution = tfd.JointDistributionNamed(surrogate_dict)
-
-        self.surrogate_vars = self.surrogate_distribution.variables
-        self.var_list = list(surrogate_dict.keys())
-        self.set_calibration_expectations()
+        )
+        self.params = self.surrogate_parameter_initializer()
 
     def unormalized_log_prob(self, data=None, prior_weight=1.0, **params):
         prob_parts = self.unormalized_log_prob_parts(data, prior_weight=1.0, **params)

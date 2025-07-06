@@ -1,14 +1,13 @@
 import gzip
 import inspect
+import pathlib
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from typing import Callable, Dict
 
 import dill
 import jax
 import jax.numpy as jnp
 import numpy as np
-import tensorflow_probability.substrates.jax.distributions as tfd
 from arviz.data import InferenceData
 from arviz.data.base import dict_to_dataset
 from flax import nnx
@@ -17,8 +16,7 @@ from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 from bayesianquilts.distributions import FactorizedDistributionMoments
-from bayesianquilts.tf.parameter import MultiwayContingencyTable
-from bayesianquilts.util import DummyObject, training_loop
+from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
 
@@ -57,9 +55,11 @@ class BayesianModel(ABC, nnx.Module):
         initial_values: Dict[str, jax.typing.ArrayLike] = None,
         **kwargs,
     ):
-        return self._calibrate_minibatch_advi(
+        res = self._calibrate_minibatch_advi(
             iter(batched_data_factory()), initial_values=initial_values, **kwargs
         )
+        self.params = res[1]
+        return res
 
     def set_data(self, data, data_transform_fn):
         self.data = data
@@ -134,7 +134,9 @@ class BayesianModel(ABC, nnx.Module):
         losses, params = run_approximation()
         if set_expectations:
             if (not np.isnan(losses[-1])) and (not np.isinf(losses[-1])):
-                self.surrogate_distribution = self.surrogate_distribution_generator(params)
+                self.surrogate_distribution = self.surrogate_distribution_generator(
+                    params
+                )
                 self.set_calibration_expectations()
         return losses, params
 
@@ -223,50 +225,19 @@ class BayesianModel(ABC, nnx.Module):
         }
 
     def save(self, filename="model_save.pkl", gz=True):
+        if not isinstance(filename, pathlib.Path):
+            filename = pathlib.Path(filename)
+        filename = filename.with_suffix(".pkl")
         if not gz:
             with open(filename, "wb") as file:
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
         else:
-            with gzip.open(filename + ".gz", "wb") as file:
+            filename = filename.with_suffix(".pkl.gz")
+            with gzip.open(filename, "wb") as file:
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        keys = self.__dict__.keys()
-        state["surrogate_sample"] = None
-        for k in keys:
-            # print(k)
-            if isinstance(state[k], jax.typing.ArrayLike):
-                state[k] = state[k]
-            elif isinstance(state[k], dict) or isinstance(state[k], list):
-                try:
-                    flat = tf.nest.flatten(state[k])
-                    new = []
-                    for t in flat:
-                        if isinstance(t, jax.typing.ArrayLike):
-                            new += [t.numpy()]
-                        elif hasattr(inspect.getmodule(t), "__name__"):
-                            if inspect.getmodule(t).__name__.startswith("tensorflow"):
-                                if not isinstance(t, jnp.dtype):
-                                    new += [None]
-                                else:
-                                    new += [None]
-                            else:
-                                new += [t]
-                        else:
-                            new += [t]
-                    state[k] = jax.tree_util.tree_unflatten(state[k], new)
-                except TypeError:
-                    state[k] = None
-                    print(f"failed serializing {k}")
-            elif hasattr(inspect.getmodule(state[k]), "__name__"):
-                if inspect.getmodule(state[k]).__name__.startswith("tensorflow"):
-                    if not isinstance(state[k], jnp.dtypes.DType):
-                        del state[k]
-        state["strategy"] = None
-        return state
 
     def unormalized_log_prob_list(self, data, params, prior_weight=1.0):
         dict_params = {k: p for k, p in zip(self.var_list, params)}
@@ -287,7 +258,10 @@ class BayesianModel(ABC, nnx.Module):
     def fit_projection(
         self, other, batched_data_factory, num_steps, samples=32, **kwargs
     ):
-        def objective(data):
+        def objective(data, params):
+            """Objective function for the training loop."""
+            seed = random.PRNGKey(0)
+            samples = self.surrogate_distribution_generator(params).sample(samples, seed=seed)
             this_prediction = self.predictive_distribution(
                 data, **self.sample(samples)
             )["rv_outcome"]
@@ -301,7 +275,6 @@ class BayesianModel(ABC, nnx.Module):
             objective,
             batched_data_factory=batched_data_factory,
             num_steps=num_steps,
-            trainable_variables=self.surrogate_distribution.variables,
             **kwargs,
         )
 
@@ -313,26 +286,6 @@ class BayesianModel(ABC, nnx.Module):
             "prior and surrogate distributions."
         )
 
-    def reconstitute(self, state):
-        surrogate_params = {t.name: t for t in state["surrogate_vars"]}
-        if "max_order" in state.keys():
-            try:
-                self.create_distributions(
-                    max_order=state["max_order"], surrogate_params=surrogate_params
-                )
-                return
-            except TypeError:
-                self.create_distributions()
-            try:
-                for j, value in tqdm(enumerate(state["surrogate_vars"])):
-                    self.surrogate_distribution.trainable_variables[j].assign(
-                        jnp.astype(value, self.dtype)
-                    )
-            except KeyError:
-                self.state = state
-                print("Was unable to set vars, check self.saved_state")
-        else:
-            self.create_distributions()
 
     def transform(self, params):
         return params
@@ -364,90 +317,3 @@ class BayesianModel(ABC, nnx.Module):
         }
 
         return InferenceData(**idict)
-
-    def __setstate__(self, state):
-        self.__dict__ = state.copy()
-        self.reconstitute(state)
-        self.saved_state = state
-
-
-def generate_distributions(
-    decomposition,
-    skip=None,
-    table=None,
-    dim_decay_factor=1.0,
-    scale=1.0,
-    gaussian_only=True,
-    dtype=jnp.float32,
-    surrogate_params=None,
-    gen_surrogate=True,
-):
-    (
-        tensors,
-        vars,
-        shapes,
-    ) = decomposition.generate_tensors(skip=skip, dtype=dtype)
-
-    if isinstance(table, MultiwayContingencyTable):
-        N = table.lookup()
-        # check if there are certain dimensions in the interactions
-        # that are not covered by the contingency table
-        scales = {}
-        for k, v in shapes.items():
-            scales[k] = (
-                scale
-                * dim_decay_factor ** (len([d for d in v if d > 1]))
-                * np.reshape(
-                    np.sqrt(table.lookup(vars[k]) / N),
-                    -1,
-                )
-            )
-
-    else:
-        scales = {
-            k: scale * dim_decay_factor ** (len([d for d in v if d > 1]))
-            for k, v in shapes.items()
-        }
-
-    if decomposition._implicit:
-        scales = {k: v[1:] if len(v) > 1 else v for k, v in scales.items()}
-    decomposition.set_scales(scales)
-
-    prior_dict = {}
-    for label, tensor in tensors.items():
-        prior_dict[label] = tfd.Independent(
-            tfd.Normal(
-                loc=jnp.zeros_like(jnp.astype(tensor, dtype)),
-                scale=jnp.ones_like(jnp.astype(tensor, dtype)),
-            ),
-            reinterpreted_batch_ndims=len(tensor.shape.as_list()),
-        )
-
-    if len(prior_dict) > 0:
-        prior = tfd.JointDistributionNamed(prior_dict)
-    else:
-        prior = DummyObject()
-        prior.model = {}
-
-    out = {
-        "decomposition": decomposition,
-        "prior": prior,
-        "vars": vars,
-        "shapes": shapes,
-        "scales": scales,
-    }
-    if gen_surrogate:
-        if len(prior_dict) > 0:
-            out["surrogate"] = build_surrogate_posterior(
-                prior,
-                initializers=tensors,
-                dtype=dtype,
-                bijectors=defaultdict(tfp.bijectors.Identity),
-                gaussian_only=gaussian_only,
-                surrogate_params=surrogate_params,
-            )
-        else:
-            out["surrogate"] = DummyObject()
-            out["surrogate"].model = {}
-
-    return out

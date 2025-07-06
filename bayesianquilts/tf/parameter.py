@@ -4,6 +4,7 @@ from collections import defaultdict
 from itertools import groupby, product
 from operator import itemgetter
 
+import jax.numpy as jnp
 import numpy as np
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
@@ -364,7 +365,7 @@ class Decomposed(object):
                     )
 
             residual = tf.add_n(broadcast_tensors([residual, -1.0 * value]))
-            t_shape = value.shape.as_list()[batch_ndims:]
+            t_shape = value.shape[batch_ndims:]
             tensor_shapes[self._name + "__" + interaction_name] = t_shape
             interaction_cats = np.prod(t_shape[: (-len(self._param_shape))])
             value = tf.reshape(
