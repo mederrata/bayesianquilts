@@ -256,7 +256,7 @@ class BayesianModel(ABC, nnx.Module):
         return
 
     def fit_projection(
-        self, other, batched_data_factory, num_steps, samples=32, **kwargs
+        self, other, batched_data_factory, samples: int=32, **kwargs
     ):
         def objective(data, params):
             """Objective function for the training loop."""
@@ -273,8 +273,7 @@ class BayesianModel(ABC, nnx.Module):
 
         return training_loop(
             objective,
-            batched_data_factory=batched_data_factory,
-            num_steps=num_steps,
+            data_iterator=batched_data_factory,
             **kwargs,
         )
 
