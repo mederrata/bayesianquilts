@@ -3,42 +3,22 @@
 """
 
 import jax.numpy as jnp
-import tensorflow_probability.substrates.jax as tfp
 from jax.scipy.special import xlogy
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.tf.parameter import Decomposed, Interactions
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
-tfd = tfp.distributions
-
-
-def psis_smoothing(weights, threshold=0.7):
-    log_weights = tf.math.log(weights)
-    psis_weights = []
-
-    for log_weight in log_weights:
-        sorted_indices = tf.argsort(log_weight, axis=-1, direction="DESCENDING")
-        sorted_log_weight = tf.gather(log_weight, sorted_indices, axis=-1)
-        cumsum_log_weight = tf.cumsum(sorted_log_weight, axis=-1)
-        threshold_value = (1.0 - threshold) * tf.reduce_max(
-            cumsum_log_weight, axis=-1, keepdims=True
-        )
-        psis_weight = tf.exp(tf.math.minimum(sorted_log_weight - threshold_value, 0.0))
-        original_order_indices = tf.argsort(sorted_indices, axis=-1)
-        psis_weight = tf.gather(psis_weight, original_order_indices, axis=-1)
-        psis_weights.append(psis_weight)
-
-    return tf.stack(psis_weights)
-
 
 class LogisticRegression(BayesianModel):
     def __init__(
         self,
-        dim_regressors,
+        feature_names,
+        outcome_label,
         regression_interact=None,
-        dim_decay_factor=0.5,
+        dim_decay_factor=1.,
         regressor_scales=None,
         regressor_offsets=None,
         dtype=jnp.float64,
@@ -46,7 +26,9 @@ class LogisticRegression(BayesianModel):
     ):
         super(LogisticRegression, self).__init__(dtype=dtype)
         self.dim_decay_factor = dim_decay_factor
-        self.dim_regressors = dim_regressors
+        self.dim_regressors = len(feature_names)
+        self.feature_names = feature_names
+        self.outcome_label = outcome_label
         if regressor_scales is None:
             self.regressor_scales = 1
         else:
@@ -203,19 +185,19 @@ class LogisticRegression(BayesianModel):
             intercept_indices, tensors=intercept_params
         )
 
-        # compute regression product
-        X = tf.cast(
-            (data["X"] - self.regressor_offsets) / self.regressor_scales,
-            self.dtype,
-        )
+        X = processed["X"]
+        y = processed["y"]
 
-        X = X[tf.newaxis, ...]
+        # compute regression product
+        X = ((X - self.regressor_offsets) / self.regressor_scales).astype(self.dtype)
+
+        X = X[jnp.newaxis, ...]
         mu = coef_ * X
-        mu = tf.reduce_sum(mu, -1) + intercept[..., 0]
+        mu = jnp.sum(mu, axis=-1) + intercept[..., 0]
 
         # assemble outcome random vars
 
-        label = tf.cast(tf.squeeze(data["y"]), self.dtype)
+        label = jnp.squeeze(y).astype(self.dtype)
 
         rv_outcome = tfd.Bernoulli(logits=mu)
         log_likelihood = rv_outcome.log_prob(label)
