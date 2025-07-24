@@ -256,24 +256,30 @@ class BayesianModel(ABC, nnx.Module):
         return
 
     def fit_projection(
-        self, other, batched_data_factory, samples: int=32, **kwargs
+        self, other, data_iterator, nsamples: int = 32, initial_values=None, **kwargs
     ):
         def objective(data, params):
             """Objective function for the training loop."""
             seed = random.PRNGKey(0)
-            samples = self.surrogate_distribution_generator(params).sample(samples, seed=seed)
-            this_prediction = self.predictive_distribution(
-                data, **self.sample(samples)
-            )["rv_outcome"]
-            other_prediction = other.predictive_distribution(
-                data, **other.sample(samples)
-            )["rv_outcome"]
+            samples = self.surrogate_distribution_generator(params).sample(
+                nsamples, seed=seed
+            )
+            this_prediction = self.predictive_distribution(data, **samples)[
+                "prediction"
+            ]
+            other_prediction = other.predictive_distribution(data, **other.sample(nsamples))[
+                "prediction"
+            ]
             delta = other_prediction.kl_divergence(this_prediction)
             return jnp.mean(delta)
 
+        if initial_values is None:
+            initial_values = self.params
+
         return training_loop(
-            objective,
-            data_iterator=batched_data_factory,
+            loss_fn=objective,
+            initial_values=initial_values,
+            data_iterator=data_iterator,
             **kwargs,
         )
 
