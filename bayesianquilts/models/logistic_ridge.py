@@ -3,15 +3,12 @@
 """
 
 import jax.numpy as jnp
-import tensorflow_probability.substrates.jax as tfp
-import tensorflow_probability.substrates.jax.distributions as tfd
+from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.tf.parameter import Decomposed, Interactions
 from bayesianquilts.vi.advi import build_surrogate_posterior
-
-tfd = tfp.distributions
 
 
 def psis_smoothing(weights, threshold=0.7):

@@ -8,13 +8,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import tensorflow_probability.substrates.jax as tfp
-from tensorflow.python.ops.math_ops import _bucketize as bucketize
 from tensorflow_probability.substrates.jax import distributions as tfd
-from tensorflow_probability.substrates.jax import tf2jax as tf
 
+from bayesianquilts.jax.parameter import Decomposed
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.tf.parameter import Decomposed
 from bayesianquilts.util import flatten
+from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 jax.config.update("jax_enable_x64", True)
 
@@ -31,7 +30,7 @@ class LogisticBayesianquilt(BayesianModel):
         strategy=None,
         regressor_scales=None,
         regressor_offsets=None,
-        dtype=tf.float64,
+        dtype=jnp.float64,
         outcome_label="label",
         outcome_classes=2,
         initialize_distributions=True,
@@ -91,13 +90,11 @@ class LogisticBayesianquilt(BayesianModel):
             if "_preprocessed" in data.keys():
                 return data
             x = data["covariates"]
-            if isinstance(x, tf.RaggedTensor):
-                x = x.to_tensor()
 
             split_repr = self.split_repr_model.encode(x=x)
             split_breaks = self.split_repr_model.quantile_breaks[self.split_quantiles]
             split_indices = [
-                bucketize(self.split_repr_model[:, j], list(split_breaks[:, j]))[..., tf.newaxis]
+                jnp.digitize(self.split_repr_model[:, j], list(split_breaks[:, j]))[..., jnp.newaxis]
                 for j in range(self.split_repr_dim)
             ]
             split_indices = {f"hx_{j}": h for j, h in enumerate(split_indices)}
@@ -122,16 +119,18 @@ class LogisticBayesianquilt(BayesianModel):
             for k, v in regression_shapes.items()
         }
         #  self.regression_decomposition.set_scales(regression_scales)
+        self.regression_vars = regression_vars
+        self.regression_var_list = list(regression_vars.keys())
 
         regression_dict = {}
         for label, tensor in regressor_tensors.items():
             regression_dict[label] = tfd.Independent(
                 tfd.Normal(
-                    loc=jnp.zeros_like(tf.cast(tensor, self.dtype)),
+                    loc=jnp.zeros_like(jnp.asarray(tensor, self.dtype)),
                     scale=regression_scales[label]
-                    * jnp.ones_like(tf.cast(tensor, self.dtype)),
+                    * jnp.ones_like(jnp.asarray(tensor, self.dtype)),
                 ),
-                reinterpreted_batch_ndims=len(tensor.shape.as_list()),
+                reinterpreted_batch_ndims=len(tensor.shape),
             )
 
         # Overall horseshoe
@@ -181,7 +180,7 @@ class LogisticBayesianquilt(BayesianModel):
                     loc=0,
                     scale=jnp.ones(
                         [np.prod(self.regression_decomposition._interaction_shape)]
-                        + self.regression_decomposition.shape()[-2:],
+                        + list(self.regression_decomposition.shape())[-2:],
                         dtype=self.dtype,
                     ),
                 ),
@@ -215,7 +214,7 @@ class LogisticBayesianquilt(BayesianModel):
 
         regressor_tensors["lambda_j"] = jnp.ones(
             [np.prod(self.regression_decomposition._interaction_shape)]
-            + self.regression_decomposition.shape()[-2:],
+            + list(self.regression_decomposition.shape())[-2:],
             dtype=self.dtype,
         )
 
@@ -225,11 +224,8 @@ class LogisticBayesianquilt(BayesianModel):
         bijectors["c2"] = tfp.bijectors.Softplus()
         bijectors["lambda_j"] = tfp.bijectors.Softplus()
 
-        regression_surrogate = build_factored_surrogate_posterior(
-            regression_model,
-            initializers=regressor_tensors,
-            bijectors=bijectors,
-            gaussian_only=True,
+        regression_surrogate_generator, regression_surrogate_param_init = build_factored_surrogate_posterior_generator(
+            regression_model, bijectors=bijectors
         )
 
         #  Exponential params
@@ -248,16 +244,16 @@ class LogisticBayesianquilt(BayesianModel):
         for label, tensor in intercept_tensors.items():
             intercept_dict[label] = tfd.Independent(
                 tfd.Normal(
-                    loc=jnp.zeros_like(tf.cast(tensor, self.dtype)),
+                    loc=jnp.zeros_like(jnp.asarray(tensor, self.dtype)),
                     scale=intercept_scales[label]
-                    * jnp.ones_like(tf.cast(tensor, self.dtype)),
+                    * jnp.ones_like(jnp.asarray(tensor, self.dtype)),
                 ),
-                reinterpreted_batch_ndims=len(tensor.shape.as_list()),
+                reinterpreted_batch_ndims=len(tensor.shape),
             )
 
         intercept_prior = tfd.JointDistributionNamed(intercept_dict)
-        intercept_surrogate = build_surrogate_posterior(
-            intercept_prior, initializers=intercept_tensors
+        intercept_surrogate_gen, intercept_param_init = build_factored_surrogate_posterior_generator(
+            intercept_prior
         )
 
         if self.random_intercept_interact is not None:
@@ -271,15 +267,15 @@ class LogisticBayesianquilt(BayesianModel):
             for label, tensor in random_intercept_tensors.items():
                 random_intercept_dict[label] = tfd.Independent(
                     tfd.Normal(
-                        loc=jnp.zeros_like(tf.cast(tensor, self.dtype)),
-                        scale=1e-1 * jnp.ones_like(tf.cast(tensor, self.dtype)),
+                        loc=jnp.zeros_like(jnp.asarray(tensor, self.dtype)),
+                        scale=1e-1 * jnp.ones_like(jnp.asarray(tensor, self.dtype)),
                     ),
-                    reinterpreted_batch_ndims=len(tensor.shape.as_list()),
+                    reinterpreted_batch_ndims=len(tensor.shape),
                 )
 
             random_intercept_prior = tfd.JointDistributionNamed(random_intercept_dict)
-            random_intercept_surrogate = build_surrogate_posterior(
-                random_intercept_prior, initializers=random_intercept_tensors
+            random_intercept_surrogate_gen, random_intercept_param_init = build_factored_surrogate_posterior_generator(
+                random_intercept_prior
             )
             self.prior_distribution = tfd.JointDistributionNamed(
                 {
@@ -288,16 +284,19 @@ class LogisticBayesianquilt(BayesianModel):
                     "random_intercept_model": random_intercept_prior,
                 }
             )
-            self.surrogate_distribution = tfd.JointDistributionNamed(
+            self.surrogate_distribution_generator = lambda params: tfd.JointDistributionNamed(
                 {
-                    **regression_surrogate.model,
-                    **intercept_surrogate.model,
-                    **random_intercept_surrogate.model,
+                    **regression_surrogate_generator(params).model,
+                    **intercept_surrogate_gen(params).model,
+                    **random_intercept_surrogate_gen(params).model,
                 }
             )
-            self.random_intercept_var_list = list(
-                random_intercept_surrogate.model.keys()
-            )
+            self.surrogate_parameter_initializer = lambda: {
+                **regression_surrogate_param_init(),
+                **intercept_param_init(),
+                **random_intercept_param_init(),
+            }
+            self.random_intercept_var_list = list(random_intercept_vars.keys())
         else:
             self.prior_distribution = tfd.JointDistributionNamed(
                 {
@@ -305,16 +304,22 @@ class LogisticBayesianquilt(BayesianModel):
                     "intercept_model": intercept_prior,
                 }
             )
-            self.surrogate_distribution = tfd.JointDistributionNamed(
-                {**regression_surrogate.model, **intercept_surrogate.model}
+            self.surrogate_distribution_generator = lambda params: tfd.JointDistributionNamed(
+                {
+                    **regression_surrogate_generator(params).model,
+                    **intercept_surrogate_gen(params).model,
+                }
             )
-        self.regression_vars = regression_vars
-        self.regression_var_list = list(regression_surrogate.model.keys())
-        self.intercept_var_list = list(intercept_surrogate.model.keys())
+            self.surrogate_parameter_initializer = lambda: {
+                **regression_surrogate_param_init(),
+                **intercept_param_init(),
+            }
 
-        self.surrogate_vars = self.surrogate_distribution.variables
-        self.var_list = list(self.surrogate_distribution.model.keys())
-        return None
+        self.regression_vars = regression_vars
+        self.regression_var_list = list(regression_vars.keys())
+        self.intercept_var_list = list(intercept_vars.keys())
+        self.params = self.surrogate_parameter_initializer()
+        self.var_list = list(self.params.keys())
 
     def predictive_distribution(self, data, **params):
         processed = data.copy()
@@ -335,21 +340,15 @@ class LogisticBayesianquilt(BayesianModel):
             processed = (self.preprocessor())(processed)
 
         regression_indices = self.regression_decomposition.retrieve_indices(processed)
-        if isinstance(regression_indices, tf.RaggedTensor):
-            regression_indices = regression_indices.to_tensor()
 
         # lookup_indices model coefficients
 
         intercept_indices = self.intercept_decomposition.retrieve_indices(processed)
-        if isinstance(intercept_indices, tf.RaggedTensor):
-            intercept_indices = intercept_indices.to_tensor()
 
         if self.random_intercept_decomposition is not None:
             random_intercept_indices = (
                 self.random_intercept_decomposition.retrieve_indices(processed)
             )
-            if isinstance(random_intercept_indices, tf.RaggedTensor):
-                random_intercept_indices = random_intercept_indices.to_tensor()
 
         x = processed["X"]
 
@@ -361,21 +360,21 @@ class LogisticBayesianquilt(BayesianModel):
             tensors=regression_params,
         )
 
-        x = x[tf.newaxis, ..., tf.newaxis]
-        mu = tf.cast(coef_, x.dtype) * x
-        mu = tf.reduce_sum(mu, -2) + tf.cast(intercept[...], mu.dtype)
-        mu = tf.cast(mu, self.dtype)
+        x = x[jnp.newaxis, ..., jnp.newaxis]
+        mu = jnp.asarray(coef_, x.dtype) * x
+        mu = jnp.sum(mu, -2) + jnp.asarray(intercept[...], mu.dtype)
+        mu = jnp.asarray(mu, self.dtype)
 
         if self.random_intercept_interact is not None:
             ranef = self.random_intercept_decomposition.lookup(
                 random_intercept_indices, tensors=random_intercept_params
             )
-            mu += tf.cast(ranef, mu.dtype)
+            mu += jnp.asarray(ranef, mu.dtype)
 
         # assemble outcome random vars
 
-        label = tf.cast(tf.squeeze(processed[self.outcome_label]), self.dtype)
-        mu = tf.pad(mu, [(0, 0)] * (len(mu.shape) - 1) + [(1, 0)])
+        label = jnp.asarray(jnp.squeeze(processed[self.outcome_label]), self.dtype)
+        mu = jnp.pad(mu, [(0, 0)] * (len(mu.shape) - 1) + [(1, 0)])
         rv_outcome = tfd.Categorical(logits=mu)
         log_likelihood = rv_outcome.log_prob(label)
 
@@ -390,19 +389,19 @@ class LogisticBayesianquilt(BayesianModel):
             "log_likelihood"
         ]
 
-    def unormalized_log_prob(self, data=None, prior_weight=tf.constant(1.0), **params):
+    def unormalized_log_prob(self, data=None, prior_weight=1.0, **params):
         prediction = self.predictive_distribution(data, **params)
         log_likelihood = prediction["log_likelihood"]
-        max_val = tf.reduce_max(log_likelihood)
+        max_val = jnp.max(log_likelihood)
 
-        finite_portion = tf.where(
-            tf.math.is_finite(log_likelihood),
+        finite_portion = jnp.where(
+            jnp.isfinite(log_likelihood),
             log_likelihood,
             jnp.zeros_like(log_likelihood),
         )
-        min_val = tf.reduce_min(finite_portion) - 1.0
-        log_likelihood = tf.where(
-            tf.math.is_finite(log_likelihood),
+        min_val = jnp.min(finite_portion) - 1.0
+        log_likelihood = jnp.where(
+            jnp.isfinite(log_likelihood),
             log_likelihood,
             jnp.ones_like(log_likelihood) * min_val,
         )
@@ -410,11 +409,11 @@ class LogisticBayesianquilt(BayesianModel):
             prior = self.prior_distribution.log_prob(
                 {
                     "regression_model": {
-                        k: tf.cast(params[k], self.dtype)
+                        k: jnp.asarray(params[k], self.dtype)
                         for k in self.regression_var_list
                     },
                     "intercept_model": {
-                        k: tf.cast(params[k], self.dtype)
+                        k: jnp.asarray(params[k], self.dtype)
                         for k in self.intercept_var_list
                     },
                 }
@@ -423,15 +422,15 @@ class LogisticBayesianquilt(BayesianModel):
             prior = self.prior_distribution.log_prob(
                 {
                     "regression_model": {
-                        k: tf.cast(params[k], self.dtype)
+                        k: jnp.asarray(params[k], self.dtype)
                         for k in self.regression_var_list
                     },
                     "intercept_model": {
-                        k: tf.cast(params[k], self.dtype)
+                        k: jnp.asarray(params[k], self.dtype)
                         for k in self.intercept_var_list
                     },
                     "random_intercept_model": {
-                        k: tf.cast(params[k], self.dtype)
+                        k: jnp.asarray(params[k], self.dtype)
                         for k in self.random_intercept_var_list
                     },
                 }
@@ -444,24 +443,24 @@ class LogisticBayesianquilt(BayesianModel):
                     scale=(
                         tau
                         * lambda_j
-                        * tf.math.sqrt(c2 / (c2 + tau**2 * lambda_j**2))
+                        * jnp.sqrt(c2 / (c2 + tau**2 * lambda_j**2))
                     ),
                 ),
                 reinterpreted_batch_ndims=3,
             )
 
         regression_coefs = self.regression_decomposition.sum_parts(params)
-        regression_coefs = tf.cast(regression_coefs, self.dtype)
+        regression_coefs = jnp.asarray(regression_coefs, self.dtype)
         regression_horseshoe = regression_effective(
             params["lambda_j"], params["c2"], params["tau"]
         )
-        prior_weight = tf.cast(prior_weight, self.dtype)
+        prior_weight = jnp.asarray(prior_weight, self.dtype)
 
         energy = (
-            tf.reduce_sum(log_likelihood, axis=-1)
+            jnp.sum(log_likelihood, axis=-1)
             + prior_weight * prior
             + prior_weight
-            * tf.cast(regression_horseshoe.log_prob(regression_coefs), self.dtype)
+            * jnp.asarray(regression_horseshoe.log_prob(regression_coefs), self.dtype)
         )
 
         return energy
@@ -495,64 +494,16 @@ class LogisticBayesianquilt(BayesianModel):
                 if len(hot) == 0:
                     print("Done warming")
                     break
-                trainable_variables = [
-                    t
-                    for t in self.surrogate_distribution.variables
-                    if t._shared_name.split("/")[0] not in hot
-                ]
-
-                """
-
-                batch = next(iter(data_factory()))
-                test = self.predictive_distribution(data=batch, **self.sample(1))
-                n_infinite = tf.reduce_sum(
-                    tf.cast(tf.math.is_inf(test["log_likelihood"]), tf.int32), axis=0
-                )
-                variational_loss_fn = functools.partial(
-                    csiszar_divergence.monte_carlo_variational_loss,
-                    discrepancy_fn=tfp.vi.kl_reverse,
-                    importance_sample_size=4,
-                    # Silent fallback to score-function gradients leads to
-                    # difficult-to-debug failures, so force reparameterization gradients by
-                    # default.
-                    gradient_estimator=(
-                        csiszar_divergence.GradientEstimators.REPARAMETERIZATION
-                    ),
-                )
-
-                def complete_variational_loss_fn(seed=None):
-                    return variational_loss_fn(
-                        functools.partial(self.unormalized_log_prob, data=batch),
-                        self.surrogate_distribution,
-                        sample_size=1,
-                        seed=seed,
-                    )
                 
-                with tf.GradientTape(
-                    watch_accessed_variables=trainable_variables is None
-                ) as tape:
-                    for v in trainable_variables or []:
-                        tape.watch(v)
-                    loss = complete_variational_loss_fn()
-
-                    grad = tape.gradient(loss, trainable_variables)
-
-                with tf.GradientTape(
-                    watch_accessed_variables=trainable_variables is None
-                ) as tape:
-                    for v in trainable_variables or []:
-                        tape.watch(v)
-                    test_energy = self.unormalized_log_prob(data=batch, **self.sample(1))
-                    grad_e = tape.gradient(test_energy, trainable_variables)
-                """
                 print(f"Training up to {max_order} order")
+                trainable_params = {k: v for k, v in self.params.items() if k not in hot}
                 losses = self._calibrate_minibatch_advi(
                     batched_data_factory=batched_data_factory,
                     num_steps=warmup,
                     clip_value=clip_value,
                     batch_size=batch_size,
                     dataset_size=dataset_size,
-                    trainable_variables=trainable_variables,
+                    trainable_variables=trainable_params,
                     learning_rate=learning_rate,
                     test_fn=test_fn,
                     **kwargs,
@@ -565,7 +516,7 @@ class LogisticBayesianquilt(BayesianModel):
                 clip_value=clip_value,
                 batch_size=batch_size,
                 dataset_size=dataset_size,
-                trainable_variables=self.surrogate_distribution.variables,
+                trainable_variables=self.params,
                 learning_rate=learning_rate,
                 test_fn=test_fn,
                 **kwargs,
