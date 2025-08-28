@@ -5,10 +5,11 @@ Note that you currently have to babysit the optimization a bit
 """
 
 
+import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
-from tensorflow_probability import distributions as tfd
-from tensorflow_probability.python import bijectors as tfb
+from tensorflow_probability.substrates.jax import bijectors as tfb
+from tensorflow_probability.substrates.jax import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
 from bayesianquilts.model import BayesianModel
@@ -149,7 +150,7 @@ class GaussianFactorization(BayesianModel):
                 tf.where(
                     colmeans_nonzero > 1,
                     colmeans_nonzero,
-                    tf.ones_like(colmeans_nonzero)
+                    jnp.ones_like(colmeans_nonzero)
                 ),
                 self.dtype
             )
@@ -229,20 +230,20 @@ class GaussianFactorization(BayesianModel):
         distribution_dict = {
             'v': tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         (self.latent_dim, self.feature_dim),
                         dtype=self.dtype),
-                    scale=0.1*tf.ones(
+                    scale=0.1*jnp.ones(
                         (self.latent_dim, self.feature_dim),
                         dtype=self.dtype)
                 ), reinterpreted_batch_ndims=2
             ),
             'w': tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         (1, self.feature_dim),
                         dtype=self.dtype),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         (1, self.feature_dim), dtype=self.dtype)
                 ),
                 reinterpreted_batch_ndims=2
@@ -253,7 +254,7 @@ class GaussianFactorization(BayesianModel):
                 **distribution_dict,
                 'u': lambda u_eta, u_tau: tfd.Independent(
                     tfd.Normal(
-                        loc=tf.zeros(
+                        loc=jnp.zeros(
                             (self.feature_dim, self.latent_dim),
                             dtype=self.dtype),
                         scale=u_eta*u_tau*symmetry_breaking_decay
@@ -261,20 +262,20 @@ class GaussianFactorization(BayesianModel):
                 ),
                 'u_eta': tfd.Independent(
                     tfd.HalfCauchy(
-                        loc=tf.zeros(
+                        loc=jnp.zeros(
                             (self.feature_dim, self.latent_dim),
                             dtype=self.dtype),
-                        scale=tf.ones(
+                        scale=jnp.ones(
                             (self.feature_dim, self.latent_dim),
                             dtype=self.dtype)
                     ), reinterpreted_batch_ndims=2
                 ),
                 'u_tau': tfd.Independent(
                     tfd.HalfCauchy(
-                        loc=tf.zeros(
+                        loc=jnp.zeros(
                             (1, self.latent_dim),
                             dtype=self.dtype),
-                        scale=tf.ones(
+                        scale=jnp.ones(
                             (1, self.latent_dim),
                             dtype=self.dtype)*self.u_tau_scale
                     ), reinterpreted_batch_ndims=2
@@ -287,18 +288,18 @@ class GaussianFactorization(BayesianModel):
             )
             distribution_dict['s_eta'] = tfd.Independent(
                 tfd.HalfCauchy(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         (2, self.feature_dim),
                         dtype=self.dtype),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         (2, self.feature_dim),
                         dtype=self.dtype)
                 ), reinterpreted_batch_ndims=2
             )
             distribution_dict['s_tau'] = tfd.Independent(
                 tfd.HalfCauchy(
-                    loc=tf.zeros((1, self.feature_dim), dtype=self.dtype),
-                    scale=tf.ones(
+                    loc=jnp.zeros((1, self.feature_dim), dtype=self.dtype),
+                    scale=jnp.ones(
                         (1, self.feature_dim),
                         dtype=self.dtype)*self.s_tau_scale
                 ), reinterpreted_batch_ndims=2
@@ -312,7 +313,7 @@ class GaussianFactorization(BayesianModel):
 
             distribution_dict['u_eta'] = lambda u_eta_a: tfd.Independent(
                 SqrtInverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (self.feature_dim, self.latent_dim),
                         dtype=self.dtype
                     ),
@@ -321,18 +322,18 @@ class GaussianFactorization(BayesianModel):
             )
             distribution_dict['u_eta_a'] = tfd.Independent(
                 tfd.InverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (self.feature_dim, self.latent_dim),
                         dtype=self.dtype
                     ),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         (self.feature_dim, self.latent_dim),
                         dtype=self.dtype)
                 ), reinterpreted_batch_ndims=2
             )
             distribution_dict['u_tau'] = lambda u_tau_a: tfd.Independent(
                 SqrtInverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (1, self.latent_dim),
                         dtype=self.dtype
                     ),
@@ -341,10 +342,10 @@ class GaussianFactorization(BayesianModel):
             )
             distribution_dict['u_tau_a'] = tfd.Independent(
                 tfd.InverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (1, self.latent_dim), dtype=self.dtype
                     ),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         (1, self.latent_dim), dtype=self.dtype
                     )/self.u_tau_scale**2
                 ), reinterpreted_batch_ndims=2
@@ -352,7 +353,7 @@ class GaussianFactorization(BayesianModel):
 
             distribution_dict['s_eta'] = lambda s_eta_a: tfd.Independent(
                 SqrtInverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (2, self.feature_dim),
                         dtype=self.dtype
                     ),
@@ -361,15 +362,15 @@ class GaussianFactorization(BayesianModel):
             )
             distribution_dict['s_eta_a'] = tfd.Independent(
                 tfd.InverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (2, self.feature_dim), dtype=self.dtype
                     ),
-                    scale=tf.ones((2, self.feature_dim), dtype=self.dtype)
+                    scale=jnp.ones((2, self.feature_dim), dtype=self.dtype)
                 ), reinterpreted_batch_ndims=2
             )
             distribution_dict['s_tau'] = lambda s_tau_a: tfd.Independent(
                 SqrtInverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (1, self.feature_dim), dtype=self.dtype
                     ),
                     scale=1.0/s_tau_a
@@ -377,10 +378,10 @@ class GaussianFactorization(BayesianModel):
             )
             distribution_dict['s_tau_a'] = tfd.Independent(
                 tfd.InverseGamma(
-                    concentration=0.5*tf.ones(
+                    concentration=0.5*jnp.ones(
                         (1, self.feature_dim), dtype=self.dtype
                     ),
-                    scale=tf.ones(
+                    scale=jnp.ones(
                         (1, self.feature_dim),
                         dtype=self.dtype)/self.s_tau_scale**2
                 ), reinterpreted_batch_ndims=2
@@ -390,12 +391,12 @@ class GaussianFactorization(BayesianModel):
                 **distribution_dict,
                 'u': tfd.Independent(
                     tfd.Horseshoe(
-                        loc=tf.zeros(
+                        loc=jnp.zeros(
                                 (self.feature_dim, self.latent_dim),
                                 dtype=self.dtype
                             ),
                         scale=(
-                            self.u_tau_scale*symmetry_breaking_decay*tf.ones(
+                            self.u_tau_scale*symmetry_breaking_decay*jnp.ones(
                                 (self.feature_dim, self.latent_dim),
                                 dtype=self.dtype
                             )
@@ -404,7 +405,7 @@ class GaussianFactorization(BayesianModel):
                 ),
                 's': tfd.Independent(
                     AbsHorseshoe(
-                        scale=self.s_tau_scale*tf.ones(
+                        scale=self.s_tau_scale*jnp.ones(
                             (1, self.feature_dim), dtype=self.dtype
                         )
                     ), reinterpreted_batch_ndims=2
@@ -417,10 +418,10 @@ class GaussianFactorization(BayesianModel):
         surrogate_dict = {
             'v': self.bijectors['v'](
                 build_trainable_normal_dist(
-                    -5*tf.ones(
+                    -5*jnp.ones(
                         (self.latent_dim, self.feature_dim),
                         dtype=self.dtype),
-                    5e-4*tf.ones((self.latent_dim, self.feature_dim),
+                    5e-4*jnp.ones((self.latent_dim, self.feature_dim),
                                  dtype=self.dtype),
                     2,
                     strategy=self.strategy
@@ -428,8 +429,8 @@ class GaussianFactorization(BayesianModel):
             ),
             'w': self.bijectors['w'](
                 build_trainable_normal_dist(
-                    0.5*tf.ones((1, self.feature_dim), dtype=self.dtype),
-                    1e-3*tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    0.5*jnp.ones((1, self.feature_dim), dtype=self.dtype),
+                    1e-3*jnp.ones((1, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy
                 )
@@ -440,9 +441,9 @@ class GaussianFactorization(BayesianModel):
                 **surrogate_dict,
                 'u': self.bijectors['u'](
                     build_trainable_normal_dist(
-                        -6.*tf.ones((self.feature_dim, self.latent_dim),
+                        -6.*jnp.ones((self.feature_dim, self.latent_dim),
                                     dtype=self.dtype),
-                        5e-4*tf.ones(
+                        5e-4*jnp.ones(
                             (self.feature_dim, self.latent_dim),
                             dtype=self.dtype),
                         2,
@@ -451,10 +452,10 @@ class GaussianFactorization(BayesianModel):
                 ),
                 'u_eta': self.bijectors['u_eta'](
                     build_trainable_InverseGamma_dist(
-                        3*tf.ones(
+                        3*jnp.ones(
                             (self.feature_dim, self.latent_dim),
                             dtype=self.dtype),
-                        tf.ones(
+                        jnp.ones(
                             (self.feature_dim, self.latent_dim),
                             dtype=self.dtype),
                         2,
@@ -463,10 +464,10 @@ class GaussianFactorization(BayesianModel):
                 ),
                 'u_tau': self.bijectors['u_tau'](
                     build_trainable_InverseGamma_dist(
-                        3*tf.ones(
+                        3*jnp.ones(
                             (1, self.latent_dim),
                             dtype=self.dtype),
-                        tf.ones((1, self.latent_dim), dtype=self.dtype),
+                        jnp.ones((1, self.latent_dim), dtype=self.dtype),
                         2,
                         strategy=self.strategy
                     )
@@ -476,26 +477,26 @@ class GaussianFactorization(BayesianModel):
 
             surrogate_dict['s_eta'] = self.bijectors['s_eta'](
                 build_trainable_InverseGamma_dist(
-                    tf.ones((2, self.feature_dim), dtype=self.dtype),
-                    tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy
                 )
             )
             surrogate_dict['s_tau'] = self.bijectors['s_tau'](
                 build_trainable_InverseGamma_dist(
-                    1*tf.ones((1, self.feature_dim), dtype=self.dtype),
-                    tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    1*jnp.ones((1, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((1, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy
                 )
             )
             surrogate_dict['s'] = self.bijectors['s'](
                 build_trainable_normal_dist(
-                    tf.ones(
+                    jnp.ones(
                         (2, self.feature_dim), dtype=self.dtype)*tf.cast(
                             [[-2.], [-1.]], dtype=self.dtype),
-                    1e-3*tf.ones(
+                    1e-3*jnp.ones(
                         (2, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy
@@ -506,10 +507,10 @@ class GaussianFactorization(BayesianModel):
             self.bijectors['u_tau_a'] = tfb.Softplus()
             surrogate_dict['u_eta_a'] = self.bijectors['u_eta_a'](
                 build_trainable_InverseGamma_dist(
-                    2.*tf.ones(
+                    2.*jnp.ones(
                         (self.feature_dim, self.latent_dim),
                         dtype=self.dtype),
-                    tf.ones(
+                    jnp.ones(
                         (self.feature_dim, self.latent_dim),
                         dtype=self.dtype),
                     2,
@@ -518,10 +519,10 @@ class GaussianFactorization(BayesianModel):
             )
             surrogate_dict['u_tau_a'] = self.bijectors['u_tau_a'](
                 build_trainable_InverseGamma_dist(
-                    2.*tf.ones(
+                    2.*jnp.ones(
                         (1, self.latent_dim),
                         dtype=self.dtype),
-                    tf.ones(
+                    jnp.ones(
                         (1, self.latent_dim),
                         dtype=self.dtype)/self.u_tau_scale**2,
                     2,
@@ -533,18 +534,18 @@ class GaussianFactorization(BayesianModel):
             self.bijectors['s_tau_a'] = tfb.Softplus()
             surrogate_dict['s_eta_a'] = self.bijectors['s_eta_a'](
                 build_trainable_InverseGamma_dist(
-                    2.*tf.ones(
+                    2.*jnp.ones(
                         (2, self.feature_dim), dtype=self.dtype),
-                    tf.ones((2, self.feature_dim), dtype=self.dtype),
+                    jnp.ones((2, self.feature_dim), dtype=self.dtype),
                     2,
                     strategy=self.strategy
                 )
             )
             surrogate_dict['s_tau_a'] = self.bijectors['s_tau_a'](
                 build_trainable_InverseGamma_dist(
-                    2.*tf.ones((1, self.feature_dim), dtype=self.dtype),
+                    2.*jnp.ones((1, self.feature_dim), dtype=self.dtype),
                     (
-                        tf.ones(
+                        jnp.ones(
                             (1, self.feature_dim),
                             dtype=self.dtype) / self.s_tau_scale**2),
                     2,
@@ -556,10 +557,10 @@ class GaussianFactorization(BayesianModel):
                 **surrogate_dict,
                 's': self.bijectors['s'](
                     build_trainable_normal_dist(
-                        tf.ones(
+                        jnp.ones(
                             (2, self.feature_dim), dtype=self.dtype)*tf.cast(
                                 [[-2.], [-1.]], dtype=self.dtype),
-                        1e-3*tf.ones(
+                        1e-3*jnp.ones(
                             (2, self.feature_dim), dtype=self.dtype),
                         2,
                         strategy=self.strategy
@@ -567,9 +568,9 @@ class GaussianFactorization(BayesianModel):
                 ),
                 'u': self.bijectors['u'](
                     build_trainable_normal_dist(
-                        -8.*tf.ones((self.feature_dim, self.latent_dim),
+                        -8.*jnp.ones((self.feature_dim, self.latent_dim),
                                     dtype=self.dtype),
-                        5e-4*tf.ones(
+                        5e-4*jnp.ones(
                             (self.feature_dim, self.latent_dim),
                             dtype=self.dtype),
                         2,
@@ -613,22 +614,22 @@ class GaussianFactorization(BayesianModel):
         theta = self.encode(x=data[self.count_key], u=params['u'], s=s)
         rv_theta = tfd.Independent(
             tfd.Normal(
-                loc=tf.zeros_like(theta, dtype=self.dtype),
-                scale=tf.ones_like(theta, dtype=self.dtype)),
+                loc=jnp.zeros_like(theta, dtype=self.dtype),
+                scale=jnp.ones_like(theta, dtype=self.dtype)),
             reinterpreted_batch_ndims=2)
 
         prior_parts['z'] = rv_theta.log_prob(theta)
 
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood), log_likelihood,
-            tf.zeros_like(log_likelihood))
+            jnp.zeros_like(log_likelihood))
         min_val = tf.reduce_min(finite_portion)-10.
         max_val = 0.
         log_likelihood = tf.clip_by_value(log_likelihood, min_val, max_val)
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood)*min_val
+            jnp.ones_like(log_likelihood)*min_val
         )
         log_likelihood = tf.reduce_sum(log_likelihood, -1)
         log_likelihood = tf.reduce_sum(log_likelihood, -1)

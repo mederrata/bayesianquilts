@@ -1,8 +1,7 @@
-import numpy as np
-import tensorflow as tf
 from abc import ABC, abstractclassmethod
-from bayesianquilts import BayesianModel
-from bayesianquilts.tf.parameter import Decomposed
+
+import numpy as np
+
 
 
 class Ensemble(ABC):

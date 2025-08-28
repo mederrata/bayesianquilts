@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
+import jax
+import jax.numpy as jnp
+import tensorflow_probability.substrates.jax.distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
-import tensorflow as tf
-import tensorflow_probability as tfp
-
-from bayesianquilts.nn.dense import DenseHorseshoe, DenseGaussian
-
-tfd = tfp.distributions
+from bayesianquilts.nn.dense import DenseGaussian, DenseHorseshoe
 
 
 class LogisticRelunet(DenseHorseshoe):
@@ -17,7 +16,7 @@ class LogisticRelunet(DenseHorseshoe):
         regressor_scales: list[float] | None = None,
         regressor_offsets: list[float] | None = None,
         outcome_classes: int = 2,
-        dtype: tf.DType = tf.float64,
+        dtype: tf.DType = jnp.float64,
         outcome_label: str = "y",
         **kwargs
     ):
@@ -44,15 +43,12 @@ class LogisticRelunet(DenseHorseshoe):
         self.outcome_classes = outcome_classes
         self.outcome_label = outcome_label
 
-    def predictive_distribution(self, data: dict[str, tf.Tensor], **params):
+    def predictive_distribution(self, data: dict[str, jax.typing.ArrayLike], **params):
 
-        X = tf.cast(
-            data["X"],
-            self.dtype,
-        )
+        X = data["X"].astype(self.dtype)
 
         logits = self.eval(X, params)
-        logits = tf.pad(logits, [(0, 0)] * (len(logits.shape) - 1) + [(1, 0)])
+        # logits = tf.pad(logits, [(0, 0)] * (len(logits.shape) - 1) + [(1, 0)])
         rv_outcome = tfd.Categorical(logits=logits)
         log_likelihood = rv_outcome.log_prob(tf.squeeze(data[self.outcome_label]))
 
@@ -67,15 +63,16 @@ class LogisticRelunet(DenseHorseshoe):
 
     def unormalized_log_prob(
         self,
-        data: dict[str, tf.Tensor] = None,
-        prior_weight: tf.Tensor | float = tf.constant(1.0),
+        data: dict[str, jax.typing.ArrayLike] = None,
+        prior_weight: jax.typing.ArrayLike | float = 1.,
         **params
     ):
         log_likelihood = self.log_likelihood(data, **params)
+        """
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 1.0
         max_val = 0.0
@@ -83,8 +80,9 @@ class LogisticRelunet(DenseHorseshoe):
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
+        """
         prior = self.prior_distribution.log_prob(params)
         return (
             tf.reduce_sum(log_likelihood, axis=-1)
@@ -100,7 +98,7 @@ class ShallowGaussianRelunet(DenseGaussian):
         regressor_scales: list[float] | None = None,
         regressor_offsets: list[float] | None = None,
         outcome_classes: int = 2,
-        dtype: tf.DType = tf.float64,
+        dtype: tf.DType = jnp.float64,
         outcome_label: str = "y",
         **kwargs
     ):
@@ -110,7 +108,7 @@ class ShallowGaussianRelunet(DenseGaussian):
         super(ShallowGaussianRelunet, self).__init__(
             input_size=dim_regressors,
             layer_sizes=layer_sizes,
-            activation_fn=tf.nn.relu,
+            activation_fn=jax.nn.relu,
             weight_scale=1.0,
             bias_scale=1.0,
             dtype=dtype,
@@ -126,7 +124,7 @@ class ShallowGaussianRelunet(DenseGaussian):
         self.outcome_classes = outcome_classes
         self.outcome_label = outcome_label
 
-    def predictive_distribution(self, data: dict[str, tf.Tensor], **params):
+    def predictive_distribution(self, data: dict[str, jax.typing.ArrayLike], **params):
 
         X = tf.cast(
             data["X"],
@@ -136,7 +134,7 @@ class ShallowGaussianRelunet(DenseGaussian):
         logits = self.eval(X, params)
         logits = tf.pad(logits, [(0, 0)] * (len(logits.shape) - 1) + [(1, 0)])
         rv_outcome = tfd.Categorical(logits=logits)
-        log_likelihood = rv_outcome.log_prob(tf.squeeze(data[self.outcome_label]))
+        log_likelihood = rv_outcome.log_prob(jnp.squeeze(data[self.outcome_label]))
 
         return {
             "log_likelihood": log_likelihood,
@@ -150,14 +148,14 @@ class ShallowGaussianRelunet(DenseGaussian):
     def unormalized_log_prob(
         self,
         data: dict[str, tf.Tensor] = None,
-        prior_weight: tf.Tensor | float = tf.constant(1.0),
+        prior_weight: tf.Tensor | float = 1.,
         **params
     ):
         log_likelihood = self.log_likelihood(data, **params)
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 1.0
         max_val = 0.0
@@ -165,10 +163,10 @@ class ShallowGaussianRelunet(DenseGaussian):
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
         prior = self.prior_distribution.log_prob(params)
         return (
-            tf.reduce_sum(log_likelihood, axis=-1)
-            + tf.cast(prior_weight, prior.dtype) * prior
+            jnp.sum(log_likelihood, axis=-1)
+            + jnp.array(prior_weight).cast(prior.dtype) * prior
         )

@@ -1,8 +1,9 @@
-import tensorflow as tf
-import tensorflow_probability as tfp
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+import tensorflow_probability as tfp
 from sklearn import metrics as skmetrics
+from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 
@@ -27,8 +28,8 @@ def auprc(labels, probs):
 
 def accuracy(probs, labels, n_thresholds=200):
     thresholds = tf.cast(tf.linspace(1, 0, n_thresholds), probs.dtype)
-    decisions = probs[tf.newaxis, :] - thresholds[:, tf.newaxis] > 0
-    labels = tf.squeeze(labels)
+    decisions = probs[jnp.newaxis, :] - thresholds[:, jnp.newaxis] > 0
+    labels = jnp.squeeze(labels)
     oneone = (
         tf.cast(labels == 1, dtype=probs.dtype) *
         tf.cast(decisions, dtype=probs.dtype))
@@ -57,7 +58,7 @@ def accuracy(probs, labels, n_thresholds=200):
     precision = tf.where(
         tf.math.is_finite(precision),
         precision,
-        tf.zeros_like(precision)
+        jnp.zeros_like(precision)
     )
     recall = TP/(TP+FN)
     auroc = auc(FPR, TPR)
@@ -93,7 +94,7 @@ def classification_metrics(
             batch = preprocessing_fn(batch)
 
         for k in collected_data.keys():
-            collected_data[k] += [tf.squeeze(batch[k]).numpy()]
+            collected_data[k] += [jnp.squeeze(batch[k])]
 
         probs += [prediction_fn(data=batch)]
 

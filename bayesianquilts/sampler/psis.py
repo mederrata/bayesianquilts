@@ -1,64 +1,68 @@
-import tensorflow as tf
+"""Pareto smoothed importance sampling (PSIS) in JAX
 
+This module implements Pareto smoothed importance sampling (PSIS) and PSIS
+leave-one-out (LOO) cross-validation in JAX.
 
-def sumlogs(x, axis=None):
-    """Sum of vector where numbers are represented by their logarithms.
+This code is a conversion of the original NumPy implementation by Aki Vehtari
+and Tuomas Sivula.
 
-    Calculates ``tf.math.log(tf.reduce_sum(tf.exp(x), axis=axis))`` in such a
-    fashion that it works even when elements have large magnitude.
+Included functions
+------------------
+psisloo
+    Pareto smoothed importance sampling leave-one-out log predictive densities.
 
-    """
-    maxx = tf.reduce_max(x, axis=axis, keepdims=True)
-    xnorm = x - maxx
-    xnorm = tf.exp(xnorm)
-    out = tf.reduce_sum(xnorm, axis=axis)
-    out = tf.math.log(out)
-    out += tf.squeeze(maxx)
-    return out
+psislw
+    Pareto smoothed importance sampling.
 
+gpdfitnew
+    Estimate the paramaters for the Generalized Pareto Distribution (GPD).
 
-def gpinv(p, k, sigma):
-    """Inverse Generalized Pareto distribution function."""
-    x = tf.fill(tf.shape(p), tf.constant(float("nan")))
+gpinv
+    Inverse Generalised Pareto distribution function.
 
-    if sigma <= 0:
-        return x
+References
+----------
+Aki Vehtari, Andrew Gelman and Jonah Gabry (2017). Practical
+Bayesian model evaluation using leave-one-out cross-validation
+and WAIC. Statistics and Computing, 27(5):1413–1432.
+doi:10.1007/s11222-016-9696-4. https://arxiv.org/abs/1507.04544
 
-    ok = tf.logical_and(tf.greater(p, 0), tf.less(p, 1))
+Aki Vehtari, Andrew Gelman and Jonah Gabry (2017). Pareto
+smoothed importance sampling. https://arxiv.org/abs/arXiv:1507.02646v5
 
-    if tf.reduce_all(ok):
-        if tf.abs(k) < tf.constant(tf.finfo(float).eps):
-            x = -tf.math.log1p(-p)
-        else:
-            x = -tf.math.log1p(-p) * k
-            x = tf.math.expm1(x) / k
-        x *= sigma
-    else:
-        if tf.abs(k) < tf.constant(tf.finfo(float).eps):
-            temp = -tf.math.log1p(-p[ok])
-            x = tf.tensor_scatter_nd_update(x, tf.where(ok)[:, tf.newaxis], temp)
-        else:
-            temp = -tf.math.log1p(-p[ok]) * k
-            temp = tf.math.expm1(temp) / k
-            x = tf.tensor_scatter_nd_update(x, tf.where(ok)[:, tf.newaxis], temp)
-        x *= sigma
-        x = tf.tensor_scatter_nd_update(
-            x,
-            tf.where(tf.equal(p, 0))[:, tf.newaxis],
-            tf.zeros_like(tf.where(tf.equal(p, 0))),
-        )
-        if k >= 0:
-            x = tf.tensor_scatter_nd_update(
-                x,
-                tf.where(tf.equal(p, 1))[:, tf.newaxis],
-                tf.fill(tf.shape(tf.where(tf.equal(p, 1))), tf.constant(float("inf"))),
-            )
-        else:
-            x = tf.tensor_scatter_nd_update(
-                x, tf.where(tf.equal(p, 1))[:, tf.newaxis], -sigma / k
-            )
+"""
+import jax
+import jax.numpy as jnp
+from jax.scipy.special import logsumexp
 
-    return x
+# 3-Clause BSD License
+"""
+Copyright 2017 Aki Vehtari, Tuomas Sivula
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation and/or
+other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+may be used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. """
 
 
 def psisloo(log_lik, **kwargs):
@@ -68,293 +72,258 @@ def psisloo(log_lik, **kwargs):
     likelihood terms :math:`p(y_i|\theta^s)` in input parameter `log_lik`.
     Returns a sum of the leave-one-out log predictive densities `loo`,
     individual leave-one-out log predictive density terms `loos` and an estimate
-    of Pareto tail indices `ks`. The estimates are unreliable if tail index
-    ``k > 0.7`` (see more in the references listed in the module docstring).
+    of Pareto tail indeces `ks`. The estimates are unreliable if tail index
+    ``k > 0.7``.
 
-    Additional keyword arguments are passed to the :meth:`psislw_tf()` function
-    (see the corresponding documentation).
+    Additional keyword arguments are passed to the :meth:`psislw()` function.
 
     Parameters
     ----------
-    log_lik : tf.Tensor
-        Tensor of shape (n, m) containing n posterior samples of the log likelihood
+    log_lik : jax.Array
+        Array of size n x m containing n posterior samples of the log likelihood
         terms :math:`p(y_i|\theta^s)`.
 
     Returns
     -------
     loo : scalar
-        Sum of the leave-one-out log predictive densities.
-
-    loos : tf.Tensor
-        Individual leave-one-out log predictive density terms.
-
-    ks : tf.Tensor
-        Estimated Pareto tail indices.
+        sum of the leave-one-out log predictive densities
+    loos : jax.Array
+        individual leave-one-out log predictive density terms
+    ks : jax.Array
+        estimated Pareto tail indeces
 
     """
-    # Ensure overwrite flag is passed in the arguments
-    kwargs["overwrite_lw"] = True
-    # Log raw weights from log_lik
+    # log raw weights from log_lik
     lw = -log_lik
-    # Compute Pareto smoothed log weights given raw log weights
-    lw, ks = psislw(lw, **kwargs)
-    # Compute
-    lw += log_lik
-    loos = sumlogs(lw, axis=0)
-    loo = tf.reduce_sum(loos)
+    # compute Pareto smoothed log weights given raw log weights
+    lw_smoothed, ks = psislw(lw, **kwargs)
+    # compute leave-one-out log predictive densities
+    lw_new = lw_smoothed + log_lik
+    loos = logsumexp(lw_new, axis=0)
+    loo = loos.sum()
     return loo, loos, ks
 
 
-def psislw(lw, Reff=1.0, overwrite_lw=False):
+def psislw(lw, Reff=1.0):
     """Pareto smoothed importance sampling (PSIS).
+
+    NOTE: This JAX implementation is a direct conversion of the original NumPy
+    code. It uses a Python-level for-loop to iterate over the columns of `lw`,
+    which means it is NOT JIT-COMPILABLE. The dynamic nature of tail-finding
+    makes vectorization with `vmap` or compilation with `jit` non-trivial.
 
     Parameters
     ----------
-    lw : tf.Tensor
-        Tensor of shape (n, m) containing m sets of n log weights. It is also
-        possible to provide a one-dimensional tensor of length n.
+    lw : jax.Array
+        Array of size n x m containing m sets of n log weights. It is also
+        possible to provide one dimensional array of length n.
 
-    Reff : float, optional
-        Relative MCMC efficiency ``N_eff / N``
-
-    overwrite_lw : bool, optional
-        If True, the input tensor `lw` is smoothed in-place, assuming the tensor
-        is F-contiguous. By default, a new tensor is allocated.
+    Reff : scalar, optional
+        relative MCMC efficiency ``N_eff / N``
 
     Returns
     -------
-    lw_out : tf.Tensor
-        Smoothed log weights.
-
-    kss : tf.Tensor
-        Pareto tail indices.
+    lw_out : jax.Array
+        smoothed log weights
+    kss : jax.Array
+        Pareto tail indices
 
     """
-    if lw.shape.ndims == 2:
+    if lw.ndim == 2:
         n, m = lw.shape
-    elif lw.shape.ndims == 1:
-        n = tf.shape(lw)[0]
+    elif lw.ndim == 1:
+        n = len(lw)
         m = 1
+        lw = lw.reshape(n, 1)
     else:
         raise ValueError("Argument `lw` must be 1 or 2 dimensional.")
-
     if n <= 1:
         raise ValueError("More than one log-weight needed.")
 
-    if (
-        overwrite_lw
-        and tf.compat.dimension_value(lw.shape[-1]) == m
-        and lw.dtype.is_floating
-    ):
-        # in-place operation
-        lw_out = lw
-    else:
-        # allocate new tensor for output
-        lw_out = tf.identity(lw)
+    # allocate new array for output
+    lw_out = jnp.copy(lw)
 
-    # allocate output tensor for kss
-    kss = tf.TensorArray(dtype=tf.float64, size=m)
+    # allocate output array for kss
+    kss = jnp.empty(m)
 
     # precalculate constants
-    cutoff_ind = (
-        -tf.cast(
-            tf.math.ceil(
-                tf.math.minimum(
-                    0.2 * tf.cast(n, tf.float32), 3 * tf.math.sqrt(n / Reff)
-                )
-            ),
-            tf.int32,
-        )
-        - 1
-    )
-    cutoffmin = tf.cast(-38, tf.float64)
-    logn = tf.math.log(tf.cast(n, tf.float64))
-    k_min = 1 / 3
+    cutoff_ind = -int(jnp.ceil(min(0.2 * n, 3 * jnp.sqrt(n / Reff)))) - 1
+    cutoffmin = jnp.log(jnp.finfo(jnp.float32).tiny)
+    k_min = 1/3
 
     # loop over sets of log weights
+    # This loop is in Python and not JAX-transformable (e.g. jax.jit)
+    # because the size of the tail (`n2`) is data-dependent.
     for i in range(m):
-        x = lw_out[:, i] if m > 1 else lw_out
-
+        x = lw_out[:, i]
         # improve numerical accuracy
-        x -= tf.reduce_max(x)
-        # sort the tensor
-        x_sort_ind = tf.argsort(x)
+        x = x - jnp.max(x)
+        # sort the array
+        x_sort_ind = jnp.argsort(x)
         # divide log weights into body and right tail
-        xcutoff = tf.maximum(x[x_sort_ind[cutoff_ind]], cutoffmin)
-        expxcutoff = tf.exp(xcutoff)
-        tailinds = tf.where(x > xcutoff)[:, 0]
-        x2 = tf.gather(x, tailinds)
-        n2 = tf.shape(x2)[0]
+        xcutoff = jnp.maximum(x[x_sort_ind[cutoff_ind]], cutoffmin)
+        expxcutoff = jnp.exp(xcutoff)
 
-        def tail_smoothing(x2):
+        tail_mask = x > xcutoff
+        n2 = jnp.sum(tail_mask)
+
+        if n2 <= 4:
+            # not enough tail samples for gpdfitnew
+            k = jnp.inf
+            smoothed_tail = None
+        else:
+            # order of tail samples
+            # JAX requires functional updates, so we extract the tail,
+            # sort it, and then fit the GPD.
+            tail_values = x[tail_mask]
+            tail_sort_indices = jnp.argsort(tail_values)
+            tail_values_sorted = tail_values[tail_sort_indices]
+
             # fit generalized Pareto distribution to the right tail samples
-            x2 = tf.exp(x2) - expxcutoff
-            x2si = tf.argsort(x2)
-            k, sigma = gpdfitnew(x2, sort=x2si)
+            tail_to_fit = jnp.exp(tail_values_sorted) - expxcutoff
+            k, sigma = gpdfitnew(tail_to_fit, sort=False)
 
-            # no smoothing if short tail or GPD fit failed
-            if k < k_min or tf.math.is_inf(k):
-                return x
-
+        if k >= k_min and not jnp.isinf(k):
             # compute ordered statistic for the fit
-            sti = tf.range(0.5, tf.cast(n2, dtype=tf.float64))
-            sti /= tf.cast(n2, dtype=tf.float64)
+            sti = (jnp.arange(0.5, n2)) / n2
             qq = gpinv(sti, k, sigma)
-            qq += expxcutoff
-            qq = tf.math.log(qq)
+            qq = qq + expxcutoff
+            qq = jnp.log(qq)
 
-            # place the smoothed tail into the output tensor
-            x = tf.tensor_scatter_nd_update(
-                x, tf.expand_dims(tailinds[x2si], axis=1), tf.expand_dims(qq, axis=1)
-            )
+            # Find original indices of the sorted tail to update `x`
+            original_tail_indices = jnp.where(tail_mask)[0]
+            original_indices_of_sorted_tail = original_tail_indices[tail_sort_indices]
 
-            # truncate smoothed values to the largest raw weight 0
-            x = tf.where(x > 0, 0.0, x)
-
-            return x
-
-        x = tf.cond(tf.less_equal(n2, 4), lambda: x, tail_smoothing(x2))
+            # place the smoothed tail into the output array
+            x = x.at[original_indices_of_sorted_tail].set(qq)
+            # truncate smoothed values to the largest raw weight (0)
+            x = jnp.minimum(x, 0.0)
 
         # renormalize weights
-        x -= sumlogs(x)
+        x = x - logsumexp(x)
         # store tail index k
-        kss = kss.write(i, k)
+        kss = kss.at[i].set(k)
+        lw_out = lw_out.at[:, i].set(x)
 
-    # If the provided input tensor is one dimensional, return kss as scalar.
-    if m == 1:
-        kss = kss.stack()[0]
+    # If the provided input array is one dimensional, return kss as scalar.
+    if lw.shape[1] == 1 and lw.ndim == 2:
+        kss = kss[0]
+        lw_out = lw_out.flatten()
 
     return lw_out, kss
 
 
-def gpdfitnew(x, sort=True, sort_in_place=False, return_quadrature=False):
-    """Estimate the parameters for the Generalized Pareto Distribution (GPD)
+def gpdfitnew(x, sort=True, return_quadrature=False):
+    """Estimate the paramaters for the Generalized Pareto Distribution (GPD)
 
     Returns empirical Bayes estimate for the parameters of the two-parameter
-    generalized Pareto distribution given the data.
+    generalized Parato distribution given the data.
+
+    NOTE: To make this function JIT-compatible, the step that filters out
+    negligible weights in the original NumPy implementation has been removed.
+    This should have a minimal impact on the result. The `sort_in_place`
+    argument has been removed as JAX arrays are immutable.
 
     Parameters
     ----------
-    x : tf.Tensor
-        One-dimensional data tensor.
-
-    sort : bool or tf.Tensor, optional
-        If known in advance, one can provide a tensor of indices that would
-        sort the input tensor `x`. If the input tensor is already sorted, provide
-        False. If True (default behavior), the tensor is sorted internally.
-
-    sort_in_place : bool, optional
-        If `sort` is True and `sort_in_place` is True, the tensor is sorted
-        in-place (False by default).
-
+    x : jax.Array
+        One dimensional data array
+    sort : bool or jax.Array, optional
+        If known in advance, one can provide an array of indices that would
+        sort the input array `x`. If the input array is already sorted, provide
+        False. If True (default behaviour), the array is sorted internally.
     return_quadrature : bool, optional
-        If True, quadrature points and weights `ks` and `w` of the marginal
-        posterior distribution of k are also calculated and returned. False by
-        default.
+        If True, quadrature points and weights `ks` and `w` of the marginal posterior of k are also returned.
 
     Returns
     -------
-    k, sigma : tf.Tensor
-        Estimated parameter values.
-
-    ks, w : tf.Tensor
+    k, sigma : float
+        estimated parameter values
+    ks, w : jax.Array
         Quadrature points and weights of the marginal posterior distribution
         of `k`. Returned only if `return_quadrature` is True.
-
-    Notes
-    -----
-    This function returns a negative of Zhang and Stephens's k, because it is
-    more common parameterization.
-
     """
-    if x.shape.ndims != 1 or tf.size(x) <= 1:
-        raise ValueError("Invalid input tensor.")
+    if x.ndim != 1 or len(x) <= 1:
+        raise ValueError("Invalid input array.")
 
     # check if x should be sorted
-    if sort is True:
-        if sort_in_place:
-            x = tf.sort(x)
-            xsorted = True
-        else:
-            sort = tf.argsort(x)
-            xsorted = False
-    elif sort is False:
-        xsorted = True
-    else:
-        xsorted = False
+    if isinstance(sort, bool):
+        if sort:
+            sort_indices = jnp.argsort(x)
+            x_sorted = x[sort_indices]
+        else: # array is pre-sorted
+            x_sorted = x
+    else: # sort is an array of indices
+        x_sorted = x[sort]
 
-    n = tf.size(x)
+
+    n = len(x)
     PRIOR = 3
-    m = 30 + tf.cast(tf.sqrt(tf.cast(n, dtype=tf.float64)), dtype=tf.int32)
+    m = 30 + int(jnp.sqrt(n))
 
-    bs = tf.range(1.0, tf.cast(m + 1, dtype=tf.float64))
-    bs -= 0.5
-    bs /= tf.sqrt(bs)
-    bs = 1 - bs
-    if xsorted:
-        bs /= PRIOR * x[tf.cast(n / 4 + 0.5, dtype=tf.int32) - 1]
-        bs += 1 / x[-1]
-    else:
-        bs /= PRIOR * x[sort[tf.cast(n / 4 + 0.5, dtype=tf.int32) - 1]]
-        bs += 1 / x[sort[-1]]
+    i = jnp.arange(1, m + 1, dtype=jnp.float32)
+    bs = 1 - jnp.sqrt(m / (i - 0.5))
+    bs = bs / (PRIOR * x_sorted[n // 4]) + 1 / x_sorted[-1]
+
 
     ks = -bs
-    temp = ks[:, None] * x
-    temp = tf.math.log1p(temp)
-    ks = tf.reduce_mean(temp, axis=1)
+    temp = jnp.log1p(ks[:, None] * x)
+    ks = jnp.mean(temp, axis=1)
 
-    L = bs / ks
-    L = -L
-    L = tf.math.log(L)
-    L -= ks
-    L -= 1
-    L *= tf.cast(n, dtype=tf.float64)
+    L = n * (jnp.log(-bs / ks) - ks - 1)
 
-    temp = L - tf.transpose(L)
-    temp = tf.exp(temp)
-    w = tf.reduce_sum(temp, axis=1)
-    w = 1 / w
+    temp = L - L[:, None]
+    w = 1.0 / jnp.sum(jnp.exp(temp), axis=1)
 
-    # remove negligible weights
-    dii = w >= 10 * tf.constant(tf.finfo(float).eps, dtype=tf.float64)
-    if not tf.reduce_all(dii):
-        w = tf.boolean_mask(w, dii)
-        bs = tf.boolean_mask(bs, dii)
-    # normalize w
-    w /= tf.reduce_sum(w)
+    # NOTE: In the original numpy code, negligible weights were filtered out.
+    # To make this function JIT-compatible, we skip that step and just normalize.
+    # The effect should be negligible.
+    w = w / w.sum()
 
     # posterior mean for b
-    b = tf.reduce_sum(bs * w)
-    # Estimate for k, note that we return a negative of Zhang and
-    # Stephens's k, because it is more common parameterization.
-    temp = (-b) * x
-    temp = tf.math.log1p(temp)
-    k = tf.reduce_mean(temp)
-    if return_quadrature:
-        temp = -x
-        temp = bs[:, None] * temp
-        temp = tf.math.log1p(temp)
-        ks = tf.reduce_mean(temp, axis=1)
+    b = jnp.sum(bs * w)
+    # Estimate for k
+    temp = jnp.log1p(-b * x)
+    k = jnp.mean(temp)
     # estimate for sigma
-    sigma = -k / b * tf.cast(n, dtype=tf.float64) / (tf.cast(n, dtype=tf.float64) - 0)
+    sigma = -k / b
     # weakly informative prior for k
-    a = 10.0
-    k = k * tf.cast(n, dtype=tf.float64) / (
-        tf.cast(n, dtype=tf.float64) + a
-    ) + a * 0.5 / (tf.cast(n, dtype=tf.float64) + a)
-    if return_quadrature:
-        ks *= tf.cast(n, dtype=tf.float64) / (tf.cast(n, dtype=tf.float64) + a)
-        ks += a * 0.5 / (tf.cast(n, dtype=tf.float64) + a)
+    a = 10
+    k = k * n / (n + a) + a * 0.5 / (n + a)
 
     if return_quadrature:
-        return k, sigma, ks, w
+        temp = jnp.log1p(-bs[:, None] * x)
+        ks_quad = jnp.mean(temp, axis=1)
+        ks_quad = ks_quad * n / (n+a) + a * 0.5 / (n+a)
+        return k, sigma, ks_quad, w
     else:
         return k, sigma
 
 
-def demo():
-    pass
+def gpinv(p, k, sigma):
+    """Inverse Generalised Pareto distribution function."""
+    # Ensure p is a JAX array
+    p = jnp.asarray(p)
+    
+    # Use lax.cond for scalar conditional on k for JIT compatibility
+    def k_is_zero_fun(_):
+        return -jnp.log1p(-p)
 
+    def k_is_not_zero_fun(_):
+        return jnp.expm1(-k * jnp.log1p(-p)) / k
 
-if __name__ == "__main__":
-    demo()
+    x = jax.lax.cond(
+        jnp.abs(k) < jnp.finfo(jnp.float32).eps,
+        k_is_zero_fun,
+        k_is_not_zero_fun,
+        operand=None,
+    )
+    x = x * sigma
+
+    # Boundary conditions
+    x = jnp.where(p == 0, 0.0, x)
+    val_at_1 = jnp.where(k >= 0, jnp.inf, -sigma / k)
+    x = jnp.where(p == 1, val_at_1, x)
+
+    # Final check on sigma
+    return jnp.where(sigma <= 0, jnp.full_like(p, jnp.nan), x)

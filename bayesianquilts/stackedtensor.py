@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
+from collections import Counter
 
-import six
-import numpy as np
-
-import tensorflow as tf
+import jax.numpy as jnp
 
 
 def broadcast_tensors(tensors):
-    shapes = [t.get_shape().as_list() for t in tensors]
+    shapes = [t.shape for t in tensors]
     max_rank = max([len(s) for s in shapes])
     # Rank equalize all the tensors
     for index in range(len(shapes)):
@@ -18,11 +16,10 @@ def broadcast_tensors(tensors):
         tensor = tensors[index]
         for _ in range(max_rank - len(shape)):
             shape.insert(0, 1)
-            tensor = tf.expand_dims(tensor, axis=0)
+            tensor = jnp.expand_dims(tensor, axis=0)
         tensors[index] = tensor
 
     # Ensure if broadcasting is possible
-    from collections import Counter
     broadcast_shape = []
     for index in range(max_rank):
         dimensions = [s[index] for s in shapes]
@@ -34,7 +31,7 @@ def broadcast_tensors(tensors):
 
     # Broadcast the tensors
     for axis, dimension in enumerate(broadcast_shape):
-        tensors = [tf.concat([t] * dimension, axis=axis)
-                   if t.get_shape()[axis] == 1 else t for t in tensors]
+        tensors = [jnp.concatenate([t] * dimension, axis=axis)
+                   if t.shape[axis] == 1 else t for t in tensors]
 
     return tensors

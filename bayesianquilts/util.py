@@ -1,13 +1,13 @@
 import numbers
 import os
-import tempfile
-import uuid
+from typing import Any, Callable, Iterator
 
-import numpy as np
-import tensorflow as tf
-from keras.src.optimizers.schedules import learning_rate_schedule
-from tensorflow.raw_ops import UniqueV2 as unique
-from tensorflow_probability.python import util as tfp_util
+import jax
+import jax.numpy as jnp
+import optax
+from flax.core import unfreeze
+from flax.training import checkpoints
+from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 
@@ -19,446 +19,125 @@ def flatten(lst):
             yield el
 
 
-def _trace_loss(loss, grads, variables):
-    return loss
+# --- Core Training Components ---
 
+def mk_train_step_fn(optimizer: optax.GradientTransformation):
+    @jax.jit
+    def train_step(params: Any, opt_state: Any, grads: Any):
+        """JIT-compiled function to apply a single optimizer update."""
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
+        return new_params, new_opt_state
+    return train_step
 
-build_trainable_InverseGamma_dist = None
-build_trainable_normal_dist = None
-
-
-class PatchedAdam(tf.keras.optimizers.Adam):
-    def _get_current_learning_rate(self):
-        if isinstance(
-            self._learning_rate, learning_rate_schedule.LearningRateSchedule
-        ):
-            try:
-                return self._learning_rate(self.iterations)
-            except TypeError:
-                return self._learning_rate()
-        elif callable(self._learning_rate):
-            try:
-                return self._learning_rate(self.iterations)
-            except TypeError:
-                return self._learning_rate()
-        return self._learning_rate
-
-def batched_minimize(
-    loss_fn,
-    batched_data_factory,
-    batches_per_step=1,
-    num_steps=1000,
-    max_plateau_epochs=10,
-    plateau_epochs_til_restore=5,
-    abs_tol=1e-4,
-    rel_tol=1e-4,
-    trainable_variables=None,
-    trace_fn=_trace_loss,
-    learning_rate=1.0,
-    decay_rate=0.95,
-    max_decay_steps=8,
-    checkpoint_name=None,
-    processing_fn=None,
-    name="minimize",
-    check_every=1,
-    clip_value=10.0,
-    clip_norm=1.0,
-    test_fn=None,
-    verbose=False,
-    debug=False,
-    temp_dir=os.path.join(tempfile.gettempdir(), "tfcheckpoints/"),
-    **kwargs,
+def training_loop(
+    initial_values: Any,
+    loss_fn: Callable[[Any, Any], float],
+    data_iterator: Iterator,
+    steps_per_epoch: int,
+    num_epochs: int,
+    base_optimizer_fn: Callable[[float], optax.GradientTransformation]| None = None,
+    accumulation_steps: int = 1,
+    check_convergence_every: int = 1,
+    patience: int = 3,
+    lr_decay_factor: float = 0.5,
+    learning_rate: float = 0.001,
+    checkpoint_dir: str = '/tmp/checkpoints',
 ):
-    checkpoint_name = str(uuid.uuid4()) if checkpoint_name is None else checkpoint_name
-    learning_rate = 1.0 if learning_rate is None else learning_rate
+    """
+    Advanced training loop with checkpointing, early stopping, and LR decay on plateau.
+    """
+    # 1. Setup for new features
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    best_loss = float('inf')
+    checks_no_improve = 0
+    current_lr = learning_rate
+    if base_optimizer_fn is None:
+        base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
+    # 2. Initial Optimizer Setup
+    optimizer = base_optimizer_fn(current_lr)
+    opt_state = optimizer.init(initial_values)
+    value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
 
-    def learning_rate_schedule_fn(step):
-        return learning_rate * decay_rate**step
-
-    decay_step = 0
-
-    opt = PatchedAdam(
-        learning_rate=lambda: learning_rate_schedule_fn(decay_step),
-        clipvalue=clip_value,
-    )
-
-    # opt = tfa.optimizers.Lookahead(opt)
-
-    watched_variables = trainable_variables
-    # opt = opt.build(watched_variables)
-
-    checkpoint = tf.train.Checkpoint(
-        optimizer=opt, **{"var_" + str(j): v for j, v in enumerate(watched_variables)}
-    )
-    manager = tf.train.CheckpointManager(
-        checkpoint,
-        os.path.join(temp_dir, checkpoint_name),
-        checkpoint_name=checkpoint_name,
-        max_to_keep=3,
-    )
-
-    def accumulate_grads(data, gradient_accumulation, trainable_variables):
-        """Run a single optimization step."""
-        if data is None:
-            data = next(iter(batched_data_factory()))
-        with tf.GradientTape(
-            watch_accessed_variables=trainable_variables is None
-        ) as tape:
-            for v in trainable_variables or []:
-                tape.watch(v)
-            loss = loss_fn(data=data)
-        # watched_variables = tape.watched_variables()
-        grads = tape.gradient(loss, trainable_variables)
-        
-        flat_grads = tf.nest.flatten(grads)
-        flat_grads = [g if not (g is None) else tf.zeros_like(t) for g, t in zip(flat_grads, trainable_variables)]
-        flat_grads = [
-            tf.cond(tf.math.is_finite(loss), lambda: t, lambda: tf.zeros_like(t))
-            for t in flat_grads
-        ]
-
-        for i, t in enumerate(flat_grads):
-            t = tf.where(tf.math.is_finite(t), t, tf.zeros_like(t))
-            gradient_accumulation[i].assign_add(t, read_value=False)
-
-        state = trace_fn(
-            tf.identity(loss),
-            [tf.identity(g) for g in flat_grads],
-            [tf.identity(v) for v in watched_variables],
-        )
-        return state, flat_grads
-
-    if not debug:
-        accumulate_grads = tf.function(accumulate_grads, autograph=False)
-
-    def apply_grads(gradient_accumulation, trainable_variables):
-        return opt.apply_gradients(zip(gradient_accumulation, trainable_variables)) #, skip_gradients_aggregation=True)
-
-    with tf.name_scope(name) as name:
-        converged = False
-        losses = []
-        avg_losses = [1e308]
-        min_loss = 1e308
-
-        """
-        # Test the first step, and make sure we can initialize safely
-
-        loss = batch_normalized_loss(data=next(iter(data_factory())))
-
-        if not np.isfinite(np.sum(loss.numpy())):
-            # print(loss)
-            print("Failed to initialize", flush=True)
-            converged = True
-        else:
-            print(f"Initial loss: {loss}", flush=True)
-        """
-
-        batches_since_checkpoint = 0
-        batches_since_plateau = 0
-        accepted_batches = 0
-        save_path = manager.save()
-        batch_losses = []
-        print(
-            f"Running optimization for {num_steps} steps of {batches_per_step} accumulated batches, checking every {check_every} steps",
-            flush=True,
-        )
-        print(f"Saved a checkpoint: {save_path}", flush=True)
-        gradient_accumulation = None
-        data_factory = batched_data_factory()
-        data_factory = data_factory.repeat()
-
-        pbar_outer = tqdm(total=num_steps, position=0)
-        pbar = tqdm(total=batches_per_step, leave=False, position=1)
-        test_results = []
-        step = 0
-        batch_loss = np.nan
-        if test_fn is not None:
-            max_test = -1e308
-        for n_batch, data in enumerate(data_factory):
-            if n_batch % batches_per_step == 0:
-                pbar = tqdm(total=batches_per_step, leave=False, position=1)
-                # this batch is the start of a gradient step
-                if step > 0:
-                    pbar_outer.update(1)
-
-                    if not np.isfinite(batch_loss):
-                        print(f"Step {step} has an infinite loss", flush=True)
-
-                        #  apply the grad
-                    elif gradient_accumulation is not None:
-                        _ = apply_grads(gradient_accumulation, watched_variables)
-
-                step += 1
-                batch_losses += [[]]
-                gradient_accumulation = [
-                    tf.Variable(
-                        tf.zeros_like(v),
-                        trainable=False,
-                        name="grad_accum_" + str(i),
-                        synchronization=tf.VariableSynchronization.ON_READ,
-                        aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA,
-                    )
-                    for i, v in enumerate(watched_variables)
-                ]
-                if step > num_steps:
-                    print("Terminating because we are out of iterations", flush=True)
-                    break
-
-                if converged:
-                    print("Terminating because the loss converged", flush=True)
-                    break
-
-            if processing_fn is not None:
-                data = processing_fn(data)
-
-            batch_loss, grads = accumulate_grads(
-                data, gradient_accumulation, watched_variables
-            )
-            pbar.update(1)
-
-            if np.isfinite(batch_loss.numpy()):
-                batch_losses[-1] += [batch_loss.numpy()]
-            else:
-                if verbose:
-                    for g, v in zip(grads, watched_variables):
-                        tf.print(v.name, tf.reduce_max(g))
-                if loss_fn:
-                    test_results += [loss_fn(data=data)]
-                continue
-
-            loss = np.mean(batch_losses[-1])
-            avg_losses += [loss]
-            losses += [loss]
-            deviation = np.abs(avg_losses[-1] - min_loss)
-            rel = np.abs(deviation / loss)
-
-            if (
-                (step > 0)
-                and (n_batch % batches_per_step == batches_per_step - 1)
-                and (step % check_every) == 0
-            ):
-                """
-                Check for convergence
-                """
-
-                print(
-                    f"Step {step}: average-batch loss:" + f"{loss} rel loss: {rel}",
-                    flush=True,
-                )
-                save_because_of_test = False
-                if test_fn is not None:
-                    res = test_fn()
-                    if isinstance(res, tf.Tensor):
-                        res = res.numpy()
-
-                    if res > max_test:
-                        save_because_of_test = True
-                        max_test = res
-                    test_results += [res]
-
-                if not np.isfinite(loss):
-                    cp_status = checkpoint.restore(manager.latest_checkpoint)
-                    cp_status.assert_consumed()
-                    print("Step loss NaN, restoring a checkpoint", flush=True)
-                    decay_step += 1
-
-                    if decay_step > max_decay_steps:
-                        converged = True
+    print("--- Starting Training ---")
+    print(f"Patience for early stopping: {patience} epochs")
+    print(f"LR decay factor on plateau: {lr_decay_factor}")
+    print(f"Convergence will be checked every: {check_convergence_every} epoch(s)")
+    print(f"Checkpoints will be saved to: {checkpoint_dir}")
+    print("-------------------------")
+    params = initial_values
+    # 3. Main training loop
+    train_step_fn = mk_train_step_fn(optimizer)
+    total_steps = 0
+    epoch_losses = []
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
+        with tqdm(range(steps_per_epoch), desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})", unit="batch") as pbar:
+            for _ in pbar:
+                try:
+                    batch = next(data_iterator)
+                    loss_val, grads = value_and_grad_fn(batch, params)
+                    epoch_loss += loss_val
+                    if jnp.isnan(loss_val) or jnp.isinf(loss_val):
+                        print(f"Skipping batch due to NaN/Inf loss at epoch {epoch + 1}, step {total_steps + 1}.")
+                        current_lr *= lr_decay_factor
+                        optimizer = base_optimizer_fn(current_lr)
+                        opt_state = optimizer.init(params) # Re-initialize optimizer state with new LR
+                        print(f"  -> Decaying learning rate to: {current_lr:.6f}")
                         continue
-                    print(f"New learning rate: {opt.learning_rate.numpy()}", flush=True)
-                    continue
-                save_because_of_loss = losses[-1] < min_loss
-                save_this = (
-                    save_because_of_test
-                    if test_fn is not None
-                    else save_because_of_loss
-                )
-
-                if save_this:
-                    """
-                    Save a checkpoint
-                    """
-                    min_loss = losses[-1]
-                    save_path = manager.save()
-                    accepted_batches += 1
-                    print(f"Saved a checkpoint: {save_path}", flush=True)
-                    batches_since_checkpoint = 0
-                    if (deviation < abs_tol) and (
-                        np.abs((avg_losses[2] - min_loss)) < abs_tol
-                    ):
-                        print(
-                            f"Converged in {step} iterations "
-                            + "with acceptable absolute tolerance",
-                            flush=True,
-                        )
-                        converged = True
-                    elif (rel < rel_tol) and (
-                        (np.abs(avg_losses[2] - min_loss) / loss) < abs_tol
-                    ):
-                        print(
-                            f"Converged in {step} iterations with "
-                            + "acceptable relative tolerance"
-                        )
-                        converged = True
-                    batches_since_plateau += 1
-                else:
-                    batches_since_checkpoint += 1
-                    decay_step += 1
-                    if decay_step > max_decay_steps:
-                        converged = True
+                    try:
+                        ave_grad = jnp.mean(jnp.array([jnp.mean(x) for x in grads[0]]))
+                    except TypeError:
+                        ave_grad = jnp.isnan(jnp.mean(jnp.array([jnp.mean(x) for x in grads[0].values()])))
+                    if jnp.isnan(ave_grad) or jnp.isinf(ave_grad):
+                        print(f"Skipping batch due to NaN/Inf gradients at epoch {epoch + 1}, step {total_steps + 1}.")
                         continue
-                    batches_since_plateau = 0
-                    print(f"New learning rate: {opt.learning_rate}", flush=True)
-
-                    if batches_since_checkpoint >= plateau_epochs_til_restore:
-                        if batches_since_checkpoint >= max_plateau_epochs:
-                            converged = True
-                            print(
-                                f"We have had {batches_since_checkpoint} checks with no improvement so we give up",
-                                flush=True,
-                            )
-                        else:
-                            status = "We are in a loss plateau"
-                            print(status, flush=True)
-                            status = "Restoring from a checkpoint"
-                            print(status, flush=True)
-                            batches_since_plateau = 0
-
-        trace = tf.stack(losses)
-        try:
-            if test_fn is not None:
-                res = test_fn()
-                if isinstance(res, tf.Tensor):
-                    res = res.numpy()
-
-                # take the checkpoint that had the best test result
-                trace.test_eval = test_results
-
-                if res < max_test:
-                    cp_status = checkpoint.restore(manager.latest_checkpoint)
-                    cp_status.assert_consumed()
-                    trace.latest_checkpoint = manager.latest_checkpoint
-                return trace
-
-            if np.isnan(losses[-1]):
-                cp_status = checkpoint.restore(manager.latest_checkpoint)
-                cp_status.assert_consumed()
-                trace.latest_checkpoint = manager.latest_checkpoint
-
-        except AssertionError:
-            pass
-
-        return trace
-
-
-class TransformedVariable(tfp_util.TransformedVariable):
-    def __init__(
-        self, initial_value, bijector, dtype=None, scope=None, name=None, **kwargs
-    ):
-        """Creates the `TransformedVariable` object.
-
-        Args:
-        initial_value: A `Tensor`, or Python object convertible to a `Tensor`,
-            which is the initial value for the Variable. Can also be a callable with
-            no argument that returns the initial value when called. Note: if
-            `initial_value` is a `TransformedVariable` then the instantiated object
-            does not create a new `tf.Variable`, but rather points to the underlying
-            `Variable` and chains the `bijector` arg with the underlying bijector as
-            `tfb.Chain([bijector, initial_value.bijector])`.
-        bijector: A `Bijector`-like instance which defines the transformations
-            applied to the underlying `tf.Variable`.
-        dtype: `tf.dtype.DType` instance or otherwise valid `dtype` value to
-            `tf.convert_to_tensor(..., dtype)`.
-            Default value: `None` (i.e., `bijector.dtype`).
-        name: Python `str` representing the underlying `tf.Variable`'s name.
-            Default value: `None`.
-        **kwargs: Keyword arguments forward to `tf.Variable`.
-        """
-        # Check if `bijector` is "`Bijector`-like".
-        for attr in {
-            "forward",
-            "forward_event_shape",
-            "inverse",
-            "inverse_event_shape",
-            "name",
-            "dtype",
-        }:
-            if not hasattr(bijector, attr):
-                raise TypeError(
-                    "Argument `bijector` missing required `Bijector` "
-                    'attribute "{}".'.format(attr)
-                )
-
-        if callable(initial_value):
-            initial_value = initial_value()
-        initial_value = tf.convert_to_tensor(
-            initial_value, dtype_hint=bijector.dtype, dtype=dtype
-        )
-
-        if scope is not None:
-            with scope:
-                variable = tf.Variable(
-                    initial_value=bijector.inverse(initial_value),
-                    name=name,
-                    dtype=dtype,
-                    **kwargs,
-                )
-        else:
-            variable = tf.Variable(
-                initial_value=bijector.inverse(initial_value),
-                name=name,
-                dtype=dtype,
-                **kwargs,
-            )
-        super(tfp_util.TransformedVariable, self).__init__(
-            pretransformed_input=variable,
-            transform_fn=bijector,
-            shape=initial_value.shape,
-            name=f"{bijector.name}__{name}",
-        )
-        self._bijector = bijector
-
-
-def tf_data_cardinality(tf_dataset):
-    _have_cardinality = False
-    up = tf_dataset
-    card = -1
-    root = False
-    while (not _have_cardinality) and (not root):
-        card = tf.data.experimental.cardinality(up)
-        if card > 1:
-            _have_cardinality = True
-        else:
-            if hasattr(up, "._input_dataset"):
-                up = up._input_dataset
+                    grad_accumulator = jax.tree_util.tree_map(lambda acc, g: acc + g, grad_accumulator, grads[0])
+                    total_steps += 1
+                    if (total_steps + 1) % accumulation_steps == 0:
+                        tot_grads = jax.tree_util.tree_map(lambda g: g, grad_accumulator)
+                        params, opt_state = train_step_fn(params, opt_state, tot_grads)
+                        grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
+                    
+                    pbar.set_postfix(loss=f"{loss_val:.4f}", best_loss=f"{best_loss:.4f}")
+                except KeyboardInterrupt:
+                    print("\nTraining interrupted by user.")
+                    return epoch_losses, params
+        avg_epoch_loss = epoch_loss / steps_per_epoch
+        epoch_losses += [avg_epoch_loss]
+        print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
+        # 4. Check for improvement, save checkpoints, and decay LR
+        if (epoch + 1) % check_convergence_every == 0:
+            print(f"--- Running convergence check at epoch {epoch + 1} ---")
+            if avg_epoch_loss < best_loss:
+                best_loss = avg_epoch_loss
+                checks_no_improve = 0
+                # Save the best model parameters
+                checkpoints.save_checkpoint(ckpt_dir=checkpoint_dir, target=params, step=epoch, prefix='best_model_', overwrite=True)
+                print(f"  -> New best loss found. Checkpoint saved.")
             else:
-                root = True
+                checks_no_improve += 1
+                print(f"  -> No improvement in loss for {checks_no_improve} check(s).")
+                # Decay learning rate
+                current_lr *= lr_decay_factor
+                optimizer = base_optimizer_fn(current_lr)
+                opt_state = optimizer.init(params) # Re-initialize optimizer state with new LR
+                print(f"  -> Decaying learning rate to: {current_lr:.6f}")
 
-    if card < 1:
-        print("Getting the cardinality the slow way")
-        num_elements = 0
-        for _ in tqdm(up):
-            num_elements += 1
-        card = num_elements
-    return card
+            # 5. Early stopping check
+            if checks_no_improve >= patience:
+                print(f"\nEarly stopping triggered after {patience} epochs with no improvement.")
+                break
+            
+    print("\n--- Training Finished ---")
 
-
-def split_tensor(tensor, num_parts, axis=0):
-    fn = split_tensor_factory(num_parts=tf.constant(num_parts), axis=axis)
-    return fn(tensor)
-
-
-def split_tensor_factory(num_parts, axis=0):
-    @tf.function(experimental_relax_shapes=True)
-    def split_tensor(tensor):
-        max_divisor = tf.cast(tf.shape(tensor)[0] // num_parts, tf.int32)
-        bulk = tensor[: max_divisor * num_parts, ...]
-        remainder = tensor[max_divisor * num_parts :, ...]
-        bulk = tf.split(bulk, num_parts, axis=axis)
-        return bulk + [remainder]
-
-    return split_tensor
-
+    # 6. Restore from best snapshot if needed
+    final_params = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=params, prefix='best_model_')
+    if final_params is not params:
+         print("Restored model from the best checkpoint.")
+    
+    return epoch_losses, final_params
 
 class IndexMapper(object):
     def __init__(self, vocab):
@@ -485,10 +164,10 @@ class IndexMapper(object):
 
 
 class CountEncoder(object):
-    def __init__(self, vocab, dtype=tf.int32):
-        self.vocab = tf.constant(vocab)
+    def __init__(self, vocab, dtype=jnp.int32):
+        self.vocab = vocab
         self.N_keys = len(vocab)
-        self.vals = tf.range(1, self.N_keys + 1, dtype=tf.int32)
+        self.vals = jnp.range(1, self.N_keys + 1).astype(dtype)
         self.table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(self.vocab, self.vals), 0
         )
@@ -497,8 +176,9 @@ class CountEncoder(object):
         # x = tf.strings.split(x, ",")
         shape = tf.constant([self.N_keys + 1])
         x = self.table.lookup(x)
-        y, idx, count = tf.unique_with_counts(x)
-        counts = tf.scatter_nd(y[..., tf.newaxis], tf.cast(count, tf.int32), shape)
+        y, idx, count = jnp.unique(x, return_index=True, return_counts=True)
+        count = tf.gather(x)
+        counts = tf.scatteruse_nd(y[..., tf.newaxis], tf.cast(count, tf.int32), shape)
         return tf.cast(counts, tf.float64)
 
     def __getstate__(self):
@@ -523,29 +203,27 @@ class PiecewiseFunction(object):
     ):
         self.dtype = dtype
         self.unique_breaks = unique_breaks
-        values = tf.cast(values, dtype)
-        breakpoints = tf.cast(breakpoints, dtype)
-        last = breakpoints.shape.as_list()[-1]
+        values = values.astype(dtype)
+        breakpoints = breakpoints.astype(dtype)
+        last = breakpoints.shape[-1]
         if last is None:
             last = 1
 
-        if len(values.shape.as_list()) > len(breakpoints.shape.as_list()):
-            breakpoints += tf.zeros(
-                values.shape.as_list()[:-1] + [last],
+        if values.ndims > breakpoints.ndims:
+            breakpoints += jnp.zeros(
+                values.shape[:-1] + [last],
                 breakpoints.dtype,
             )
-        self.breakpoints = tf.cast(breakpoints, dtype)
+        self.breakpoints = breakpoints.astype(dtype)
         self.values = values
         self.cadlag = cadlag
 
     def __call__(self, value):
-        value = tf.cast(value, self.dtype)
-        ndx = tf.reduce_sum(
-            tf.cast(
-                self.breakpoints[..., tf.newaxis] <= value[..., tf.newaxis, :], tf.int32
-            ),
+        value = value.astype(self.dtype)
+        ndx = jnp.sum(
+            self.breakpoints[..., tf.newaxis] <= value[..., tf.newaxis, :],
             axis=-2,
-        )
+        ).astype(tf.int32)
         return tf.gather(
             self.values, ndx, batch_dims=len(self.values.shape.as_list()) - 1
         )
@@ -555,20 +233,20 @@ class PiecewiseFunction(object):
             return PiecewiseFunction(self.breakpoints, obj + self.values)
         left = self.breakpoints
 
-        left_batch_shape = left.shape.as_list()[:-1]
-        right = tf.cast(obj.breakpoints, self.dtype)
-        right_batch_shape = right.shape.as_list()[:-1]
+        left_batch_shape = left.shape[:-1]
+        right = obj.breakpoints.astype(self.dtype)
+        right_batch_shape = right.shape[:-1]
 
         if len(left_batch_shape) < len(right_batch_shape):
-            left += tf.zeros(right_batch_shape + left.shape.as_list()[-1:], self.dtype)
+            left += jnp.zeros(right_batch_shape + left.shape[-1:], self.dtype)
         elif len(left_batch_shape) > len(right_batch_shape):
-            right += tf.zeros(left_batch_shape + right.shape.as_list()[-1:], self.dtype)
+            right += jnp.zeros(left_batch_shape + right.shape[-1:], self.dtype)
 
-        breakpoints = tf.concat([left, right], axis=-1)
-        breakpoints, _ = unique(x=breakpoints, axis=[-1])
-        breakpoints = tf.sort(breakpoints, axis=-1)
+        breakpoints = jnp.concatenate([left, right], axis=-1)
+        breakpoints, _ = jnp.unique(x=breakpoints, axis=[-1])
+        breakpoints = jnp.sort(breakpoints, axis=-1)
         d = len(breakpoints.shape.as_list())
-        breakpoints_ = tf.pad(breakpoints, [(0, 0)] * (d - 1) + [(1, 0)])
+        breakpoints_ = jnp.pad(breakpoints, [(0, 0)] * (d - 1) + [(1, 0)])
         v1 = self(breakpoints_)
         v2 = obj(breakpoints_)
         return PiecewiseFunction(breakpoints, v1 + v2, dtype=self.dtype)

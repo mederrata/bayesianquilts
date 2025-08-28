@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 
-import re
-from collections import Counter, defaultdict
-from itertools import product, groupby
+from collections import defaultdict
+from itertools import groupby, product
 from operator import itemgetter
+
+import jax.numpy as jnp
 import numpy as np
+from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
-import tensorflow as tf
-import tensorflow_probability as tfp
-from tensorflow_probability import bijectors as tfb
-from tensorflow_probability import distributions as tfd
-from bayesianquilts.util import CountEncoder
-
 from bayesianquilts.stackedtensor import broadcast_tensors
+from bayesianquilts.util import CountEncoder
 
 
 def tf_ravel_multi_index(multi_index, dims):
@@ -322,15 +319,15 @@ class Decomposed(object):
         if len(self._interaction_shape) == 0:
             tensor_names[self._name] = ()
             tensor_shapes[self._name] = self._param_shape
-            tensors[self._name] = tf.zeros(self._param_shape, dtype)
+            tensors[self._name] = jnp.zeros(self._param_shape, dtype)
             if target is not None:
                 tensors[self._name] += target
             return tensors, tensor_names, tensor_shapes
 
         if target is None:
-            residual = tf.zeros(batch_shape + self.shape(), dtype)
+            residual = jnp.zeros(batch_shape + self.shape(), dtype)
         else:
-            residual = tf.cast(target, dtype) + tf.zeros(
+            residual = tf.cast(target, dtype) + jnp.zeros(
                 batch_shape + self.shape(), dtype
             )
         for n_tuple in product([0, 1], repeat=self._interactions.rank()):
@@ -368,7 +365,7 @@ class Decomposed(object):
                     )
 
             residual = tf.add_n(broadcast_tensors([residual, -1.0 * value]))
-            t_shape = value.shape.as_list()[batch_ndims:]
+            t_shape = value.shape[batch_ndims:]
             tensor_shapes[self._name + "__" + interaction_name] = t_shape
             interaction_cats = np.prod(t_shape[: (-len(self._param_shape))])
             value = tf.reshape(
@@ -460,7 +457,7 @@ class Decomposed(object):
         batch_shape = tf.nest.flatten(tensors)[0].shape.as_list()[
             : (-len(self._param_shape) - 1)
         ]
-        partial_sum = tf.zeros(batch_shape + raveled_shape, dtype)
+        partial_sum = jnp.zeros(batch_shape + raveled_shape, dtype)
         #  batch
 
         # folded

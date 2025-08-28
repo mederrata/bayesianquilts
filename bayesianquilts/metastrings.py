@@ -2,7 +2,7 @@ import re
 
 weight_code = """ lambda lambda_{0}_{1}, tau_{0}_{1}: tfd.Independent(
     tfd.Normal(
-        loc=tf.zeros({3}, dtype={4}),
+        loc=jnp.zeros({3}, dtype={4}),
         scale=lambda_{0}_{1}*tau_{0}_{1}
     ),
     reinterpreted_batch_ndims={2}
@@ -46,8 +46,8 @@ halfnormal_lambda_code = """ lambda {2}: tfd.Independent(
 
 cauchy_code = """ tfd.Independent(
     tfd.HalfCauchy(
-        loc=tf.zeros({0}, dtype={3}),
-        scale={1}*tf.ones({0}, dtype={3})
+        loc=jnp.zeros({0}, dtype={3}),
+        scale={1}*jnp.ones({0}, dtype={3})
     ),
     reinterpreted_batch_ndims={2}
 )
@@ -55,7 +55,7 @@ cauchy_code = """ tfd.Independent(
 
 sq_igamma_code = """ lambda {1}: tfd.Independent(
     SqrtInverseGamma(
-        concentration=0.5*tf.ones({0}, dtype={3}),
+        concentration=0.5*jnp.ones({0}, dtype={3}),
         scale=1.0/{1}
     ),
     reinterpreted_batch_ndims={2}
@@ -64,8 +64,8 @@ sq_igamma_code = """ lambda {1}: tfd.Independent(
 
 igamma_code = """ tfd.Independent(
     tfd.InverseGamma(
-        concentration=0.5*tf.ones({0}, dtype={3}),
-        scale={1}*tf.ones({0}, dtype={3})
+        concentration=0.5*jnp.ones({0}, dtype={3}),
+        scale={1}*jnp.ones({0}, dtype={3})
     ),
     reinterpreted_batch_ndims={2}
 )
@@ -86,7 +86,7 @@ abshorseshoe_lambda_code = """ lambda {0}: tfd.Independent(
 
 horseshoe_code = """ tfd.Independent(
     tfd.Horseshoe(
-        scale=tf.ones({0}, dtype={3})*{1},
+        scale=jnp.ones({0}, dtype={3})*{1},
         )
     ), reinterpreted_batch_ndims={2})
 """

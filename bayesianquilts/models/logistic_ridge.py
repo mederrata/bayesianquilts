@@ -1,28 +1,14 @@
 #!/usr/bin/env python3
 """Example quilt model
 """
-import argparse
-import sys
-import os
-import csv
-import itertools
-from itertools import product
-import arviz as az
-from tqdm import tqdm
-import json
 
-import numpy as np
-import pandas as pd
-
-import tensorflow as tf
-import tensorflow_probability as tfp
+import jax.numpy as jnp
+from tensorflow_probability.substrates.jax import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.tf.parameter import Interactions, Decomposed
+from bayesianquilts.tf.parameter import Decomposed, Interactions
 from bayesianquilts.vi.advi import build_surrogate_posterior
-
-
-tfd = tfp.distributions
 
 
 def psis_smoothing(weights, threshold=0.7):
@@ -113,7 +99,7 @@ class LogisticRidgeRegression(BayesianModel):
         regression_dict = {}
 
         regression_dict["beta__"] = tfd.Independent(
-            tfd.Normal(loc=tf.zeros((1, self.dim_regressors), self.dtype), scale=10*tf.ones((1, self.dim_regressors), self.dtype)),
+            tfd.Normal(loc=jnp.zeros((1, self.dim_regressors), self.dtype), scale=10*jnp.ones((1, self.dim_regressors), self.dtype)),
             reinterpreted_batch_ndims=len(regressor_tensors["beta__"].shape.as_list()),
         )
 
@@ -138,8 +124,8 @@ class LogisticRidgeRegression(BayesianModel):
         for label, tensor in intercept_tensors.items():
             intercept_dict[label] = tfd.Independent(
                 tfd.Normal(
-                    loc=tf.zeros_like(tf.cast(tensor, self.dtype)),
-                    scale=3*tf.ones_like(tf.cast(tensor, self.dtype)),
+                    loc=jnp.zeros_like(tf.cast(tensor, self.dtype)),
+                    scale=3*jnp.ones_like(tf.cast(tensor, self.dtype)),
                 ),
                 reinterpreted_batch_ndims=len(tensor.shape.as_list()),
             )
@@ -229,13 +215,13 @@ class LogisticRidgeRegression(BayesianModel):
         finite_portion = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.zeros_like(log_likelihood),
+            jnp.zeros_like(log_likelihood),
         )
         min_val = tf.reduce_min(finite_portion) - 10.0
         log_likelihood = tf.where(
             tf.math.is_finite(log_likelihood),
             log_likelihood,
-            tf.ones_like(log_likelihood) * min_val,
+            jnp.ones_like(log_likelihood) * min_val,
         )
 
         prior = self.prior_distribution.log_prob(
@@ -433,11 +419,11 @@ class LogisticRidgeRegression(BayesianModel):
         # variance descent -(log ell)'/l
 
         def T_I():
-            Q = tf.zeros_like(log_ell)
+            Q = jnp.zeros_like(log_ell)
             return (
                 beta + Q[..., tf.newaxis],
                 intercept + Q[..., tf.newaxis],
-                tf.zeros_like(Q),
+                jnp.zeros_like(Q),
             )
 
         def T_var():

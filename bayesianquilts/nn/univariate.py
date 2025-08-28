@@ -1,10 +1,9 @@
 from typing import Callable
 
 import numpy as np
-import tensorflow as tf
-
-
 from tensorflow_probability.python import distributions as tfd
+from tensorflow_probability.substrates.jax import tf2jax as tf
+
 from bayesianquilts.nn.dense import Dense
 
 
@@ -34,13 +33,13 @@ class UnivariateDense(Dense):
         if priors is None:
             for j, layer_size in enumerate(layer_sizes[1:]):
                 weights = tfd.Normal(
-                    loc=tf.zeros(
+                    loc=jnp.zeros(
                         (input_size, layer_sizes[j], layer_size), dtype=self.dtype
                     ),
                     scale=1e-1,
                 ).sample()
                 biases = tfd.Normal(
-                    loc=tf.zeros((input_size, layer_size), dtype=self.dtype), scale=1.0
+                    loc=jnp.zeros((input_size, layer_size), dtype=self.dtype), scale=1.0
                 ).sample()
                 architecture += [weights, biases]
         else:

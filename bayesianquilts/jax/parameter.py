@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-import re
-from collections import Counter, defaultdict
-from itertools import product, chain, combinations
-import tensorflow as tf
-import jax
+from itertools import product
+
 import jax.numpy as jnp
 import numpy as np
-from jax.flatten_util import ravel_pytree
+from tensorflow_probability.python.internal.backend.numpy import gather_nd
+from tqdm import tqdm
 
 
 class Interactions(object):
@@ -125,8 +123,6 @@ class Decomposed(object):
             self._param_tensors[k] = tensors[k]
 
     def __add__(self, x):
-        if tf.is_tensor(x):
-            return x + self.constitute()
         return self.constitute().__add__(x)
 
     def __radd__(self, x):
@@ -152,18 +148,18 @@ class Decomposed(object):
 
     def query(self, interaction_indices):
         _global = self.constitute()
-        batch_ndims = tf.rank(_global) - len(self.shape())
+        batch_ndims = _global.ndim - len(self.shape())
         # stick batch axes on the  end
-        rank = tf.rank(_global)
+        rank = _global.ndim
 
-        _global = tf.transpose(
+        _global = jnp.transpose(
             _global,
             list(range(batch_ndims, rank)) + list(range(batch_ndims))
         )
-        localized = tf.gather_nd(_global, interaction_indices)
+        localized = gather_nd(_global, interaction_indices)
 
-        local_rank = tf.rank(localized)
-        localized = tf.transpose(
+        local_rank = localized.ndim
+        localized = jnp.transpose(
             localized,
             list(range(local_rank-batch_ndims, local_rank)) +
             list(range(local_rank-batch_ndims))
@@ -196,6 +192,172 @@ def main():
     p.set_params(t[0])
     r = p.query(indices)
     pass
+
+def ravel_multi_index(multi_index, dims):
+    strides = jnp.cumprod(dims, exclusive=True, reverse=True)
+    multi_index = jnp.astype(multi_index, strides.dtype)
+    return jnp.sum(multi_index * jnp.expand_dims(strides, 1), axis=0)
+
+
+def ravel_broadcast_tile(
+    tensor, from_shape, to_shape, param_ndims=None, batch_ndims=None
+):
+    """Unravel, tile to match to_shape, ravel,
+    without raveling.
+
+    Args:
+        tensor ([type]): The tensor is assumed to have shape:
+            batch_shape + [1] + param_shape
+        from_shape ([type]): shape for unraveled version of tensor
+        to_shape ([type]): shape to tile to
+    """
+    multiple = int(np.prod(to_shape) / np.prod(from_shape))
+    tensor_shape = tensor.shape.as_list()
+    if param_ndims is None:
+        param_ndims = 0
+        for tdim, todim, fdim in zip(
+            reversed(tensor_shape), reversed(to_shape), reversed(from_shape)
+        ):
+            if tdim == todim and fdim == tdim:
+                param_ndims += 1
+            else:
+                break
+    param_dims = tensor_shape[-param_ndims:]
+
+    if batch_ndims is None:
+        batch_ndims = 0
+        for tdim, todim, fdim in zip(
+            tensor_shape[: (-param_ndims - 1)],
+            to_shape[: (-param_ndims - 1)],
+            from_shape[: (-param_ndims - 1)],
+        ):
+            if tdim == todim and tdim == fdim:
+                batch_ndims += 1
+            else:
+                break
+    batch_dims = tensor_shape[:batch_ndims]
+    tensor_ = jnp.tile(tensor[..., jnp.newaxis], [1] * len(tensor_shape) + [multiple])
+
+    broadcast_dims = [k for k, i in enumerate(from_shape[:(-param_ndims)]) if i == 1]
+
+    # we need to re-arrange tensor_, putting things in the right place
+    # traverse broadcast_dims, looking for continuous regions
+
+    contiguous = [
+        list(map(itemgetter(1), g))
+        for k, g in groupby(enumerate(broadcast_dims), lambda i_x: i_x[0] - i_x[1])
+    ]
+
+    # the last dimension is now the product of all of the missing
+    # dimensions in broadcast_dims. Let's stick this dimension into
+    # position batch_ndims + 1, so that we have two index dimensions
+
+    tensor_ = jnp.transpose(
+        tensor_,
+        (
+            list(range(batch_ndims + 1))
+            + [len(tensor_shape)]
+            + list(range(batch_ndims + 1, len(tensor_shape)))
+        ),
+    )
+
+    for chunk in contiguous:
+        # insert each chunk into the right slots
+        lower = chunk[0]
+        upper = chunk[-1] + 1
+        # prior_dims are dimensions already in from_shape
+        # that are before this chunk
+        prior_dims = to_shape[batch_ndims:lower]
+        chunk_dims = from_shape[lower:upper]
+        chunk_dims_to = to_shape[lower:upper]
+        post_dims = from_shape[upper:(-param_ndims)]
+        # post_dims are dimensions already in from_shape
+        # that are after this chunk
+
+        # reshape tensor_ to
+        # (raveled) batch_dims, (raveled) prior_dims, (raveled)post_dims,
+        # (raveled) chunk_dims
+        #   (raveled) extra_dims, (raveled) param_dims
+
+        _temp_shape = tensor_.shape.as_list()
+        extra_dims = _temp_shape[batch_ndims + 1]
+
+        dims_to_insert = int(np.prod(chunk_dims_to))
+
+        tensor_ = tf.reshape(
+            tensor_,
+            (
+                (batch_dims if len(batch_dims) > 0 else [1])
+                + [int(np.prod(prior_dims))]
+                + [int(np.prod(post_dims))]
+                + [dims_to_insert]
+                + [int(extra_dims / dims_to_insert)]
+                + [np.prod(param_dims)]
+            ),
+        )
+        tensor_ = jnp.transpose(tensor_, (0, 1, 3, 2, 4, 5))
+        _temp_shape = tensor_.shape.as_list()
+        tensor_ = jnp.reshape(
+            tensor_,
+            (
+                (batch_dims if len(batch_dims) > 0 else [1])
+                + [int(np.prod(_temp_shape[1:4]))]
+                + [int(np.prod(_temp_shape[4:5]))]
+                + param_dims
+            ),
+        )
+
+    _temp_shape = tensor_.shape.as_list()
+    tensor_ = jnp.reshape(
+        tensor_,
+        batch_dims
+        + [int(np.prod(_temp_shape[batch_ndims:(-param_ndims)]))]
+        + param_dims,
+    )
+    return tensor_
+
+
+class MultiwayContingencyTable(object):
+    def __init__(self, interaction) -> None:
+        self.interaction = interaction
+
+    def fit(self, data_factory, dtype=jnp.int32):
+        decomposition = Decomposed(self.interaction, [1])
+        n_dims = np.prod(decomposition._interaction_shape)
+        counts = jnp.zeros((n_dims), dtype=dtype)
+        dataset = data_factory()
+        counter = CountEncoder(list(range(np.prod(decomposition._interaction_shape))))
+        for batch in tqdm(iter(dataset)):
+            indices = decomposition.retrieve_indices(batch)
+            indices = ravel_multi_index(
+                jnp.transpose(indices), decomposition._interaction_shape
+            )
+            counts_ = counter.encode(indices)
+            counts += jnp.astype(counts_[1:], counts.dtype)
+        self.counts = counts
+        return counts, decomposition.labels
+
+    def lookup(self, interaction=None):
+        """
+        Get the correstponding counts
+        """
+        # first, make sure interaction is a subset of self.interaction
+        if interaction is None:
+            return np.sum(self.counts)
+        dims = [x[0] for x in self.interaction._dimensions]
+        axes = [dims.index(d) for d in interaction]
+        otheraxes = [
+            d for d in range(len(self.interaction._dimensions)) if d not in axes
+        ]
+        counts = np.reshape(self.counts, self.interaction._intrinsic_shape)
+        counts = np.apply_over_axes(
+            np.sum,
+            counts,
+            [d for d in range(len(self.interaction._intrinsic_shape)) if d not in axes],
+        )
+        counts = np.transpose(counts, axes + otheraxes)
+        counts = np.reshape(counts, counts.shape[: len(axes)])
+        return counts
 
 
 if __name__ == "__main__":
