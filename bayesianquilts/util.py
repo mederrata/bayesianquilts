@@ -47,7 +47,7 @@ def training_loop(
     Advanced training loop with checkpointing, early stopping, and LR decay on plateau.
     """
     # 1. Setup for new features
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    
     best_loss = float('inf')
     checks_no_improve = 0
     current_lr = learning_rate
@@ -58,6 +58,7 @@ def training_loop(
     opt_state = optimizer.init(initial_values)
     value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
     if checkpoint_dir is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
         from flax.training import checkpoints
 
     print("--- Starting Training ---")
@@ -115,7 +116,8 @@ def training_loop(
                 best_loss = avg_epoch_loss
                 checks_no_improve = 0
                 # Save the best model parameters
-                checkpoints.save_checkpoint(ckpt_dir=checkpoint_dir, target=params, step=epoch, prefix='best_model_', overwrite=True)
+                if checkpoint_dir is not None:
+                    checkpoints.save_checkpoint(ckpt_dir=checkpoint_dir, target=params, step=epoch, prefix='best_model_', overwrite=True)
                 print(f"  -> New best loss found. Checkpoint saved.")
             else:
                 checks_no_improve += 1
@@ -134,7 +136,8 @@ def training_loop(
     print("\n--- Training Finished ---")
 
     # 6. Restore from best snapshot if needed
-    final_params = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=params, prefix='best_model_')
+    if checkpoint_dir is not None:
+        final_params = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=params, prefix='best_model_')
     if final_params is not params:
          print("Restored model from the best checkpoint.")
     
