@@ -138,8 +138,10 @@ def training_loop(
     # 6. Restore from best snapshot if needed
     if checkpoint_dir is not None:
         final_params = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_dir, target=params, prefix='best_model_')
-    if final_params is not params:
-         print("Restored model from the best checkpoint.")
+    else:
+        final_params = params
+    #if final_params is not params:
+    #     print("Restored model from the best checkpoint.")
     
     return epoch_losses, final_params
 

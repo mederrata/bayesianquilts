@@ -87,7 +87,6 @@ class BayesianModel(ABC, nnx.Module):
         patience: int = 3,
         initial_values: Dict[str, jax.typing.ArrayLike] | None = None,
         unormalized_log_prob_fn: Callable | None = None,
-        set_expectations=True,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -134,12 +133,7 @@ class BayesianModel(ABC, nnx.Module):
             return losses
 
         losses, params = run_approximation()
-        if set_expectations:
-            if (not np.isnan(losses[-1])) and (not np.isinf(losses[-1])):
-                self.surrogate_distribution = self.surrogate_distribution_generator(
-                    params
-                )
-                self.set_calibration_expectations()
+        self.params = params
         return losses, params
 
     def set_calibration_expectations(self, samples: int = 24, variational: bool = True):
