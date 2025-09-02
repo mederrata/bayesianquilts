@@ -194,7 +194,7 @@ def build_factored_surrogate_posterior_generator(
     if surrogate_initializers is None:
         surrogate_initializers = {}
     _, sample_key = random.split(random.PRNGKey(0))
-    prior_sample = joint_distribution_named.sample(seed=random.PRNGKey(0))
+    prior_sample = joint_distribution_named.sample(seed=sample_key)
     # create the parameters for the surrogate posterior
     var_labels = []
     if bijectors is None: bijectors = defaultdict(tfb.Identity)
@@ -230,7 +230,9 @@ def build_factored_surrogate_posterior_generator(
 
     target_sample = joint_distribution_named.sample(num_samples, seed=random.PRNGKey(0))
     means = {k: jnp.mean(v, axis=0).astype(dtype) for k, v in target_sample.items()}
-
+    surrogate_initializers = surrogate_initializers if not None else {}
+    for k, v in surrogate_initializers.items():
+        means[k] = v
     bijectors = defaultdict(tfb.Identity) if bijectors is None else bijectors
 
     def _init_params_fn():
@@ -242,7 +244,7 @@ def build_factored_surrogate_posterior_generator(
             _config = label.split("\\")
             k = _config[-4]
             if _config[-1] == "loc":
-                _params[label] = jnp.zeros_like(means[k])
+                _params[label] = means[k]
             elif _config[-1] == "scale":
                 _params[label] = 5e-3*jnp.ones_like(means[k])
             elif _config[-1] == "concentration":

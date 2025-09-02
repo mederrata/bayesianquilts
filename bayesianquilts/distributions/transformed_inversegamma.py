@@ -1,12 +1,12 @@
 import tensorflow_probability.substrates.jax.bijectors as tfb
 import tensorflow_probability.substrates.jax.distributions as tfd
-from tensorflow_probability.python.bijectors import \
-    softplus as softplus_bijector
-from tensorflow_probability.python.distributions import TransformedDistribution
-from tensorflow_probability.python.internal import (dtype_util,
-                                                    parameter_properties,
-                                                    tensor_util)
 from tensorflow_probability.substrates.jax import tf2jax as tf
+from tensorflow_probability.substrates.jax.bijectors import \
+    softplus as softplus_bijector
+from tensorflow_probability.substrates.jax.distributions import \
+    TransformedDistribution
+from tensorflow_probability.substrates.jax.internal import (
+    dtype_util, parameter_properties, tensor_util)
 
 convert_nonref_to_tensor = tensor_util.convert_nonref_to_tensor
 

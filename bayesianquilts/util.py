@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax.core import unfreeze
-from flax.training import checkpoints
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
@@ -58,6 +57,8 @@ def training_loop(
     optimizer = base_optimizer_fn(current_lr)
     opt_state = optimizer.init(initial_values)
     value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
+    if checkpoint_dir is not None:
+        from flax.training import checkpoints
 
     print("--- Starting Training ---")
     print(f"Patience for early stopping: {patience} epochs")
