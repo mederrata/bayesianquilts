@@ -145,7 +145,7 @@ def training_loop(
             # print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
             # 4. Check for improvement, save checkpoints, and decay LR
             if (epoch + 1) % check_convergence_every == 0:
-                print(f"\r--- Running convergence check at epoch {epoch + 1} ---", end="", flush=True)
+                print(f"--- Running convergence check at epoch {epoch + 1} ---", end="", flush=True)
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
                     checks_no_improve = 0
@@ -162,11 +162,11 @@ def training_loop(
                             f"{checkpoint_dir}/best_model_{epoch}",
                             args=ocp.args.Composite(state=ocp.args.StandardSave(ckpt)),
                         )
-                    print(f"\r  -> New best loss found. Checkpoint saved.                    ")
+                    print(f"  -> New best loss found. Checkpoint saved.                    ")
                 else:
                     checks_no_improve += 1
                     print(
-                        f"\r  -> No improvement in loss for {checks_no_improve} check(s).                    "
+                        f"  -> No improvement in loss for {checks_no_improve} check(s).                    "
                     )
                     # Decay learning rate
                     current_lr *= lr_decay_factor
