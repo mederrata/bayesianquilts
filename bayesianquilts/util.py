@@ -84,6 +84,7 @@ def training_loop(
                 range(steps_per_epoch),
                 desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})",
                 unit="batch",
+                leave=False,
             ) as pbar:
                 for _ in pbar:
                     try:
@@ -115,6 +116,8 @@ def training_loop(
                             print(
                                 f"Skipping batch due to NaN/Inf gradients at epoch {epoch + 1}, step {total_steps + 1}."
                             )
+                            checks_no_improve += 1
+                            
                             continue
                         grad_accumulator = jax.tree_util.tree_map(
                             lambda acc, g: acc + g, grad_accumulator, grads[0]
@@ -142,7 +145,7 @@ def training_loop(
             # print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
             # 4. Check for improvement, save checkpoints, and decay LR
             if (epoch + 1) % check_convergence_every == 0:
-                print(f"--- Running convergence check at epoch {epoch + 1} ---")
+                print(f"\r--- Running convergence check at epoch {epoch + 1} ---", end="", flush=True)
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
                     checks_no_improve = 0
@@ -159,11 +162,11 @@ def training_loop(
                             f"{checkpoint_dir}/best_model_{epoch}",
                             args=ocp.args.Composite(state=ocp.args.StandardSave(ckpt)),
                         )
-                    print(f"  -> New best loss found. Checkpoint saved.")
+                    print(f"\r  -> New best loss found. Checkpoint saved.                    ")
                 else:
                     checks_no_improve += 1
                     print(
-                        f"  -> No improvement in loss for {checks_no_improve} check(s)."
+                        f"\r  -> No improvement in loss for {checks_no_improve} check(s).                    "
                     )
                     # Decay learning rate
                     current_lr *= lr_decay_factor
