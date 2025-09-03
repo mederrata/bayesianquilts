@@ -1,0 +1,17 @@
+optax
+flax
+tensorflow-probability
+jax
+tqdm
+pandas
+scikit-learn
+dill
+docling
+grain
+xarray
+pyarrow
+matplotlib
+numpy
+orbax-checkpoint
+grain
+arviz
