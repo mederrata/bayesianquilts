@@ -139,7 +139,7 @@ def training_loop(
                         return epoch_losses, params
             avg_epoch_loss = epoch_loss / steps_per_epoch
             epoch_losses += [avg_epoch_loss]
-            print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
+            # print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
             # 4. Check for improvement, save checkpoints, and decay LR
             if (epoch + 1) % check_convergence_every == 0:
                 print(f"--- Running convergence check at epoch {epoch + 1} ---")
