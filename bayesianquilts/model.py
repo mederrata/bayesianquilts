@@ -16,7 +16,7 @@ from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 from bayesianquilts.distributions import FactorizedDistributionMoments
-from bayesianquilts.model import Interactions
+from bayesianquilts.jax.parameter import Interactions
 from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
