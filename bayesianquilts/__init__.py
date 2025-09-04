@@ -1,2 +1,3 @@
 from .model import BayesianModel
-from .models.logistic_bayesianquilt import LogisticBayesianquilt
+from .predictors.classification.logistic_bayesianquilt import \
+    LogisticBayesianquilt
