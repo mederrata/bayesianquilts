@@ -318,3 +318,8 @@ class BayesianModel(ABC, nnx.Module):
         }
 
         return InferenceData(**idict)
+
+class QuiltedBayesianModel(BayesianModel):
+    @abstractmethod
+    def expand(self, interaction):
+        pass
