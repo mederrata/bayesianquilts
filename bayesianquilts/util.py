@@ -202,7 +202,7 @@ def training_loop(
                     best_checkpoints, key=lambda x: int(x.split("_")[-1])
                 )
                 restored_ckpt = checkpointer.restore(latest_checkpoint)
-                final_params = restored_ckpt["params"]
+                final_params = restored_ckpt["state"]["params"]
                 print(f"Restored model from checkpoint: {latest_checkpoint}")
             else:
                 final_params = params

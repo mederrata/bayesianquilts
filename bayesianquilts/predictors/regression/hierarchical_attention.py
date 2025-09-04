@@ -2,6 +2,7 @@
 
 
 from bayesianquilts.jax.parameter import Decomposed, Interactions
+from bayesianquilts.model import QuiltedBayesianModel
 
 """Hierarchical Attention Models
 """

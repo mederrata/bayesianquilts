@@ -16,6 +16,7 @@ from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 from bayesianquilts.distributions import FactorizedDistributionMoments
+from bayesianquilts.model import Interactions
 from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
@@ -320,6 +321,11 @@ class BayesianModel(ABC, nnx.Module):
         return InferenceData(**idict)
 
 class QuiltedBayesianModel(BayesianModel):
+    """Quailted Bayesian Model
+
+    Initially a global model, Quilted Bayesian Models can be expanded along a given
+    interaction alignment to create a larger model.
+    """
     @abstractmethod
-    def expand(self, interaction):
+    def expand(self, interaction: Interactions):
         pass
