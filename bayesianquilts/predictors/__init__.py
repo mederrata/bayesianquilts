@@ -1,3 +1,3 @@
-from .logistic_bayesianquilt import LogisticBayesianquilt
-from .logistic_regression import LogisticRegression
-from .logistic_relunet import LogisticRelunet
+from .classification.logistic_bayesianquilt import LogisticBayesianquilt
+from .classification.logistic_regression import LogisticRegression
+from .classification.logistic_relunet import LogisticRelunet
