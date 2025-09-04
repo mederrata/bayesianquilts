@@ -1,3 +1,2 @@
 from .classification.logistic_bayesianquilt import LogisticBayesianquilt
 from .classification.logistic_regression import LogisticRegression
-from .classification.logistic_relunet import LogisticRelunet
