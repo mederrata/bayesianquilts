@@ -33,7 +33,7 @@ def mk_train_step_fn(optimizer: optax.GradientTransformation):
 
 
 def training_loop(
-    initial_values: Any,
+    initial_values: dict[str, Any],
     loss_fn: Callable[[Any, Any], float],
     data_iterator: Iterator,
     steps_per_epoch: int,
@@ -45,9 +45,11 @@ def training_loop(
     lr_decay_factor: float = 0.5,
     learning_rate: float = 0.001,
     checkpoint_dir: str = "/tmp/checkpoints",
+    optimize_keys: list[str] | None = None,
 ):
     """
-    Advanced training loop with checkpointing, early stopping, and LR decay on plateau.
+    Advanced training loop with checkpointing, early stopping, LR decay on plateau,
+    and selective parameter optimization via optimize_keys.
     """
     # 1. Setup for new features
 
@@ -57,8 +59,22 @@ def training_loop(
     if base_optimizer_fn is None:
         base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
     # 2. Initial Optimizer Setup
+
+    # Select which parameters to optimize
+    if optimize_keys is None:
+        optimize_keys = list(initial_values.keys())
+
+    def filter_params(params):
+        return {k: v for k, v in params.items() if k in optimize_keys}
+
+    def merge_params(full_params, updated_subset):
+        merged = dict(full_params)
+        for k in updated_subset:
+            merged[k] = updated_subset[k]
+        return merged
+
     optimizer = base_optimizer_fn(current_lr)
-    opt_state = optimizer.init(initial_values)
+    opt_state = optimizer.init(filter_params(initial_values))
     value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
     if checkpoint_dir is not None:
         ocp.test_utils.erase_and_create_empty(checkpoint_dir)
@@ -69,8 +85,9 @@ def training_loop(
     print(f"LR decay factor on plateau: {lr_decay_factor}")
     print(f"Convergence will be checked every: {check_convergence_every} epoch(s)")
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
+    print(f"Optimizing keys: {optimize_keys}")
     print("-------------------------")
-    params = initial_values
+    params = dict(initial_values)
     # 3. Main training loop
     train_step_fn = mk_train_step_fn(optimizer)
     total_steps = 0
@@ -79,7 +96,9 @@ def training_loop(
     try:
         for epoch in range(num_epochs):
             epoch_loss = 0.0
-            grad_accumulator = jax.tree_util.tree_map(jnp.zeros_like, unfreeze(params))
+            grad_accumulator = jax.tree_util.tree_map(
+                jnp.zeros_like, unfreeze(filter_params(params))
+            )
             with tqdm(
                 range(steps_per_epoch),
                 desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})",
@@ -98,7 +117,7 @@ def training_loop(
                             current_lr *= lr_decay_factor
                             optimizer = base_optimizer_fn(current_lr)
                             opt_state = optimizer.init(
-                                params
+                                filter_params(params)
                             )  # Re-initialize optimizer state with new LR
                             print(f"  -> Decaying learning rate to: {current_lr:.6f}")
                             continue
@@ -117,21 +136,27 @@ def training_loop(
                                 f"Skipping batch due to NaN/Inf gradients at epoch {epoch + 1}, step {total_steps + 1}."
                             )
                             checks_no_improve += 1
-                            
                             continue
+
+                        # Only accumulate gradients for selected keys
+                        filtered_grads = filter_params(grads[0])
                         grad_accumulator = jax.tree_util.tree_map(
-                            lambda acc, g: acc + g, grad_accumulator, grads[0]
+                            lambda acc, g: acc + g, grad_accumulator, filtered_grads
                         )
                         total_steps += 1
                         if (total_steps + 1) % accumulation_steps == 0:
                             tot_grads = jax.tree_util.tree_map(
                                 lambda g: g, grad_accumulator
                             )
-                            params, opt_state = train_step_fn(
-                                params, opt_state, tot_grads
+                            # Only update selected keys
+                            filtered_params = filter_params(params)
+                            new_filtered_params, opt_state = train_step_fn(
+                                filtered_params, opt_state, tot_grads
                             )
+                            # Merge updated subset back into full params
+                            params = merge_params(params, new_filtered_params)
                             grad_accumulator = jax.tree_util.tree_map(
-                                jnp.zeros_like, unfreeze(params)
+                                jnp.zeros_like, unfreeze(filter_params(params))
                             )
 
                         pbar.set_postfix(
@@ -142,10 +167,8 @@ def training_loop(
                         return epoch_losses, params
             avg_epoch_loss = epoch_loss / steps_per_epoch
             epoch_losses += [avg_epoch_loss]
-            # print(f"Epoch {epoch + 1} Summary | Average Loss: {avg_epoch_loss:.6f}")
             # 4. Check for improvement, save checkpoints, and decay LR
             if (epoch + 1) % check_convergence_every == 0:
-                # print(f"--- Running convergence check at epoch {epoch + 1} ---", end="", flush=True)
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
                     checks_no_improve = 0
@@ -172,7 +195,7 @@ def training_loop(
                     current_lr *= lr_decay_factor
                     optimizer = base_optimizer_fn(current_lr)
                     opt_state = optimizer.init(
-                        params
+                        filter_params(params)
                     )  # Re-initialize optimizer state with new LR
                     print(f"  -> Decaying learning rate to: {current_lr:.6f}")
 
@@ -212,8 +235,6 @@ def training_loop(
             final_params = params
     else:
         final_params = params
-    # if final_params is not params:
-    #     print("Restored model from the best checkpoint.")
 
     return epoch_losses, final_params
 
