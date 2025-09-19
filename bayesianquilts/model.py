@@ -293,7 +293,7 @@ class BayesianModel(ABC, nnx.Module):
         return params
 
     def sample(self, batch_shape=None, prior=False):
-        _, sample_key = random.split(random.PRNGKey(0))
+        _, sample_key = random.split(random.PRNGKey(np.random.randint(10000)))
         surrogate = self.surrogate_distribution_generator(self.params)
         if prior:
             if batch_shape is None:
