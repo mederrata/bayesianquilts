@@ -93,18 +93,20 @@ def psisloo(log_lik, **kwargs):
         estimated Pareto tail indeces
 
     """
+    # ensure overwrite flag in passed arguments
+    kwargs['overwrite_lw'] = True
     # log raw weights from log_lik
     lw = -log_lik
     # compute Pareto smoothed log weights given raw log weights
     lw_smoothed, ks = psislw(lw, **kwargs)
     # compute leave-one-out log predictive densities
     lw_new = lw_smoothed + log_lik
-    loos = logsumexp(lw_new, axis=0)
+    loos = sumlogs(lw_new, axis=0)
     loo = loos.sum()
     return loo, loos, ks
 
 
-def psislw(lw, Reff=1.0):
+def psislw(lw, Reff=1.0, overwrite_lw=False):
     """Pareto smoothed importance sampling (PSIS).
 
     NOTE: This JAX implementation is a direct conversion of the original NumPy
@@ -140,8 +142,12 @@ def psislw(lw, Reff=1.0):
     if n <= 1:
         raise ValueError("More than one log-weight needed.")
 
-    # allocate new array for output
-    lw_out = jnp.copy(lw)
+    if overwrite_lw:
+        # in-place operation (note: JAX arrays are immutable, so this is effectively a copy)
+        lw_out = lw
+    else:
+        # allocate new array for output
+        lw_out = jnp.copy(lw)
 
     # allocate output array for kss
     kss = jnp.empty(m)
@@ -170,7 +176,6 @@ def psislw(lw, Reff=1.0):
         if n2 <= 4:
             # not enough tail samples for gpdfitnew
             k = jnp.inf
-            smoothed_tail = None
         else:
             # order of tail samples
             # JAX requires functional updates, so we extract the tail,
@@ -261,13 +266,16 @@ def gpdfitnew(x, sort=True, return_quadrature=False):
     PRIOR = 3
     m = 30 + int(jnp.sqrt(n))
 
-    i = jnp.arange(1, m + 1, dtype=jnp.float32)
-    bs = 1 - jnp.sqrt(m / (i - 0.5))
+    bs = jnp.arange(1, m + 1, dtype=jnp.float32)
+    bs = bs - 0.5
+    bs = m / bs
+    bs = jnp.sqrt(bs)
+    bs = 1 - bs
     bs = bs / (PRIOR * x_sorted[n // 4]) + 1 / x_sorted[-1]
 
-
     ks = -bs
-    temp = jnp.log1p(ks[:, None] * x)
+    temp = ks[:, None] * x
+    temp = jnp.log1p(temp)
     ks = jnp.mean(temp, axis=1)
 
     L = n * (jnp.log(-bs / ks) - ks - 1)
@@ -283,16 +291,19 @@ def gpdfitnew(x, sort=True, return_quadrature=False):
     # posterior mean for b
     b = jnp.sum(bs * w)
     # Estimate for k
-    temp = jnp.log1p(-b * x)
+    temp = (-b) * x
+    temp = jnp.log1p(temp)
     k = jnp.mean(temp)
     # estimate for sigma
-    sigma = -k / b
+    sigma = -k / b * n / (n - 0)
     # weakly informative prior for k
     a = 10
     k = k * n / (n + a) + a * 0.5 / (n + a)
 
     if return_quadrature:
-        temp = jnp.log1p(-bs[:, None] * x)
+        temp = -x
+        temp = bs[:, None] * temp
+        temp = jnp.log1p(temp)
         ks_quad = jnp.mean(temp, axis=1)
         ks_quad = ks_quad * n / (n+a) + a * 0.5 / (n+a)
         return k, sigma, ks_quad, w
@@ -327,3 +338,18 @@ def gpinv(p, k, sigma):
 
     # Final check on sigma
     return jnp.where(sigma <= 0, jnp.full_like(p, jnp.nan), x)
+
+
+def sumlogs(x, axis=None):
+    """Sum of vector where numbers are represented by their logarithms.
+
+    Calculates ``jnp.log(jnp.sum(jnp.exp(x), axis=axis))`` in such a fashion that
+    it works even when elements have large magnitude.
+
+    """
+    maxx = jnp.max(x, axis=axis, keepdims=True)
+    xnorm = x - maxx
+    out = jnp.sum(jnp.exp(xnorm), axis=axis)
+    out = jnp.log(out)
+    out = out + jnp.squeeze(maxx, axis=axis if axis is not None else None)
+    return out
