@@ -46,6 +46,7 @@ def training_loop(
     learning_rate: float = 0.001,
     checkpoint_dir: str = "/tmp/checkpoints",
     optimize_keys: list[str] | None = None,
+    grad_clip_value: float | None = None,
 ):
     """
     Advanced training loop with checkpointing, early stopping, LR decay on plateau,
@@ -140,6 +141,13 @@ def training_loop(
 
                         # Only accumulate gradients for selected keys
                         filtered_grads = filter_params(grads[0])
+
+                        # Apply gradient clipping if specified
+                        if grad_clip_value is not None:
+                            filtered_grads = optax.clip_by_global_norm(
+                                filtered_grads, grad_clip_value
+                            )[0]
+
                         grad_accumulator = jax.tree_util.tree_map(
                             lambda acc, g: acc + g, grad_accumulator, filtered_grads
                         )
