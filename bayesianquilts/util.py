@@ -32,6 +32,85 @@ def mk_train_step_fn(optimizer: optax.GradientTransformation):
     return train_step
 
 
+def check_nan_inf(value, name="value"):
+    """Check for NaN/Inf in a value or tree of values."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if jnp.any(jnp.isnan(v)) or jnp.any(jnp.isinf(v)):
+                return True, f"{name}[{k}]"
+    else:
+        if jnp.any(jnp.isnan(value)) or jnp.any(jnp.isinf(value)):
+            return True, name
+    return False, None
+
+
+def recover_from_nan_inf(
+    params,
+    initial_values,
+    strategy="adaptive",
+    recovery_count=0,
+    best_params=None
+):
+    """Recover from NaN/Inf by applying various strategies."""
+
+    if strategy == "reset_to_initial":
+        # Reset to initial values
+        recovered_params = dict(initial_values)
+        print(f"  -> Strategy: Reset to initial values")
+
+    elif strategy == "reset_to_best":
+        # Reset to best known parameters if available
+        if best_params is not None:
+            recovered_params = dict(best_params)
+            print(f"  -> Strategy: Reset to best known parameters")
+        else:
+            recovered_params = dict(initial_values)
+            print(f"  -> Strategy: Reset to initial (no best params available)")
+
+    elif strategy == "partial_reset":
+        # Only reset NaN/Inf parameters, keep others
+        recovered_params = dict(params)
+        for key, value in params.items():
+            if jnp.any(jnp.isnan(value)) or jnp.any(jnp.isinf(value)):
+                recovered_params[key] = initial_values[key]
+                print(f"  -> Strategy: Partial reset of parameter '{key}'")
+
+    elif strategy == "gaussian_noise":
+        # Add small Gaussian noise to current parameters
+        key = jax.random.PRNGKey(42 + recovery_count)
+        recovered_params = {}
+        for param_key, param_value in params.items():
+            if jnp.any(jnp.isnan(param_value)) or jnp.any(jnp.isinf(param_value)):
+                # Reset NaN/Inf params to initial + noise
+                noise = jax.random.normal(key, param_value.shape) * 0.01
+                recovered_params[param_key] = initial_values[param_key] + noise
+                print(f"  -> Strategy: Gaussian noise reset for parameter '{param_key}'")
+            else:
+                # Keep valid params but add small noise
+                noise = jax.random.normal(key, param_value.shape) * 0.001
+                recovered_params[param_key] = param_value + noise
+
+    elif strategy == "adaptive":
+        # Adaptive strategy based on recovery count
+        if recovery_count == 0:
+            # First attempt: partial reset
+            return recover_from_nan_inf(params, initial_values, "partial_reset", recovery_count, best_params)
+        elif recovery_count == 1:
+            # Second attempt: reset to best if available
+            return recover_from_nan_inf(params, initial_values, "reset_to_best", recovery_count, best_params)
+        elif recovery_count == 2:
+            # Third attempt: gaussian noise
+            return recover_from_nan_inf(params, initial_values, "gaussian_noise", recovery_count, best_params)
+        else:
+            # Final attempt: reset to initial
+            return recover_from_nan_inf(params, initial_values, "reset_to_initial", recovery_count, best_params)
+
+    else:
+        raise ValueError(f"Unknown recovery strategy: {strategy}")
+
+    return recovered_params
+
+
 def training_loop(
     initial_values: dict[str, Any],
     loss_fn: Callable[[Any, Any], float],
@@ -47,16 +126,63 @@ def training_loop(
     checkpoint_dir: str = "/tmp/checkpoints",
     optimize_keys: list[str] | None = None,
     clip_norm: float | None = None,
+    nan_recovery_strategy: str = "adaptive",
+    max_nan_recoveries: int = 10,
 ):
     """
     Advanced training loop with checkpointing, early stopping, LR decay on plateau,
-    and selective parameter optimization via optimize_keys.
+    selective parameter optimization via optimize_keys, and robust NaN/Inf handling.
+
+    Parameters
+    ----------
+    initial_values : dict[str, Any]
+        Initial parameter values for the model
+    loss_fn : Callable[[Any, Any], float]
+        Loss function that takes (data, params) and returns scalar loss
+    data_iterator : Iterator
+        Iterator providing training data batches
+    steps_per_epoch : int
+        Number of optimization steps per epoch
+    num_epochs : int
+        Maximum number of training epochs
+    base_optimizer_fn : Callable[[float], optax.GradientTransformation], optional
+        Function that creates optimizer given learning rate (default: Adam)
+    accumulation_steps : int, optional
+        Number of gradient accumulation steps (default: 1)
+    check_convergence_every : int, optional
+        Check for convergence every N epochs (default: 1)
+    patience : int, optional
+        Early stopping patience in epochs (default: 3)
+    lr_decay_factor : float, optional
+        Learning rate decay factor (default: 0.5)
+    learning_rate : float, optional
+        Initial learning rate (default: 0.001)
+    checkpoint_dir : str, optional
+        Directory for saving checkpoints (default: "/tmp/checkpoints")
+    optimize_keys : list[str], optional
+        Keys of parameters to optimize; if None, optimize all (default: None)
+    clip_norm : float, optional
+        Global norm clipping value; if None, no clipping (default: None)
+    nan_recovery_strategy : str, optional
+        Strategy for NaN/Inf recovery: "adaptive", "reset_to_initial",
+        "reset_to_best", "partial_reset", "gaussian_noise" (default: "adaptive")
+    max_nan_recoveries : int, optional
+        Maximum number of NaN recovery attempts before stopping (default: 10)
+
+    Returns
+    -------
+    epoch_losses : list
+        Loss values for each epoch
+    final_params : dict
+        Final or best parameter values
     """
     # 1. Setup for new features
 
     best_loss = float("inf")
     checks_no_improve = 0
     current_lr = learning_rate
+    nan_recovery_count = 0
+    best_params = None
     if base_optimizer_fn is None:
         base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
     # 2. Initial Optimizer Setup
@@ -121,12 +247,44 @@ def training_loop(
                     try:
                         batch = next(data_iterator)
                         loss_val, grads = value_and_grad_fn(batch, params)
-                        epoch_loss += loss_val
-                        if jnp.isnan(loss_val) or jnp.isinf(loss_val):
-                            print(
-                                f"Skipping batch due to NaN/Inf loss at epoch {epoch + 1}, step {total_steps + 1}."
+
+                        # Comprehensive NaN/Inf checking
+                        loss_has_issues, loss_location = check_nan_inf(loss_val, "loss")
+                        grads_have_issues, grad_location = check_nan_inf(grads[0], "gradients")
+                        params_have_issues, param_location = check_nan_inf(params, "parameters")
+
+                        # Handle NaN/Inf issues
+                        if loss_has_issues or grads_have_issues or params_have_issues:
+                            if nan_recovery_count >= max_nan_recoveries:
+                                print(f"❌ Maximum NaN recovery attempts ({max_nan_recoveries}) exceeded. Stopping training.")
+                                return epoch_losses, params
+
+                            nan_recovery_count += 1
+                            issues = []
+                            if loss_has_issues:
+                                issues.append(f"loss ({loss_location})")
+                            if grads_have_issues:
+                                issues.append(f"gradients ({grad_location})")
+                            if params_have_issues:
+                                issues.append(f"parameters ({param_location})")
+
+                            print(f"🔧 NaN/Inf detected in {', '.join(issues)} at epoch {epoch + 1}, step {total_steps + 1}.")
+                            print(f"   Recovery attempt {nan_recovery_count}/{max_nan_recoveries}")
+
+                            # Apply recovery strategy
+                            params = recover_from_nan_inf(
+                                params,
+                                initial_values,
+                                strategy=nan_recovery_strategy,
+                                recovery_count=nan_recovery_count - 1,
+                                best_params=best_params
                             )
-                            current_lr *= lr_decay_factor
+
+                            # Reduce learning rate more aggressively for NaN recovery
+                            recovery_lr_factor = 0.1 if nan_recovery_count > 1 else 0.5
+                            current_lr *= recovery_lr_factor
+
+                            # Reinitialize optimizer with new parameters and learning rate
                             base_optimizer = base_optimizer_fn(current_lr)
                             if clip_norm is not None:
                                 optimizer = optax.chain(
@@ -135,27 +293,19 @@ def training_loop(
                                 )
                             else:
                                 optimizer = base_optimizer
-                            opt_state = optimizer.init(
-                                filter_params(params)
-                            )  # Re-initialize optimizer state with new LR
-                            print(f"  -> Decaying learning rate to: {current_lr:.6f}")
+                            opt_state = optimizer.init(filter_params(params))
+
+                            # Reset gradient accumulator
+                            grad_accumulator = jax.tree_util.tree_map(
+                                jnp.zeros_like, unfreeze(filter_params(params))
+                            )
+
+                            print(f"   -> Reduced learning rate to: {current_lr:.6f}")
+                            print(f"   -> Reinitialized optimizer and gradient accumulator")
                             continue
-                        try:
-                            ave_grad = jnp.mean(
-                                jnp.array([jnp.mean(x) for x in grads[0]])
-                            )
-                        except TypeError:
-                            ave_grad = jnp.isnan(
-                                jnp.mean(
-                                    jnp.array([jnp.mean(x) for x in grads[0].values()])
-                                )
-                            )
-                        if jnp.isnan(ave_grad) or jnp.isinf(ave_grad):
-                            print(
-                                f"Skipping batch due to NaN/Inf gradients at epoch {epoch + 1}, step {total_steps + 1}."
-                            )
-                            checks_no_improve += 1
-                            continue
+
+                        # Normal processing - no NaN/Inf detected
+                        epoch_loss += loss_val
 
                         # Only accumulate gradients for selected keys
                         filtered_grads = filter_params(grads[0])
@@ -190,7 +340,9 @@ def training_loop(
             if (epoch + 1) % check_convergence_every == 0:
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
+                    best_params = dict(params)  # Track best parameters for NaN recovery
                     checks_no_improve = 0
+                    nan_recovery_count = 0  # Reset NaN recovery count on improvement
                     # Save the best model parameters
                     if checkpoint_dir is not None:
                         ckpt = {
@@ -238,6 +390,8 @@ def training_loop(
         return epoch_losses, params
 
     print("\n--- Training Finished ---")
+    if nan_recovery_count > 0:
+        print(f"NaN/Inf recovery was triggered {nan_recovery_count} times during training.")
 
     # 6. Restore from best snapshot if needed
     if checkpoint_dir is not None:
