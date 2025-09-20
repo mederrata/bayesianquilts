@@ -32,11 +32,11 @@ class HierarchicalAttentionRegression(QuiltedBayesianModel):
 
         self.create_distributions()
 
-    def forward(self, x):
+    def forward(self, data):
         """Forward pass through the hierarchical attention model.
 
         Args:
-            x (Tensor): Input tensor of shape (batch_size, seq_length, input_dim).
+            data (dict[str:Tensor]): Input dict of tensors of shape (batch_size, seq_length, input_dim).
 
         Returns:
             Tensor: Output tensor of shape (batch_size, output_dim).

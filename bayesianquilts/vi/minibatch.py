@@ -118,6 +118,7 @@ def minibatch_fit_surrogate_posterior(
     patience: int = 3,
     name=None,
     test_fn=None,
+    clip_norm: float = None,
     **kwargs,
 ):
     if initial_values is None:
@@ -154,5 +155,6 @@ def minibatch_fit_surrogate_posterior(
         learning_rate=learning_rate,
         patience=patience,
         lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
         **kwargs,
     )

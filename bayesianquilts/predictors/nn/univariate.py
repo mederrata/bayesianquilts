@@ -1,5 +1,6 @@
 from typing import Callable
 
+import jax.numpy as jnp
 import numpy as np
 from tensorflow_probability.python import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
