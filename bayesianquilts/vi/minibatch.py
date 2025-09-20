@@ -110,6 +110,7 @@ def minibatch_fit_surrogate_posterior(
     steps_per_epoch: int = 1,
     num_epochs: int = 1,
     accumulation_steps: int = 1,
+    check_convergence_every: int=1,
     sample_size=8,
     sample_batches=1,
     lr_decay_factor: float = 0.5,
@@ -117,6 +118,7 @@ def minibatch_fit_surrogate_posterior(
     patience: int = 3,
     name=None,
     test_fn=None,
+    clip_norm: float = None,
     **kwargs,
 ):
     if initial_values is None:
@@ -149,8 +151,10 @@ def minibatch_fit_surrogate_posterior(
         num_epochs=num_epochs,
         steps_per_epoch=steps_per_epoch,
         accumulation_steps=accumulation_steps,
+        check_convergence_every=check_convergence_every,
         learning_rate=learning_rate,
         patience=patience,
         lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
         **kwargs,
     )

@@ -16,6 +16,7 @@ from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
 from bayesianquilts.distributions import FactorizedDistributionMoments
+from bayesianquilts.jax.parameter import Interactions
 from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
@@ -79,6 +80,7 @@ class BayesianModel(ABC, nnx.Module):
         steps_per_epoch: int = 1,
         num_epochs: int = 1,
         accumulation_steps: int = 1,
+        check_convergence_every: int = 1,
         sample_size=8,
         sample_batches=1,
         lr_decay_factor: float = 0.5,
@@ -86,7 +88,6 @@ class BayesianModel(ABC, nnx.Module):
         patience: int = 3,
         initial_values: Dict[str, jax.typing.ArrayLike] | None = None,
         unormalized_log_prob_fn: Callable | None = None,
-        set_expectations=True,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -121,6 +122,7 @@ class BayesianModel(ABC, nnx.Module):
                 sample_size=sample_size,
                 sample_batches=sample_batches,
                 learning_rate=learning_rate,
+                check_convergence_every=check_convergence_every,
                 patience=patience,
                 lr_decay_factor=lr_decay_factor,
                 steps_per_epoch=steps_per_epoch,
@@ -132,12 +134,7 @@ class BayesianModel(ABC, nnx.Module):
             return losses
 
         losses, params = run_approximation()
-        if set_expectations:
-            if (not np.isnan(losses[-1])) and (not np.isinf(losses[-1])):
-                self.surrogate_distribution = self.surrogate_distribution_generator(
-                    params
-                )
-                self.set_calibration_expectations()
+        self.params = params
         return losses, params
 
     def set_calibration_expectations(self, samples: int = 24, variational: bool = True):
@@ -296,7 +293,7 @@ class BayesianModel(ABC, nnx.Module):
         return params
 
     def sample(self, batch_shape=None, prior=False):
-        _, sample_key = random.split(random.PRNGKey(0))
+        _, sample_key = random.split(random.PRNGKey(np.random.randint(10000)))
         surrogate = self.surrogate_distribution_generator(self.params)
         if prior:
             if batch_shape is None:
@@ -322,3 +319,13 @@ class BayesianModel(ABC, nnx.Module):
         }
 
         return InferenceData(**idict)
+
+class QuiltedBayesianModel(BayesianModel):
+    """Quailted Bayesian Model
+
+    Initially a global model, Quilted Bayesian Models can be expanded along a given
+    interaction alignment to create a larger model.
+    """
+    @abstractmethod
+    def expand(self, interaction: Interactions):
+        pass
