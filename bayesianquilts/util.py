@@ -32,6 +32,85 @@ def mk_train_step_fn(optimizer: optax.GradientTransformation):
     return train_step
 
 
+def check_nan_inf(value, name="value"):
+    """Check for NaN/Inf in a value or tree of values."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if jnp.any(jnp.isnan(v)) or jnp.any(jnp.isinf(v)):
+                return True, f"{name}[{k}]"
+    else:
+        if jnp.any(jnp.isnan(value)) or jnp.any(jnp.isinf(value)):
+            return True, name
+    return False, None
+
+
+def recover_from_nan_inf(
+    params,
+    initial_values,
+    strategy="adaptive",
+    recovery_count=0,
+    best_params=None
+):
+    """Recover from NaN/Inf by applying various strategies."""
+
+    if strategy == "reset_to_initial":
+        # Reset to initial values
+        recovered_params = dict(initial_values)
+        print(f"  -> Strategy: Reset to initial values")
+
+    elif strategy == "reset_to_best":
+        # Reset to best known parameters if available
+        if best_params is not None:
+            recovered_params = dict(best_params)
+            print(f"  -> Strategy: Reset to best known parameters")
+        else:
+            recovered_params = dict(initial_values)
+            print(f"  -> Strategy: Reset to initial (no best params available)")
+
+    elif strategy == "partial_reset":
+        # Only reset NaN/Inf parameters, keep others
+        recovered_params = dict(params)
+        for key, value in params.items():
+            if jnp.any(jnp.isnan(value)) or jnp.any(jnp.isinf(value)):
+                recovered_params[key] = initial_values[key]
+                print(f"  -> Strategy: Partial reset of parameter '{key}'")
+
+    elif strategy == "gaussian_noise":
+        # Add small Gaussian noise to current parameters
+        key = jax.random.PRNGKey(42 + recovery_count)
+        recovered_params = {}
+        for param_key, param_value in params.items():
+            if jnp.any(jnp.isnan(param_value)) or jnp.any(jnp.isinf(param_value)):
+                # Reset NaN/Inf params to initial + noise
+                noise = jax.random.normal(key, param_value.shape) * 0.01
+                recovered_params[param_key] = initial_values[param_key] + noise
+                print(f"  -> Strategy: Gaussian noise reset for parameter '{param_key}'")
+            else:
+                # Keep valid params but add small noise
+                noise = jax.random.normal(key, param_value.shape) * 0.001
+                recovered_params[param_key] = param_value + noise
+
+    elif strategy == "adaptive":
+        # Adaptive strategy based on recovery count
+        if recovery_count == 0:
+            # First attempt: partial reset
+            return recover_from_nan_inf(params, initial_values, "partial_reset", recovery_count, best_params)
+        elif recovery_count == 1:
+            # Second attempt: reset to best if available
+            return recover_from_nan_inf(params, initial_values, "reset_to_best", recovery_count, best_params)
+        elif recovery_count == 2:
+            # Third attempt: gaussian noise
+            return recover_from_nan_inf(params, initial_values, "gaussian_noise", recovery_count, best_params)
+        else:
+            # Final attempt: reset to initial
+            return recover_from_nan_inf(params, initial_values, "reset_to_initial", recovery_count, best_params)
+
+    else:
+        raise ValueError(f"Unknown recovery strategy: {strategy}")
+
+    return recovered_params
+
+
 def training_loop(
     initial_values: dict[str, Any],
     loss_fn: Callable[[Any, Any], float],
@@ -46,16 +125,64 @@ def training_loop(
     learning_rate: float = 0.001,
     checkpoint_dir: str = "/tmp/checkpoints",
     optimize_keys: list[str] | None = None,
+    clip_norm: float | None = None,
+    nan_recovery_strategy: str = "adaptive",
+    max_nan_recoveries: int = 10,
 ):
     """
     Advanced training loop with checkpointing, early stopping, LR decay on plateau,
-    and selective parameter optimization via optimize_keys.
+    selective parameter optimization via optimize_keys, and robust NaN/Inf handling.
+
+    Parameters
+    ----------
+    initial_values : dict[str, Any]
+        Initial parameter values for the model
+    loss_fn : Callable[[Any, Any], float]
+        Loss function that takes (data, params) and returns scalar loss
+    data_iterator : Iterator
+        Iterator providing training data batches
+    steps_per_epoch : int
+        Number of optimization steps per epoch
+    num_epochs : int
+        Maximum number of training epochs
+    base_optimizer_fn : Callable[[float], optax.GradientTransformation], optional
+        Function that creates optimizer given learning rate (default: Adam)
+    accumulation_steps : int, optional
+        Number of gradient accumulation steps (default: 1)
+    check_convergence_every : int, optional
+        Check for convergence every N epochs (default: 1)
+    patience : int, optional
+        Early stopping patience in epochs (default: 3)
+    lr_decay_factor : float, optional
+        Learning rate decay factor (default: 0.5)
+    learning_rate : float, optional
+        Initial learning rate (default: 0.001)
+    checkpoint_dir : str, optional
+        Directory for saving checkpoints (default: "/tmp/checkpoints")
+    optimize_keys : list[str], optional
+        Keys of parameters to optimize; if None, optimize all (default: None)
+    clip_norm : float, optional
+        Global norm clipping value; if None, no clipping (default: None)
+    nan_recovery_strategy : str, optional
+        Strategy for NaN/Inf recovery: "adaptive", "reset_to_initial",
+        "reset_to_best", "partial_reset", "gaussian_noise" (default: "adaptive")
+    max_nan_recoveries : int, optional
+        Maximum number of NaN recovery attempts before stopping (default: 10)
+
+    Returns
+    -------
+    epoch_losses : list
+        Loss values for each epoch
+    final_params : dict
+        Final or best parameter values
     """
     # 1. Setup for new features
 
     best_loss = float("inf")
     checks_no_improve = 0
     current_lr = learning_rate
+    nan_recovery_count = 0
+    best_params = None
     if base_optimizer_fn is None:
         base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
     # 2. Initial Optimizer Setup
@@ -73,7 +200,18 @@ def training_loop(
             merged[k] = updated_subset[k]
         return merged
 
-    optimizer = base_optimizer_fn(current_lr)
+    # Create base optimizer
+    base_optimizer = base_optimizer_fn(current_lr)
+
+    # Add gradient clipping if specified
+    if clip_norm is not None:
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(clip_norm),
+            base_optimizer
+        )
+    else:
+        optimizer = base_optimizer
+
     opt_state = optimizer.init(filter_params(initial_values))
     value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
     if checkpoint_dir is not None:
@@ -109,34 +247,65 @@ def training_loop(
                     try:
                         batch = next(data_iterator)
                         loss_val, grads = value_and_grad_fn(batch, params)
-                        epoch_loss += loss_val
-                        if jnp.isnan(loss_val) or jnp.isinf(loss_val):
-                            print(
-                                f"Skipping batch due to NaN/Inf loss at epoch {epoch + 1}, step {total_steps + 1}."
+
+                        # Comprehensive NaN/Inf checking
+                        loss_has_issues, loss_location = check_nan_inf(loss_val, "loss")
+                        grads_have_issues, grad_location = check_nan_inf(grads[0], "gradients")
+                        params_have_issues, param_location = check_nan_inf(params, "parameters")
+
+                        # Handle NaN/Inf issues
+                        if loss_has_issues or grads_have_issues or params_have_issues:
+                            if nan_recovery_count >= max_nan_recoveries:
+                                print(f"❌ Maximum NaN recovery attempts ({max_nan_recoveries}) exceeded. Stopping training.")
+                                return epoch_losses, params
+
+                            nan_recovery_count += 1
+                            issues = []
+                            if loss_has_issues:
+                                issues.append(f"loss ({loss_location})")
+                            if grads_have_issues:
+                                issues.append(f"gradients ({grad_location})")
+                            if params_have_issues:
+                                issues.append(f"parameters ({param_location})")
+
+                            print(f"🔧 NaN/Inf detected in {', '.join(issues)} at epoch {epoch + 1}, step {total_steps + 1}.")
+                            print(f"   Recovery attempt {nan_recovery_count}/{max_nan_recoveries}")
+
+                            # Apply recovery strategy
+                            params = recover_from_nan_inf(
+                                params,
+                                initial_values,
+                                strategy=nan_recovery_strategy,
+                                recovery_count=nan_recovery_count - 1,
+                                best_params=best_params
                             )
-                            current_lr *= lr_decay_factor
-                            optimizer = base_optimizer_fn(current_lr)
-                            opt_state = optimizer.init(
-                                filter_params(params)
-                            )  # Re-initialize optimizer state with new LR
-                            print(f"  -> Decaying learning rate to: {current_lr:.6f}")
-                            continue
-                        try:
-                            ave_grad = jnp.mean(
-                                jnp.array([jnp.mean(x) for x in grads[0]])
-                            )
-                        except TypeError:
-                            ave_grad = jnp.isnan(
-                                jnp.mean(
-                                    jnp.array([jnp.mean(x) for x in grads[0].values()])
+
+                            # Reduce learning rate more aggressively for NaN recovery
+                            recovery_lr_factor = 0.1 if nan_recovery_count > 1 else 0.5
+                            current_lr *= recovery_lr_factor
+
+                            # Reinitialize optimizer with new parameters and learning rate
+                            base_optimizer = base_optimizer_fn(current_lr)
+                            if clip_norm is not None:
+                                optimizer = optax.chain(
+                                    optax.clip_by_global_norm(clip_norm),
+                                    base_optimizer
                                 )
+                            else:
+                                optimizer = base_optimizer
+                            opt_state = optimizer.init(filter_params(params))
+
+                            # Reset gradient accumulator
+                            grad_accumulator = jax.tree_util.tree_map(
+                                jnp.zeros_like, unfreeze(filter_params(params))
                             )
-                        if jnp.isnan(ave_grad) or jnp.isinf(ave_grad):
-                            print(
-                                f"Skipping batch due to NaN/Inf gradients at epoch {epoch + 1}, step {total_steps + 1}."
-                            )
-                            checks_no_improve += 1
+
+                            print(f"   -> Reduced learning rate to: {current_lr:.6f}")
+                            print(f"   -> Reinitialized optimizer and gradient accumulator")
                             continue
+
+                        # Normal processing - no NaN/Inf detected
+                        epoch_loss += loss_val
 
                         # Only accumulate gradients for selected keys
                         filtered_grads = filter_params(grads[0])
@@ -171,7 +340,9 @@ def training_loop(
             if (epoch + 1) % check_convergence_every == 0:
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
+                    best_params = dict(params)  # Track best parameters for NaN recovery
                     checks_no_improve = 0
+                    nan_recovery_count = 0  # Reset NaN recovery count on improvement
                     # Save the best model parameters
                     if checkpoint_dir is not None:
                         ckpt = {
@@ -193,7 +364,14 @@ def training_loop(
                     )
                     # Decay learning rate
                     current_lr *= lr_decay_factor
-                    optimizer = base_optimizer_fn(current_lr)
+                    base_optimizer = base_optimizer_fn(current_lr)
+                    if clip_norm is not None:
+                        optimizer = optax.chain(
+                            optax.clip_by_global_norm(clip_norm),
+                            base_optimizer
+                        )
+                    else:
+                        optimizer = base_optimizer
                     opt_state = optimizer.init(
                         filter_params(params)
                     )  # Re-initialize optimizer state with new LR
@@ -212,6 +390,8 @@ def training_loop(
         return epoch_losses, params
 
     print("\n--- Training Finished ---")
+    if nan_recovery_count > 0:
+        print(f"NaN/Inf recovery was triggered {nan_recovery_count} times during training.")
 
     # 6. Restore from best snapshot if needed
     if checkpoint_dir is not None:
@@ -299,67 +479,210 @@ class DummyObject(object):
 
 class PiecewiseFunction(object):
     def __init__(
-        self, breakpoints, values, cadlag=True, unique_breaks=False, dtype=tf.float64
+        self, breakpoints, values, cadlag=True, unique_breaks=False, dtype=jnp.float32
     ):
+        """Initialize a JAX-based piecewise function with batching support.
+
+        Args:
+            breakpoints: JAX array of shape (..., n_breaks) where ... represents batch dimensions
+            values: JAX array of shape (..., n_values) where n_values = n_breaks + 1
+            cadlag: Whether function is right-continuous (True) or left-continuous (False)
+            unique_breaks: Whether breakpoints are already unique and sorted
+            dtype: JAX dtype for computations
+        """
         self.dtype = dtype
-        self.unique_breaks = unique_breaks
-        values = values.astype(dtype)
-        breakpoints = breakpoints.astype(dtype)
-        last = breakpoints.shape[-1]
-        if last is None:
-            last = 1
-
-        if values.ndims > breakpoints.ndims:
-            breakpoints += jnp.zeros(
-                values.shape[:-1] + [last],
-                breakpoints.dtype,
-            )
-        self.breakpoints = breakpoints.astype(dtype)
-        self.values = values
         self.cadlag = cadlag
+        self.unique_breaks = unique_breaks
 
-    def __call__(self, value):
-        value = value.astype(self.dtype)
-        ndx = jnp.sum(
-            self.breakpoints[..., tf.newaxis] <= value[..., tf.newaxis, :],
-            axis=-2,
-        ).astype(tf.int32)
-        return tf.gather(
-            self.values, ndx, batch_dims=len(self.values.shape.as_list()) - 1
+        # Convert to JAX arrays with specified dtype
+        self.breakpoints = jnp.asarray(breakpoints, dtype=dtype)
+        self.values = jnp.asarray(values, dtype=dtype)
+
+        # Ensure breakpoints and values have compatible batch dimensions
+        breakpoints_shape = self.breakpoints.shape
+        values_shape = self.values.shape
+
+        # The last dimension of values should be one more than breakpoints
+        if values_shape[-1] != breakpoints_shape[-1] + 1:
+            raise ValueError(f"Values shape {values_shape} incompatible with breakpoints shape {breakpoints_shape}. "
+                           f"Values should have {breakpoints_shape[-1] + 1} elements in last dimension.")
+
+        # Handle batch dimension broadcasting
+        if len(values_shape) > len(breakpoints_shape):
+            # Broadcast breakpoints to match values batch dimensions
+            target_shape = values_shape[:-1] + (breakpoints_shape[-1],)
+            self.breakpoints = jnp.broadcast_to(self.breakpoints, target_shape)
+        elif len(breakpoints_shape) > len(values_shape):
+            # Broadcast values to match breakpoints batch dimensions
+            target_shape = breakpoints_shape[:-1] + (values_shape[-1],)
+            self.values = jnp.broadcast_to(self.values, target_shape)
+
+        # Sort breakpoints if needed
+        if not unique_breaks:
+            self.breakpoints = jnp.sort(self.breakpoints, axis=-1)
+
+    def __call__(self, x):
+        """Evaluate piecewise function at points x with broadcasting support.
+
+        Args:
+            x: JAX array of evaluation points with shape (..., n_points) or (...)
+
+        Returns:
+            JAX array with broadcasted shape containing function values
+        """
+        x = jnp.asarray(x, dtype=self.dtype)
+
+        # Handle scalar input
+        if x.ndim == 0:
+            x = x[None]
+            squeeze_output = True
+        else:
+            squeeze_output = False
+
+        # Determine output shape through broadcasting rules
+        # We need to broadcast: (...batch_dims, n_breaks), (...x_batch_dims, n_points)
+        # Result should be: (...broadcast_batch_dims, n_points)
+
+        # Add dimensions for broadcasting
+        # breakpoints: (..., n_breaks) -> (..., n_breaks, 1)
+        # x: (..., n_points) -> (..., 1, n_points)
+        breaks_expanded = self.breakpoints[..., :, None]
+        x_expanded = x[..., None, :]
+
+        # Find indices: count how many breakpoints are <= each x value
+        if self.cadlag:
+            # Right-continuous: use <=
+            indices = jnp.sum(breaks_expanded <= x_expanded, axis=-2)
+        else:
+            # Left-continuous: use <
+            indices = jnp.sum(breaks_expanded < x_expanded, axis=-2)
+
+        # Clamp indices to valid range [0, n_values-1]
+        indices = jnp.clip(indices, 0, self.values.shape[-1] - 1)
+
+        # Gather values using advanced indexing
+        # We need to handle the batch dimensions properly
+        result = jnp.take_along_axis(
+            self.values[..., None, :],
+            indices[..., :, None],
+            axis=-1
+        ).squeeze(-1)
+
+        # Remove singleton dimension if input was scalar
+        if squeeze_output:
+            result = result.squeeze(-1)
+
+        return result
+
+    def __add__(self, other):
+        """Add two piecewise functions or add a scalar to this function."""
+        if isinstance(other, numbers.Number):
+            # Add scalar to all values
+            return PiecewiseFunction(
+                self.breakpoints,
+                self.values + other,
+                cadlag=self.cadlag,
+                unique_breaks=self.unique_breaks,
+                dtype=self.dtype
+            )
+
+        if not isinstance(other, PiecewiseFunction):
+            raise TypeError("Can only add PiecewiseFunction or scalar")
+
+        # Merge breakpoints from both functions
+        # First, broadcast to common batch shape
+        left_breaks = self.breakpoints
+        right_breaks = other.breakpoints
+
+        # Concatenate breakpoints
+        all_breaks = jnp.concatenate([left_breaks, right_breaks], axis=-1)
+
+        # Get unique sorted breakpoints
+        all_breaks = jnp.sort(all_breaks, axis=-1)
+        # Note: jnp.unique doesn't work well with batch dimensions, so we'll keep duplicates
+        # The evaluation will still work correctly
+
+        # Evaluate both functions at all breakpoints
+        # Add a small offset to handle discontinuities
+        eval_points = all_breaks
+        if self.cadlag and other.cadlag:
+            # Both right-continuous, evaluate at breakpoints
+            v1 = self(eval_points)
+            v2 = other(eval_points)
+        else:
+            # Handle mixed continuity by evaluating just to the left and right
+            eps = jnp.finfo(self.dtype).eps * 10
+            eval_points_left = eval_points - eps
+            v1 = self(eval_points_left)
+            v2 = other(eval_points_left)
+
+        # Create new values array (one more element than breakpoints)
+        # Add the value at negative infinity (first value of each function)
+        v1_init = self.values[..., :1]  # First value
+        v2_init = other.values[..., :1]  # First value
+
+        new_values = jnp.concatenate([v1_init + v2_init, v1 + v2], axis=-1)
+
+        return PiecewiseFunction(
+            all_breaks,
+            new_values,
+            cadlag=self.cadlag and other.cadlag,
+            unique_breaks=False,  # We may have duplicates
+            dtype=self.dtype
         )
-
-    def __add__(self, obj):
-        if isinstance(obj, numbers.Number):
-            return PiecewiseFunction(self.breakpoints, obj + self.values)
-        left = self.breakpoints
-
-        left_batch_shape = left.shape[:-1]
-        right = obj.breakpoints.astype(self.dtype)
-        right_batch_shape = right.shape[:-1]
-
-        if len(left_batch_shape) < len(right_batch_shape):
-            left += jnp.zeros(right_batch_shape + left.shape[-1:], self.dtype)
-        elif len(left_batch_shape) > len(right_batch_shape):
-            right += jnp.zeros(left_batch_shape + right.shape[-1:], self.dtype)
-
-        breakpoints = jnp.concatenate([left, right], axis=-1)
-        breakpoints, _ = jnp.unique(x=breakpoints, axis=[-1])
-        breakpoints = jnp.sort(breakpoints, axis=-1)
-        d = len(breakpoints.shape.as_list())
-        breakpoints_ = jnp.pad(breakpoints, [(0, 0)] * (d - 1) + [(1, 0)])
-        v1 = self(breakpoints_)
-        v2 = obj(breakpoints_)
-        return PiecewiseFunction(breakpoints, v1 + v2, dtype=self.dtype)
 
 
 def demo():
-    f = PiecewiseFunction([[1, 2, 3]], [[1, 2, 2, 3]])
-    g = f + 1
-    print(g(1))
-    h = g + f
-    print(h(1))
-    print(h(5))
-    pass
+    """Demonstrate the JAX-based PiecewiseFunction with batching and broadcasting."""
+    import jax.numpy as jnp
+
+    print("=== JAX PiecewiseFunction Demo ===")
+
+    # Single piecewise function: f(x) = 1 for x <= 1, 2 for 1 < x <= 2, 3 for 2 < x <= 3, 4 for x > 3
+    print("\n1. Single piecewise function:")
+    breakpoints = jnp.array([1.0, 2.0, 3.0])  # 3 breakpoints
+    values = jnp.array([1.0, 2.0, 3.0, 4.0])  # 4 values (n_breaks + 1)
+    f = PiecewiseFunction(breakpoints, values)
+
+    test_points = jnp.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+    print(f"f({test_points}) = {f(test_points)}")
+
+    # Test scalar input
+    print(f"f(1.5) = {f(1.5)}")
+
+    # Batch of piecewise functions
+    print("\n2. Batch of piecewise functions:")
+    batch_breakpoints = jnp.array([[1.0, 2.0], [2.0, 4.0]])  # 2 functions, 2 breakpoints each
+    batch_values = jnp.array([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]])  # 2 functions, 3 values each
+    f_batch = PiecewiseFunction(batch_breakpoints, batch_values)
+
+    test_batch_points = jnp.array([0.5, 1.5, 3.0])
+    result_batch = f_batch(test_batch_points)
+    print(f"Batch evaluation at {test_batch_points}:")
+    print(f"Function 0: {result_batch[0]}")
+    print(f"Function 1: {result_batch[1]}")
+
+    # Broadcasting test
+    print("\n3. Broadcasting test:")
+    single_points = jnp.array([1.5, 2.5])  # (2,)
+    batch_points = jnp.array([[0.5, 1.5], [2.5, 3.5]])  # (2, 2)
+
+    print(f"Single function, single points: {f(single_points)}")
+    print(f"Single function, batch points: {f(batch_points)}")
+    print(f"Batch functions, single points: {f_batch(single_points)}")
+
+    # Addition tests
+    print("\n4. Addition tests:")
+    g = f + 10  # Add scalar
+    print(f"f + 10 at [0.5, 1.5, 2.5]: {g(jnp.array([0.5, 1.5, 2.5]))}")
+
+    # Add two functions
+    f2 = PiecewiseFunction(jnp.array([1.5, 2.5]), jnp.array([0.5, 1.0, 1.5]))
+    h = f + f2
+    print(f"f + f2 at [0.5, 1.5, 2.5]: {h(jnp.array([0.5, 1.5, 2.5]))}")
+
+    print("\n=== Demo completed ===")
+    return f, f_batch, g, h
 
 
 if __name__ == "__main__":
