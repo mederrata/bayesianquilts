@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import tensorflow_probability.substrates.jax.bijectors as tfb
 import tensorflow_probability.substrates.jax.distributions as tfd
 import tensorflow_probability.substrates.jax.util as tfp_util
@@ -193,7 +194,7 @@ def build_factored_surrogate_posterior_generator(
     """
     if surrogate_initializers is None:
         surrogate_initializers = {}
-    _, sample_key = random.split(random.PRNGKey(0))
+    _, sample_key = random.split(random.PRNGKey(np.random.randint(0, 1e8)))
     prior_sample = joint_distribution_named.sample(seed=sample_key)
     # create the parameters for the surrogate posterior
     var_labels = []
@@ -228,7 +229,7 @@ def build_factored_surrogate_posterior_generator(
             var_labels += [label + "\\loc", label + "\\scale"]
 
 
-    target_sample = joint_distribution_named.sample(num_samples, seed=random.PRNGKey(0))
+    target_sample = joint_distribution_named.sample(num_samples, seed=random.PRNGKey(np.random.int(0, 1e8)))
     means = {k: jnp.mean(v, axis=0).astype(dtype) for k, v in target_sample.items()}
     surrogate_initializers = surrogate_initializers if not None else {}
     for k, v in surrogate_initializers.items():
