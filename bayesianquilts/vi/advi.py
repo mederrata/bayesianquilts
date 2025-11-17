@@ -174,6 +174,7 @@ def build_factored_surrogate_posterior_generator(
     surrogate_initializers: dict[str, jax.typing.ArrayLike] = None,
     prefix: str = None,
     gaussian_only: bool = False,
+    noise: float = 1e-2,
     dtype=jnp.float32,
 ):
     """Builds a stateless surrogate posterior from a joint distribution named.
@@ -229,7 +230,7 @@ def build_factored_surrogate_posterior_generator(
             var_labels += [label + "\\loc", label + "\\scale"]
 
 
-    target_sample = joint_distribution_named.sample(num_samples, seed=random.PRNGKey(np.random.int(0, 1e8)))
+    target_sample = joint_distribution_named.sample(num_samples, seed=random.PRNGKey(np.random.randint(0, 1e8)))
     means = {k: jnp.mean(v, axis=0).astype(dtype) for k, v in target_sample.items()}
     surrogate_initializers = surrogate_initializers if not None else {}
     for k, v in surrogate_initializers.items():
@@ -247,7 +248,7 @@ def build_factored_surrogate_posterior_generator(
             if _config[-1] == "loc":
                 _params[label] = means[k]
             elif _config[-1] == "scale":
-                _params[label] = 5e-3*jnp.ones_like(means[k])
+                _params[label] = noise*jnp.ones_like(means[k])
             elif _config[-1] == "concentration":
                 _params[label] = jnp.ones_like(means[k]) * 2.0
             else:
