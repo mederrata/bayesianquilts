@@ -2,6 +2,7 @@ import functools
 import typing
 
 import jax.numpy as jnp
+import numpy as np
 from jax import random
 from tensorflow_probability.substrates.jax import monte_carlo
 from tensorflow_probability.substrates.jax.vi import (GradientEstimators,
@@ -45,7 +46,7 @@ def minibatch_mc_variational_loss(
         _type_: _description_
     """
     def sample_elbo():
-        _, sample_key = random.split(random.PRNGKey(0))
+        _, sample_key = random.split(random.PRNGKey(np.random.randint(0, 1e6)))
         q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
             sample_size, seed=sample_key
         )
