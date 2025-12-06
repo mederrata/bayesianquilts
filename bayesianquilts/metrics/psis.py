@@ -20,6 +20,9 @@ gpdfitnew
 gpinv
     Inverse Generalised Pareto distribution function.
 
+sumlogs
+    Sum of vector where numbers are represented by their logarithms.
+
 References
 ----------
 Aki Vehtari, Andrew Gelman and Jonah Gabry (2017). Practical
@@ -73,9 +76,10 @@ def psisloo(log_lik, **kwargs):
     Returns a sum of the leave-one-out log predictive densities `loo`,
     individual leave-one-out log predictive density terms `loos` and an estimate
     of Pareto tail indeces `ks`. The estimates are unreliable if tail index
-    ``k > 0.7``.
+    ``k > 0.7`` (see more in the references listed in the module docstring).
 
-    Additional keyword arguments are passed to the :meth:`psislw()` function.
+    Additional keyword arguments are passed to the :meth:`psislw()` function
+    (see the corresponding documentation).
 
     Parameters
     ----------
@@ -100,8 +104,8 @@ def psisloo(log_lik, **kwargs):
     # compute Pareto smoothed log weights given raw log weights
     lw_smoothed, ks = psislw(lw, **kwargs)
     # compute leave-one-out log predictive densities
-    lw_new = lw_smoothed + log_lik
-    loos = sumlogs(lw_new, axis=0)
+    lw_smoothed = lw_smoothed + log_lik
+    loos = sumlogs(lw_smoothed, axis=0)
     loo = loos.sum()
     return loo, loos, ks
 
@@ -122,6 +126,11 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
 
     Reff : scalar, optional
         relative MCMC efficiency ``N_eff / N``
+
+    overwrite_lw : bool, optional
+        If True, the input array `lw` is smoothed in-place. By default, a new
+        array is allocated. Note: JAX arrays are immutable, so "in-place" means
+        we avoid an extra copy operation.
 
     Returns
     -------
@@ -154,7 +163,8 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
 
     # precalculate constants
     cutoff_ind = -int(jnp.ceil(min(0.2 * n, 3 * jnp.sqrt(n / Reff)))) - 1
-    cutoffmin = jnp.log(jnp.finfo(jnp.float32).tiny)
+    cutoffmin = jnp.log(jnp.finfo(jnp.float64).tiny)
+    logn = jnp.log(n)  # For consistency with NumPy version (though unused)
     k_min = 1/3
 
     # loop over sets of log weights
@@ -205,7 +215,7 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
             x = jnp.minimum(x, 0.0)
 
         # renormalize weights
-        x = x - logsumexp(x)
+        x = x - sumlogs(x)
         # store tail index k
         kss = kss.at[i].set(k)
         lw_out = lw_out.at[:, i].set(x)
@@ -238,7 +248,8 @@ def gpdfitnew(x, sort=True, return_quadrature=False):
         sort the input array `x`. If the input array is already sorted, provide
         False. If True (default behaviour), the array is sorted internally.
     return_quadrature : bool, optional
-        If True, quadrature points and weights `ks` and `w` of the marginal posterior of k are also returned.
+        If True, quadrature points and weights `ks` and `w` of the marginal
+        posterior of k are also returned.
 
     Returns
     -------
@@ -247,6 +258,11 @@ def gpdfitnew(x, sort=True, return_quadrature=False):
     ks, w : jax.Array
         Quadrature points and weights of the marginal posterior distribution
         of `k`. Returned only if `return_quadrature` is True.
+
+    Notes
+    -----
+    This function returns a negative of Zhang and Stephens's k, because it is
+    more common parameterisation.
     """
     if x.ndim != 1 or len(x) <= 1:
         raise ValueError("Invalid input array.")
@@ -256,22 +272,22 @@ def gpdfitnew(x, sort=True, return_quadrature=False):
         if sort:
             sort_indices = jnp.argsort(x)
             x_sorted = x[sort_indices]
-        else: # array is pre-sorted
+        else:  # array is pre-sorted
             x_sorted = x
-    else: # sort is an array of indices
+    else:  # sort is an array of indices
         x_sorted = x[sort]
-
 
     n = len(x)
     PRIOR = 3
     m = 30 + int(jnp.sqrt(n))
 
-    bs = jnp.arange(1, m + 1, dtype=jnp.float32)
+    bs = jnp.arange(1, m + 1, dtype=jnp.float64)
     bs = bs - 0.5
     bs = m / bs
     bs = jnp.sqrt(bs)
     bs = 1 - bs
-    bs = bs / (PRIOR * x_sorted[n // 4]) + 1 / x_sorted[-1]
+    # Fix: Use integer division for indexing (n // 4), consistent with NumPy version
+    bs = bs / (PRIOR * x_sorted[int(n / 4 + 0.5) - 1]) + 1 / x_sorted[-1]
 
     ks = -bs
     temp = ks[:, None] * x
@@ -305,17 +321,32 @@ def gpdfitnew(x, sort=True, return_quadrature=False):
         temp = bs[:, None] * temp
         temp = jnp.log1p(temp)
         ks_quad = jnp.mean(temp, axis=1)
-        ks_quad = ks_quad * n / (n+a) + a * 0.5 / (n+a)
+        ks_quad = ks_quad * n / (n + a) + a * 0.5 / (n + a)
         return k, sigma, ks_quad, w
     else:
         return k, sigma
 
 
 def gpinv(p, k, sigma):
-    """Inverse Generalised Pareto distribution function."""
+    """Inverse Generalised Pareto distribution function.
+
+    Parameters
+    ----------
+    p : scalar or jax.Array
+        Probability values in [0, 1]
+    k : scalar
+        Shape parameter
+    sigma : scalar
+        Scale parameter
+
+    Returns
+    -------
+    x : scalar or jax.Array
+        Quantiles of the generalized Pareto distribution
+    """
     # Ensure p is a JAX array
     p = jnp.asarray(p)
-    
+
     # Use lax.cond for scalar conditional on k for JIT compatibility
     def k_is_zero_fun(_):
         return -jnp.log1p(-p)
@@ -324,7 +355,7 @@ def gpinv(p, k, sigma):
         return jnp.expm1(-k * jnp.log1p(-p)) / k
 
     x = jax.lax.cond(
-        jnp.abs(k) < jnp.finfo(jnp.float32).eps,
+        jnp.abs(k) < jnp.finfo(jnp.float64).eps,
         k_is_zero_fun,
         k_is_not_zero_fun,
         operand=None,
@@ -346,10 +377,25 @@ def sumlogs(x, axis=None):
     Calculates ``jnp.log(jnp.sum(jnp.exp(x), axis=axis))`` in such a fashion that
     it works even when elements have large magnitude.
 
+    Parameters
+    ----------
+    x : jax.Array
+        Input array of log values
+    axis : int or tuple of ints, optional
+        Axis or axes along which to sum. If None, sum over all elements.
+
+    Returns
+    -------
+    out : scalar or jax.Array
+        Log of the sum of exponentials
     """
     maxx = jnp.max(x, axis=axis, keepdims=True)
     xnorm = x - maxx
     out = jnp.sum(jnp.exp(xnorm), axis=axis)
     out = jnp.log(out)
-    out = out + jnp.squeeze(maxx, axis=axis if axis is not None else None)
+    # Fix: Properly squeeze the max value to match output dimensions
+    if axis is not None:
+        out = out + jnp.squeeze(maxx, axis=axis)
+    else:
+        out = out + jnp.squeeze(maxx)
     return out
