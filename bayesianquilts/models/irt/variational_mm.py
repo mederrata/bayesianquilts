@@ -221,6 +221,18 @@ class VariationalMMGradedResponseModel(BayesianModel):
         rest = jnp.cumsum(gaps, axis=-1)
         return jnp.concatenate([first, first + rest], axis=-1)
 
+    def transform(self, params):
+        """Transform parameters from surrogate space to model space."""
+        # Convert log_alpha -> alpha
+        if 'log_alpha' in params:
+             params['alpha'] = jnp.exp(params['log_alpha'])
+        
+        # Convert kappa_unconstrained -> kappa
+        if 'kappa_unconstrained' in params:
+             params['kappa'] = self.transform_kappa(params['kappa_unconstrained'])
+             
+        return params
+
     def unormalized_log_prob(self, data, prior_weight=1.0, **params):
         """
         Compute the unnormalized log probability (Joint Log-Likelihood).
