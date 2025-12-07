@@ -5,6 +5,7 @@
 
 import jax.numpy as jnp
 import numpy as np
+from typing import Dict, List, Optional, Union, Callable, Any
 from tensorflow_probability.substrates.jax import bijectors as tfb
 from tensorflow_probability.substrates.jax import distributions as tfd
 
@@ -22,25 +23,25 @@ class MixedFactorization(FactorizationModel):
 
     def __init__(
         self,
-        likelihood_types,
-        latent_dim=None,
-        feature_dim=None,
-        u_tau_scale=0.01,
-        s_tau_scale=1.0,
-        sigma_scale=1.0,
-        symmetry_breaking_decay=0.99,
-        encoder_function=None,
-        decoder_function=None,
-        log_transform=False,
-        horshoe_plus=True,
-        column_norms=None,
-        count_key="counts",
-        dtype=jnp.float64,
+        likelihood_types: List[str],
+        latent_dim: Optional[int] = None,
+        feature_dim: Optional[int] = None,
+        u_tau_scale: float = 0.01,
+        s_tau_scale: float = 1.0,
+        sigma_scale: float = 1.0,
+        symmetry_breaking_decay: float = 0.99,
+        encoder_function: Optional[Callable] = None,
+        decoder_function: Optional[Callable] = None,
+        log_transform: bool = False,
+        horshoe_plus: bool = True,
+        column_norms: Optional[Any] = None,
+        count_key: str = "counts",
+        dtype: Any = jnp.float64,
         **kwargs,
     ):
         """Instantiate PMF object
         Keyword Arguments:
-            likelihood_types {list} -- List of likelihood types for each feature
+            likelihood_types {List} -- List of likelihood types for each feature
             latent_dim {int]} -- P (default: {None})
             u_tau_scale {float} -- Global shrinkage scale on u (default: {1.})
             s_tau_scale {int} -- Global shrinkage scale on s (default: {1})
@@ -298,7 +299,16 @@ class MixedFactorization(FactorizationModel):
         )
         self.params = self.surrogate_parameter_initializer()
 
-    def log_likelihood_components(self, s, u, v, w, data, *args, **kwargs):
+    def log_likelihood_components(
+        self,
+        s: Any,
+        u: Any,
+        v: Any,
+        w: Any,
+        data: Dict[str, Any],
+        *args,
+        **kwargs
+    ) -> Dict[str, Any]:
         """Returns the log likelihood without summing along axes
         Arguments:
             s {jnp.ndarray} -- Samples of s
