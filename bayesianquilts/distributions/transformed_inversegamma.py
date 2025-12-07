@@ -1,17 +1,12 @@
 import tensorflow_probability.substrates.jax.bijectors as tfb
 import tensorflow_probability.substrates.jax.distributions as tfd
-from tensorflow_probability.substrates.jax import tf2jax as tf
-from tensorflow_probability.substrates.jax.bijectors import \
-    softplus as softplus_bijector
-from tensorflow_probability.substrates.jax.distributions import \
-    TransformedDistribution
+from tensorflow_probability.substrates.jax.bijectors import softplus as softplus_bijector
 from tensorflow_probability.substrates.jax.internal import (
-    dtype_util, parameter_properties, tensor_util)
-
-convert_nonref_to_tensor = tensor_util.convert_nonref_to_tensor
+    dtype_util, parameter_properties)
 
 
-class SqrtInverseGamma(TransformedDistribution):
+
+class SqrtInverseGamma(tfd.TransformedDistribution):
     def __init__(
         self,
         concentration,
@@ -21,36 +16,31 @@ class SqrtInverseGamma(TransformedDistribution):
         name="SqrtInverseGamma",
     ):
         parameters = dict(locals())
-        with tf.name_scope(name) as name:
-            super(SqrtInverseGamma, self).__init__(
-                distribution=tfd.InverseGamma(
-                    concentration=concentration, scale=scale),
-                bijector=tfb.Invert(tfb.Square()),
-                validate_args=validate_args,
-                parameters=parameters,
-                name=name,
-            )
-
-    @classmethod
-    def _params_event_ndims(cls):
-        return dict(loc=0, scale=0)
+        super(SqrtInverseGamma, self).__init__(
+            distribution=tfd.InverseGamma(
+                concentration=concentration, scale=scale),
+            bijector=tfb.Sqrt(),
+            validate_args=validate_args,
+            parameters=parameters,
+            name=name,
+        )
 
     @property
     def concentration(self):
         """Distribution parameter for the pre-transformed concentration."""
-        return self.distribution.concentration
+        return self.parameters["concentration"]
 
     @property
     def scale(self):
         """Distribution parameter for the
         pre-transformed standard deviation."""
-        return self.distribution.scale
+        return self.parameters["scale"]
 
     @classmethod
     def _parameter_properties(cls, dtype, num_classes=None):
         # pylint: disable=g-long-lambda
         return dict(
-            loc=parameter_properties.ParameterProperties(),
+            concentration=parameter_properties.ParameterProperties(),
             scale=parameter_properties.ParameterProperties(
                 default_constraining_bijector_fn=(
                     lambda: softplus_bijector.Softplus(
@@ -58,3 +48,4 @@ class SqrtInverseGamma(TransformedDistribution):
                 )
             ),
         )
+

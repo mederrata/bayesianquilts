@@ -1,44 +1,34 @@
 import tensorflow_probability.substrates.jax.bijectors as tfb
 import tensorflow_probability.substrates.jax.distributions as tfd
-from tensorflow_probability.substrates.jax import tf2jax as tf
-from tensorflow_probability.substrates.jax.bijectors import \
-    softplus as softplus_bijector
-from tensorflow_probability.substrates.jax.distributions import \
-    TransformedDistribution
+from tensorflow_probability.substrates.jax.bijectors import softplus as softplus_bijector
 from tensorflow_probability.substrates.jax.internal import (
-    dtype_util, parameter_properties, tensor_util)
-
-convert_nonref_to_tensor = tensor_util.convert_nonref_to_tensor
+    dtype_util, parameter_properties)
 
 
-class SqrtCauchy(TransformedDistribution):
+
+class SqrtCauchy(tfd.TransformedDistribution):
     def __init__(
         self, loc, scale, validate_args=False, allow_nan_stats=True, name="SqrtCauchy"
     ):
         parameters = dict(locals())
-        with tf.name_scope(name) as name:
-            super(SqrtCauchy, self).__init__(
-                distribution=tfd.HalfCauchy(loc=loc, scale=scale),
-                bijector=tfb.Invert(tfb.Square()),
-                validate_args=validate_args,
-                parameters=parameters,
-                name=name,
-            )
-
-    @classmethod
-    def _params_event_ndims(cls):
-        return dict(loc=0, scale=0)
+        super(SqrtCauchy, self).__init__(
+            distribution=tfd.HalfCauchy(loc=loc, scale=scale),
+            bijector=tfb.Sqrt(),
+            validate_args=validate_args,
+            parameters=parameters,
+            name=name,
+        )
 
     @property
     def loc(self):
         """Distribution parameter for the pre-transformed mean."""
-        return self.distribution.loc
+        return self.parameters["loc"]
 
     @property
     def scale(self):
         """Distribution parameter for the
         pre-transformed standard deviation."""
-        return self.distribution.scale
+        return self.parameters["scale"]
 
     @classmethod
     def _parameter_properties(cls, dtype, num_classes=None):
@@ -54,7 +44,7 @@ class SqrtCauchy(TransformedDistribution):
         )
 
 
-class LogHalfCauchy(TransformedDistribution):
+class LogHalfCauchy(tfd.TransformedDistribution):
     """Exponent of RV follows a HalfCauchy distribution
 
     log(x) ~ HalfCauchy
@@ -75,29 +65,24 @@ class LogHalfCauchy(TransformedDistribution):
         name="LogHalfCauchy",
     ):
         parameters = dict(locals())
-        with tf.name_scope(name) as name:
-            super(LogHalfCauchy, self).__init__(
-                distribution=tfd.HalfCauchy(loc=loc, scale=scale),
-                bijector=tfb.Invert(tfb.Exp()),
-                validate_args=validate_args,
-                parameters=parameters,
-                name=name,
-            )
-
-    @classmethod
-    def _params_event_ndims(cls):
-        return dict(loc=0, scale=0)
+        super(LogHalfCauchy, self).__init__(
+            distribution=tfd.HalfCauchy(loc=loc, scale=scale),
+            bijector=tfb.Exp(),
+            validate_args=validate_args,
+            parameters=parameters,
+            name=name,
+        )
 
     @property
     def loc(self):
         """Distribution parameter for the pre-transformed mean."""
-        return self.distribution.loc
+        return self.parameters["loc"]
 
     @property
     def scale(self):
         """Distribution parameter for the pre-transformed
         standard deviation."""
-        return self.distribution.scale
+        return self.parameters["scale"]
 
     @classmethod
     def _parameter_properties(cls, dtype, num_classes=None):
@@ -111,3 +96,4 @@ class LogHalfCauchy(TransformedDistribution):
                 )
             ),
         )
+

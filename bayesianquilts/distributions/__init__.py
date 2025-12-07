@@ -9,7 +9,7 @@ from .transformed_inversegamma import (
     SqrtInverseGamma
 )
 
-from .util import FactorizedDistributionMoments
+from .util import factorized_distribution_moments
 
 from .generalized_gamma import GeneralizedGamma
 from .piecewise_exponential import PiecewiseExponential
