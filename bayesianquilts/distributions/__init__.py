@@ -11,5 +11,5 @@ from .transformed_inversegamma import (
 
 from .util import FactorizedDistributionMoments
 
-from .generalized_gamma import GeneralizedGamma, Weibull
+from .generalized_gamma import GeneralizedGamma
 from .piecewise_exponential import PiecewiseExponential
