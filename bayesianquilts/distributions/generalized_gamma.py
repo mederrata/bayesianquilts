@@ -14,22 +14,19 @@
 # ============================================================================
 """The GeneralizedGamma distribution class."""
 
-from __future__ import absolute_import, division, print_function
-
 import jax.numpy as jnp
+from tensorflow_probability.substrates import jax as tfp
+from tensorflow_probability.substrates.jax.distributions import distribution
+from tensorflow_probability.substrates.jax.bijectors import softplus as softplus_bijector
+from tensorflow_probability.substrates.jax.distributions import kullback_leibler
 from tensorflow_probability.python.internal import reparameterization
-from tensorflow_probability.substrates.jax import tf2jax as tf
-from tensorflow_probability.substrates.jax.bijectors import \
-    softplus as softplus_bijector
-from tensorflow_probability.substrates.jax.distributions import (
-    distribution, kullback_leibler)
 from tensorflow_probability.substrates.jax.internal import (
     assert_util, dtype_util, parameter_properties, prefer_static, tensor_util)
-
+from jax import random
+from jax.scipy import special as jax_special
 __all__ = [
     'GeneralizedGamma',
     '_kl_ggamma_ggamma'
-    'Weibull'
 ]
 
 
@@ -54,18 +51,10 @@ class GeneralizedGamma(distribution.Distribution):
                  allow_nan_stats=True,
                  name='GeneralizedGamma'):
         parameters = dict(locals())
-        with tf.name_scope(name) as name:
-            dtype = dtype_util.common_dtype(
-                [scale, concentration, exponent], dtype_hint=tf.float32)
-            self._scale = tensor_util.convert_nonref_to_tensor(
-                scale, dtype=dtype, name='scale')
-            self._concentration = tensor_util.convert_nonref_to_tensor(
-                concentration, dtype=dtype, name='concentration')
-            self._exponent = tensor_util.convert_nonref_to_tensor(
-                exponent, dtype=dtype, name='exponent')
-
+        with tfp.util.name_scope(name) as name:
             super(GeneralizedGamma, self).__init__(
-                dtype=dtype,
+                dtype=dtype_util.common_dtype(
+                    [scale, concentration, exponent], dtype_hint=jnp.float32),
                 validate_args=validate_args,
                 allow_nan_stats=allow_nan_stats,
                 reparameterization_type=(
@@ -90,69 +79,63 @@ class GeneralizedGamma(distribution.Distribution):
         # pylint: enable=g-long-lambda
 
     def _mean(self):
-        return self.scale * tf.math.exp(
-            tf.math.lgamma((self.concentration + 1.)/self.exponent)
-            - tf.math.lgamma(self.concentration/self.exponent)
+        return self.scale * jnp.exp(
+            jax_special.gammaln((self.concentration + 1.)/self.exponent)
+            - jax_special.gammaln(self.concentration/self.exponent)
         )
 
     def _variance(self):
-        return self._scale**2 * (
-            tf.math.exp(
-                tf.math.lgamma((self.concentration+2.)/self.exponent)
-                - tf.math.lgamma(self.concentration/self.exponent)
+        return self.scale**2 * (
+            jnp.exp(
+                jax_special.gammaln((self.concentration+2.)/self.exponent)
+                - jax_special.gammaln(self.concentration/self.exponent)
             )
-            - tf.math.exp(
+            - jnp.exp(
                 2*(
-                    tf.math.lgamma((self.concentration+1.)/self.exponent)
-                    - tf.math.lgamma(self.concentration/self.exponent)
+                    jax_special.gammaln((self.concentration+1.)/self.exponent)
+                    - jax_special.gammaln(self.concentration/self.exponent)
                 )
 
             )
         )
 
     def _cdf(self, x):
-        return tf.math.igamma(self.concentration/self.exponent,
-                              (x/self.scale)**self.exponent) * tf.exp(
-            -tf.math.lgamma(self.concentration/self.exponent)
+        return jax_special.gammainc(self.concentration/self.exponent,
+                              (x/self.scale)**self.exponent) * jnp.exp(
+            -jax_special.gammaln(self.concentration/self.exponent)
         )
 
-    def _log_prob(self, x, scale=None, concentration=None, exponent=None):
-        scale = tensor_util.convert_nonref_to_tensor(
-            self.scale if scale is None else scale)
-        concentration = tensor_util.convert_nonref_to_tensor(
-            self.concentration if concentration is None else concentration)
-        exponent = tensor_util.convert_nonref_to_tensor(
-            self.exponent if exponent is None else exponent)
+    def _log_prob(self, x):
         log_unnormalized_prob = (
-            tf.math.xlogy(concentration-1., x) - (x/scale)**exponent)
+            jax_special.xlogy(self.concentration-1., x) - (x/self.scale)**self.exponent)
         log_prefactor = (
-            tf.math.log(exponent) - tf.math.xlogy(concentration, scale)
-            - tf.math.lgamma(concentration/exponent))
+            jnp.log(self.exponent) - jax_special.xlogy(self.concentration, self.scale)
+            - jax_special.gammaln(self.concentration/self.exponent))
         return log_unnormalized_prob + log_prefactor
 
     def _entropy(self):
-        scale = tf.convert_to_tensor(self.scale)
-        concentration = tf.convert_to_tensor(self.concentration)
-        exponent = tf.convert_to_tensor(self.exponent)
+        scale = jnp.asarray(self.scale)
+        concentration = jnp.asarray(self.concentration)
+        exponent = jnp.asarray(self.exponent)
         return (
-            tf.math.log(scale) + tf.math.lgamma(concentration/exponent)
-            - tf.math.log(exponent) + concentration/exponent
+            jnp.log(scale) + jax_special.gammaln(concentration/exponent)
+            - jnp.log(exponent) + concentration/exponent
             + (1.0 - concentration)/exponent *
-            tf.math.digamma(concentration/exponent)
+            jax_special.digamma(concentration/exponent)
         )
 
     def _stddev(self):
-        return tf.math.sqrt(self._variance())
+        return jnp.sqrt(self._variance())
 
     def _mode(self):
-        concentration = tf.convert_to_tensor(self.concentration)
-        exponent = tf.convert_to_tensor(self.exponent)
-        scale = tf.convert_to_tensor(self.scale)
-        mode = scale*tf.math.pow(
+        concentration = jnp.asarray(self.concentration)
+        exponent = jnp.asarray(self.exponent)
+        scale = jnp.asarray(self.scale)
+        mode = scale*jnp.power(
             (concentration - 1.)/exponent,
             1./exponent
         )
-        mode = tf.where(
+        mode = jnp.where(
             concentration > 1.,
             mode,
             jnp.zeros_like(mode)
@@ -162,43 +145,27 @@ class GeneralizedGamma(distribution.Distribution):
     def _default_event_space_bijector(self):
         return softplus_bijector.Softplus(validate_args=self.validate_args)
 
-    def _sample_control_dependencies(self, x):
-        assertions = []
-        if not self.validate_args:
-            return assertions
-        assertions.append(assert_util.assert_non_negative(
-            x, message='Sample must be non-negative.'))
-        return assertions
-
     @property
     def scale(self):
-        return self._scale
+        return self.parameters['scale']
 
     @property
     def concentration(self):
-        return self._concentration
+        return self.parameters['concentration']
 
     @property
     def exponent(self):
-        return self._exponent
-
-    def _batch_shape_tensor(self, scale=None, concentration=None, exponent=None):
-        return prefer_static.broadcast_shape(
-            prefer_static.shape(
-                self.scale if scale is None else scale),
-            prefer_static.shape(
-                self.concentration if concentration is None else concentration),
-            prefer_static.shape(
-                self.exponent if exponent is None else exponent))
+        return self.parameters['exponent']
 
     def _batch_shape(self):
-        return tf.broadcast_static_shape(
+        return jnp.broadcast_shapes(
             self.scale.shape,
             self.concentration.shape,
+            self.exponent.shape
         )
 
     def _event_shape_tensor(self):
-        return tf.constant([], dtype=tf.int32)
+        return jnp.array([], dtype=jnp.int32)
 
     def _sample_n(self, n, seed=None):
         """Sample based on transforming Gamma RVs
@@ -209,20 +176,19 @@ class GeneralizedGamma(distribution.Distribution):
         Returns:
           [type] -- [description]
         """
-        gamma_samples = tf.random.gamma(
-            shape=[n],
-            alpha=self.concentration/self.exponent,
-            beta=1.,
-            dtype=self.dtype,
-            seed=seed
+        gamma_samples = random.gamma(
+            key=seed,
+            a=self.concentration/self.exponent,
+            shape=(n,),
+            dtype=self.dtype
         )
         ggamma_samples = (
-            self.scale*tf.math.exp(tf.math.log(gamma_samples)/self.exponent)
+            self.scale*jnp.exp(jnp.log(gamma_samples)/self.exponent)
         )
         return ggamma_samples
 
     def _event_shape(self):
-        return tf.TensorShape([])
+        return ()
 
     def _sample_control_dependencies(self, x):
         assertions = []
@@ -253,80 +219,45 @@ class GeneralizedGamma(distribution.Distribution):
 
 @kullback_leibler.RegisterKL(GeneralizedGamma, GeneralizedGamma)
 def _kl_ggamma_ggamma(a, b, name=None):
-    """Calculate the batched KL divergence KL(a || b) with a and b GeneralizedGamma.
-    \begin{align}
-    D_{KL} (f_1 \parallel f_2) 
-    & = \int_{0}^{\infty} f_1(x; a_1, d_1, p_1) \, \ln \frac{f_1(x; a_1, d_1, p_1)}{f_2(x; a_2, d_2, p_2)} \, dx\\
-    & = \ln \frac{p_1 \, a_2^{d_2} \, \Gamma\left(d_2 / p_2\right)}{p_2 \, a_1^{d_1} \, \Gamma\left(d_1 /p_1\right)} 
-        + \left[ \frac{\psi\left( d_1 / p_1 \right)}{p_1} + \ln a_1 \right]  (d_1 - d_2) 
-        + \frac{\Gamma\bigl((d_1+p_2) / p_1 \bigr)}{\Gamma\left(d_1 / p_1\right)} \left( \frac{a_1}{a_2} \right)^{p_2} 
-        - \frac{d_1}{p_1}
-    \end{align}
-    Args:
-      a: instance of a GeneralizedGamma distribution object.
-      b: instance of a GeneralizedGamma distribution object.
-      name: (optional) Name to use for created operations. Default is
-        '_kl_ggamma_ggamma'.
+  """Calculate the batched KL divergence KL(a || b) with a and b GeneralizedGamma.
 
-    Returns:
-      Batchwise KL(a || b)
-    """
-    with tf.name_scope(name or '_kl_ggamma_ggamma'):
+  Args:
+    a: instance of a GeneralizedGamma distribution object.
+    b: instance of a GeneralizedGamma distribution object.
+    name: (optional) Name to use for created operations.
+      Default is '_kl_ggamma_ggamma'.
+
+  Returns:
+    Batchwise KL(a || b)
+
+  Raises:
+    TypeError: If `a` and `b` are not `GeneralizedGamma` distributions.
+
+  #### References
+  [1] C. Bauckhage and A. B. T. H. (2013). The Blitzstein-Diaconis-GAN-Estimator
+      for the KL-Divergence between two-parameter Gamma-Distributions.
+      arXiv:1310.3713 [cs.IT]
+  """
+  with tfp.util.name_scope(name or '_kl_ggamma_ggamma'):
         # Result from https://arxiv.org/pdf/1310.3713.pdf
-        a_concentration = tf.convert_to_tensor(a.concentration)
-        b_concentration = tf.convert_to_tensor(b.concentration)
-        a_scale = tf.convert_to_tensor(a.scale)
-        b_scale = tf.convert_to_tensor(b.scale)
-        a_exponent = tf.convert_to_tensor(a.exponent)
-        b_exponent = tf.convert_to_tensor(b.exponent)
+        a_concentration = jnp.asarray(a.concentration)
+        b_concentration = jnp.asarray(b.concentration)
+        a_scale = jnp.asarray(a.scale)
+        b_scale = jnp.asarray(b.scale)
+        a_exponent = jnp.asarray(a.exponent)
+        b_exponent = jnp.asarray(b.exponent)
 
         return (
-            tf.math.log(a_exponent) - tf.math.log(b_exponent)
-            + b_concentration*tf.math.log(b_scale) -
-            a_concentration*tf.math.log(a_scale)
-            + tf.math.lgamma(b_concentration/b_exponent) -
-            tf.math.lgamma(a_concentration/a_exponent)
-            + (a_concentration - b_concentration)*(tf.math.digamma(a_concentration /
-                                                                   a_exponent)/a_exponent + tf.math.log(a_scale))
-            + tf.math.exp(tf.math.lgamma(
+            jnp.log(a_exponent) - jnp.log(b_exponent)
+            + b_concentration*jnp.log(b_scale) -
+            a_concentration*jnp.log(a_scale)
+            + jax_special.gammaln(b_concentration/b_exponent) -
+            jax_special.gammaln(a_concentration/a_exponent)
+            + (a_concentration - b_concentration)*(jax_special.digamma(a_concentration /
+                                                                   a_exponent)/a_exponent + jnp.log(a_scale))
+            + jnp.exp(jax_special.gammaln(
                 (a_concentration + b_exponent)/a_exponent
-            )-tf.math.lgamma(a_concentration/a_exponent) * tf.math.pow(a_scale/b_scale, b_exponent))
+            )-jax_special.gammaln(a_concentration/a_exponent) * jnp.power(a_scale/b_scale, b_exponent))
             - a_concentration/a_exponent
         )
 
-
-
-class Weibull(GeneralizedGamma):
-    def __init__(self,
-                 scale, concentration,
-                 validate_args=False,
-                 allow_nan_stats=True,
-                 name='Weibull'):
-        parameters = dict(locals())
-        with tf.name_scope(name) as name:
-            dtype = dtype_util.common_dtype(
-                [scale, concentration], dtype_hint=tf.float32)
-            self._scale = tensor_util.convert_nonref_to_tensor(
-                scale, dtype=dtype, name='scale')
-            self._concentration = tensor_util.convert_nonref_to_tensor(
-                concentration, dtype=dtype, name='concentration')
-            self._exponent = tensor_util.convert_nonref_to_tensor(
-                concentration, dtype=dtype, name='exponent')
-
-            super(GeneralizedGamma, self).__init__(
-                dtype=dtype,
-                validate_args=validate_args,
-                allow_nan_stats=allow_nan_stats,
-                reparameterization_type=(
-                    reparameterization.FULLY_REPARAMETERIZED
-                ),
-                parameters=parameters,
-                name=name)
-
-    @property
-    def scale(self):
-        return self._scale
-
-    @property
-    def concentration(self):
-        return self._concentration
