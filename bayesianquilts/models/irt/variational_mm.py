@@ -221,6 +221,18 @@ class VariationalMMGradedResponseModel(BayesianModel):
         rest = jnp.cumsum(gaps, axis=-1)
         return jnp.concatenate([first, first + rest], axis=-1)
 
+    def transform(self, params):
+        """Transform parameters from surrogate space to model space."""
+        # Convert log_alpha -> alpha
+        if 'log_alpha' in params:
+             params['alpha'] = jnp.exp(params['log_alpha'])
+        
+        # Convert kappa_unconstrained -> kappa
+        if 'kappa_unconstrained' in params:
+             params['kappa'] = self.transform_kappa(params['kappa_unconstrained'])
+             
+        return params
+
     def unormalized_log_prob(self, data, prior_weight=1.0, **params):
         """
         Compute the unnormalized log probability (Joint Log-Likelihood).
@@ -248,22 +260,24 @@ class VariationalMMGradedResponseModel(BayesianModel):
         batch_kappa = jnp.take(kappa, data['item_id'], axis=-2)   # (..., B, K-1)
         
         # Calculate Graded Response Model Probabilities
-        # P(Y >= k) = sigmoid(alpha * (theta - kappa_k))
-        # GRM usually: a * (theta - b_k).
-        # Note dimensions: theta is (B, D), alpha is (B, D). vector product.
-        # Inner term: alpha * theta is (B, D) * (B, D) -> sum -> (B,).
-        # Multi-dimensional IRT: dot(alpha, theta).
+        # Default GRM: a * theta - d (slope-intercept)
+        # Requested: a * (theta - b) (slope-threshold)
+        # Multidimensional: sum_d(alpha_d * (theta_d - kappa_k))
         
-        interaction = jnp.sum(batch_theta * batch_alpha, axis=-1, keepdims=True) # (B, 1)
+        # Broadcasting:
+        # theta: (..., B, D, 1)
+        # kappa: (..., B, 1, K-1)
+        # alpha: (..., B, D, 1)
         
-        # We need logits for P(Y >= k).
-        # P(Y >= k) = sigmoid(interaction - batch_kappa_k)
-        # Note: batch_alpha is effectively a scaling factor on theta. 
-        # The threshold kappa is subtracted.
-        # Often it is D * (theta - b). Here we use D*theta - d.
-        # Let's stick to D*theta - kappa.
+        theta_exp = jnp.expand_dims(batch_theta, -1)
+        kappa_exp = jnp.expand_dims(batch_kappa, -2)
+        alpha_exp = jnp.expand_dims(batch_alpha, -1)
         
-        logits_cumulative = interaction - batch_kappa # (B, K-1)
+        # (..., B, D, K-1)
+        logits_d = alpha_exp * (theta_exp - kappa_exp)
+        
+        # Sum over D (axis -2) -> (..., B, K-1)
+        logits_cumulative = jnp.sum(logits_d, axis=-2)
         
         # Cumulative probabilities P(Y >= k)
         probs_cumulative = jax.nn.sigmoid(logits_cumulative)
@@ -336,8 +350,13 @@ class VariationalMMGradedResponseModel(BayesianModel):
         batch_alpha = jnp.take(alpha, data['item_id'], axis=-2)
         batch_kappa = jnp.take(kappa, data['item_id'], axis=-2)
         
-        interaction = jnp.sum(batch_theta * batch_alpha, axis=-1, keepdims=True)
-        logits_cumulative = interaction - batch_kappa
+        theta_exp = jnp.expand_dims(batch_theta, -1)
+        kappa_exp = jnp.expand_dims(batch_kappa, -2)
+        alpha_exp = jnp.expand_dims(batch_alpha, -1)
+        
+        logits_d = alpha_exp * (theta_exp - kappa_exp)
+        logits_cumulative = jnp.sum(logits_d, axis=-2)
+        
         probs_cumulative = jax.nn.sigmoid(logits_cumulative)
         
         target_shape = list(logits_cumulative.shape)

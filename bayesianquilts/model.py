@@ -155,8 +155,17 @@ class BayesianModel(nnx.Module, ABC):
 
     def set_calibration_expectations(self, samples: int = 24, variational: bool = True):
         if variational:
+            # Use current params to regenerate surrogate if possible, as self.surrogate_distribution relies on init
+            try:
+                if hasattr(self, 'surrogate_distribution_generator') and hasattr(self, 'params') and self.params is not None:
+                    dist = self.surrogate_distribution_generator(self.params)
+                else:
+                    dist = self.surrogate_distribution
+            except Exception:
+                dist = self.surrogate_distribution
+                
             mean, var = FactorizedDistributionMoments(
-                self.surrogate_distribution, samples=samples
+                dist, samples=samples
             )
             self.calibrated_expectations = {k: v for k, v in mean.items()}
             self.calibrated_sd = {k: jnp.sqrt(v) for k, v in var.items()}
