@@ -140,6 +140,23 @@ def ravel_broadcast_tile(
     return tensor_
 
 
+class Dimension(object):
+    """Stores metadata on a dimension in the multi-index."""
+
+    def __init__(self, name, cardinality, continuous=False, **kwargs):
+        self.name = name
+        if isinstance(cardinality, list):
+            self.cardinality = len(cardinality)
+            self.values = cardinality
+        else:
+            self.cardinality = cardinality
+            self.values = list(range(cardinality))
+        self.continuous = continuous
+
+    def __repr__(self):
+        return f"Dimension(name={self.name}, cardinality={self.cardinality})"
+
+
 class Interactions(object):
     """Manages interaction structure for decomposed parameters.
 
@@ -147,7 +164,7 @@ class Interactions(object):
     optional exclusions.
 
     Attributes:
-        _dimensions: List of (name, cardinality) tuples
+        _dimensions: List of Dimension objects
         _intrinsic_shape: Shape of the interaction tensor
         _exclusions: List of excluded interaction sets
     """
@@ -158,15 +175,10 @@ class Interactions(object):
         exclusions = [] if exclusions is None else exclusions
         dimensions = [] if dimensions is None else dimensions
 
-        self._dimensions = dimensions
-        self._intrinsic_shape = []
-
-        for x in self._dimensions:
-            try:
-                self._intrinsic_shape += [len(x[1])]
-            except TypeError:
-                self._intrinsic_shape += [x[1]]
-
+        self._dimensions = [
+            d if isinstance(d, Dimension) else Dimension(d[0], d[1]) for d in dimensions
+        ]
+        self._intrinsic_shape = [d.cardinality for d in self._dimensions]
         self._exclusions = [set(s) for s in exclusions]
         if len(self._intrinsic_shape) == 0:
             self._intrinsic_shape = [1]
@@ -201,7 +213,7 @@ class Interactions(object):
         """
         if len(self._dimensions) == 0:
             return jnp.array([0], dtype=jnp.int64)
-        indices = [jnp.asarray(data[k[0]], dtype=jnp.int64) for k in self._dimensions]
+        indices = [jnp.asarray(data[d.name], dtype=jnp.int64) for d in self._dimensions]
         return jnp.concatenate(indices, axis=-1)
 
     def truncate_to_order(self, max_order):
@@ -224,7 +236,7 @@ class Interactions(object):
         )
         exclusions = self._exclusions
         hot = [
-            set(d[0] for i, d in zip(ind, self._dimensions) if i == 1)
+            set(d.name for i, d in zip(ind, self._dimensions) if i == 1)
             for ind in onehot
         ]
         exclusions += hot
@@ -265,6 +277,8 @@ class Interactions(object):
         return Interactions(dimensions=res, exclusions=exclusions)
 
 
+import xarray as xr
+
 class Decomposed(object):
     """Decomposed parameter representation for hierarchical models.
 
@@ -303,6 +317,8 @@ class Decomposed(object):
         **kwargs,
     ) -> None:
         super().__init__()
+        if isinstance(interactions, list):
+            interactions = Interactions(dimensions=interactions)
         assert isinstance(
             interactions, Interactions
         ), "Instantiation requires a parameterization"
@@ -337,12 +353,10 @@ class Decomposed(object):
         Returns:
             Dictionary mapping tensor names to lists of labels
         """
-        dimension_dict = dict(self._interactions._dimensions)
+        dimension_dict = {d.name: d.values for d in self._interactions._dimensions}
         _dimension_labels = [
-            [f"{j}={t}" for t in dimension_dict[j]]
-            if isinstance(dimension_dict[j], list)
-            else [f"{j}={t}" for t in range(dimension_dict[j])]
-            for j in [x[0] for x in self._interactions._dimensions]
+            [f"{d.name}={t}" for t in d.values]
+            for d in self._interactions._dimensions
         ]
         _dimension_labels = [" & ".join(t) for t in product(*_dimension_labels)]
         labels = defaultdict(lambda: _dimension_labels)
@@ -351,10 +365,8 @@ class Decomposed(object):
             if len(v) == 0:
                 continue
             dimension_labels = [
-                [f"{j}={t}" for t in dimension_dict[j]]
-                if isinstance(dimension_dict[j], list)
-                else [f"{j}={t}" for t in range(dimension_dict[j])]
-                for j in v
+                [f"{d_name}={t}" for t in dimension_dict[d_name]]
+                for d_name in v
             ]
             dimension_labels = [" & ".join(t) for t in product(*dimension_labels)]
             labels[k] = dimension_labels
@@ -410,7 +422,7 @@ class Decomposed(object):
                     if n_tuple[j] == 1
                 ]
             )
-            interaction_vars = tuple([x[0] for x in interaction])
+            interaction_vars = tuple([x.name for x in interaction])
 
             # Skip excluded interactions
             if set(interaction_vars) in self._interactions._exclusions:
@@ -489,6 +501,76 @@ class Decomposed(object):
         """
         for k in scales.keys():
             self.scales[k] = scales[k]
+
+    def to_xarray(self, sample_dims=None):
+        """Export decomposed parameter to an xarray Dataset.
+
+        Args:
+            sample_dims: Optional dictionary of sample dimensions
+
+        Returns:
+            xarray.Dataset object
+        """
+        if sample_dims is None:
+            sample_dims = {}
+
+        data_vars = {}
+        for name, tensor in self._tensor_parts.items():
+            interaction_vars = self._tensor_part_interactions[name]
+            coords = {
+                **sample_dims,
+                **{d.name: d.values for d in self._interactions._dimensions if d.name in interaction_vars},
+            }
+            dims = list(coords.keys()) + [f"param_{i}" for i in range(len(self._param_shape))]
+            data_vars[name] = (dims, tensor)
+
+        coords = {**sample_dims, **{d.name: d.values for d in self._interactions._dimensions}}
+        return xr.Dataset(data_vars, coords=coords)
+
+    def to_netcdf(self, path, sample_dims=None):
+        """Serialize decomposed parameter to a NetCDF file.
+
+        Args:
+            path: Path to the output file
+            sample_dims: Optional dictionary of sample dimensions
+        """
+        ds = self.to_xarray(sample_dims=sample_dims)
+        ds.to_netcdf(path)
+
+    @classmethod
+    def from_netcdf(cls, path):
+        """Load a decomposed parameter from a NetCDF file.
+
+        Args:
+            path: Path to the input file
+
+        Returns:
+            New Decomposed object
+        """
+        ds = xr.open_dataset(path)
+        
+        # Infer interactions
+        dimensions = []
+        for d in ds.coords:
+            if not d.startswith("param_"):
+                dimensions.append(Dimension(d, ds.coords[d].values))
+        
+        interactions = Interactions(dimensions=dimensions)
+        
+        # Infer param_shape
+        param_shape = []
+        for var in ds.data_vars:
+            param_shape = ds[var].shape[len(ds.coords):]
+            break
+
+        # Create Decomposed object
+        decomposed = cls(interactions=interactions, param_shape=param_shape, name=ds.attrs.get("name", ""))
+        
+        # Set tensor parts
+        tensors = {name: da.values for name, da in ds.data_vars.items()}
+        decomposed.set_params(tensors)
+        
+        return decomposed
 
     def __add__(self, x):
         """Add to the constituted parameter."""
@@ -727,6 +809,7 @@ class Decomposed(object):
         return self._interactions.retrieve_indices(data)
 
 
+
 class MultiwayContingencyTable(object):
     """Multi-way contingency table for interaction analysis.
 
@@ -777,7 +860,7 @@ class MultiwayContingencyTable(object):
         if interaction is None:
             return np.sum(self.counts)
 
-        dims = [x[0] for x in self.interaction._dimensions]
+        dims = [x.name for x in self.interaction._dimensions]
         axes = [dims.index(d) for d in interaction]
         otheraxes = [
             d for d in range(len(self.interaction._dimensions)) if d not in axes
@@ -792,73 +875,3 @@ class MultiwayContingencyTable(object):
         counts = np.reshape(counts, counts.shape[: len(axes)])
         return counts
 
-
-def demo():
-    """Demonstration of parameter decomposition functionality."""
-    print("Running parameter decomposition demo...")
-    print("=" * 60)
-
-    # Example 1: Simple interaction
-    print("\nExample 1: Simple MDC interaction")
-    interact = Interactions(
-        [
-            ("MDC", 26), ("HxD1", 3), ("HxD2", 3),
-            ("HxD3", 3), ("HxD4", 3), ("HxD5", 3),
-            ("HxD6", 3)
-        ],
-        exclusions=[("HxD1",), ("HxD2",), ("HxD3",), ("HxD4",), ("HxD5",), ()]
-    )
-    p = Decomposed(interactions=interact, param_shape=[10], name="beta")
-
-    print(f"Interaction shape: {interact.shape()}")
-    print(f"Parameter shape: {p.shape()}")
-    print(f"Number of tensor parts: {len(p._tensor_parts)}")
-    print(f"Tensor keys: {p.tensor_keys()[:3]}...")  # Show first 3
-
-    # Example 2: Lookup with indices
-    print("\n" + "=" * 60)
-    print("Example 2: Looking up parameter values")
-    indices = [
-        [21, 1, 1, 1, 1, 2, 1],
-        [12, 1, 1, 1, 1, 2, 1],
-        [0, 1, 2, 1, 1, 2, 1],
-        [13, 1, 2, 1, 1, 2, 1],
-        [13, 2, 2, 1, 1, 2, 1]
-    ]
-
-    values = p.lookup(indices)
-    print(f"Looked up values shape: {values.shape}")
-    print(f"Values sample:\n{values[:3]}")
-
-    # Example 3: Batched tensors
-    print("\n" + "=" * 60)
-    print("Example 3: Batched parameter tensors")
-    batch_shape = [4]
-    tensors, names, shapes = p.generate_tensors(batch_shape=batch_shape)
-    print(f"Generated {len(tensors)} batched tensors")
-    print(f"Batch shape: {batch_shape}")
-    print(f"Example tensor shape: {list(tensors.values())[0].shape}")
-
-    p.set_params(tensors)
-    batched_values = p.lookup(indices)
-    print(f"Batched lookup shape: {batched_values.shape}")
-
-    # Example 4: Sum parts
-    print("\n" + "=" * 60)
-    print("Example 4: Summing parameter parts")
-    summed = p.sum_parts(unravel=True)
-    print(f"Summed parameter shape: {summed.shape}")
-    print(f"Expected shape: {batch_shape + p.shape()}")
-
-    print("\n" + "=" * 60)
-    print("Demo completed successfully!")
-    print("=" * 60)
-
-
-def main():
-    """Main demonstration function."""
-    demo()
-
-
-if __name__ == "__main__":
-    main()

@@ -1,42 +1,47 @@
 #!/usr/bin/env python3
-"""Sparse probabilistic gaussian matrix factorization using the horseshoe
+"""Mixed-type matrix factorization
 """
 
 
 import jax.numpy as jnp
+import numpy as np
+from typing import Dict, List, Optional, Union, Callable, Any
 from tensorflow_probability.substrates.jax import bijectors as tfb
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
+from bayesianquilts.model import BayesianModel
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 from bayesianquilts.predictors.factorization.poisson import FactorizationModel
 
 
-class GaussianFactorization(FactorizationModel):
-    """Sparse (horseshoe) gaussian matrix factorization
+class MixedFactorization(FactorizationModel):
+    """Sparse (horseshoe) mixed-type matrix factorization
     Arguments:
         object {[type]} -- [description]
     """
 
     def __init__(
         self,
-        latent_dim=None,
-        feature_dim=None,
-        u_tau_scale=0.01,
-        s_tau_scale=1.0,
-        sigma_scale=1.0,
-        symmetry_breaking_decay=0.99,
-        encoder_function=None,
-        decoder_function=None,
-        log_transform=False,
-        horshoe_plus=True,
-        column_norms=None,
-        count_key="counts",
-        dtype=jnp.float64,
+        likelihood_types: List[str],
+        latent_dim: Optional[int] = None,
+        feature_dim: Optional[int] = None,
+        u_tau_scale: float = 0.01,
+        s_tau_scale: float = 1.0,
+        sigma_scale: float = 1.0,
+        symmetry_breaking_decay: float = 0.99,
+        encoder_function: Optional[Callable] = None,
+        decoder_function: Optional[Callable] = None,
+        log_transform: bool = False,
+        horshoe_plus: bool = True,
+        column_norms: Optional[Any] = None,
+        count_key: str = "counts",
+        dtype: Any = jnp.float64,
         **kwargs,
     ):
         """Instantiate PMF object
         Keyword Arguments:
+            likelihood_types {List} -- List of likelihood types for each feature
             latent_dim {int]} -- P (default: {None})
             u_tau_scale {float} -- Global shrinkage scale on u (default: {1.})
             s_tau_scale {int} -- Global shrinkage scale on s (default: {1})
@@ -49,7 +54,7 @@ class GaussianFactorization(FactorizationModel):
             dtype {[type]} -- [description] (default: {jnp.float64})
         """
 
-        super(GaussianFactorization, self).__init__(
+        super(MixedFactorization, self).__init__(
             latent_dim=latent_dim,
             feature_dim=feature_dim,
             u_tau_scale=u_tau_scale,
@@ -64,40 +69,9 @@ class GaussianFactorization(FactorizationModel):
             dtype=dtype,
             **kwargs,
         )
+        self.likelihood_types = likelihood_types
         self.sigma_scale = sigma_scale
-
-    def log_likelihood_components(self, s, u, v, w, sigma, data, *args, **kwargs):
-        """Returns the log likelihood without summing along axes
-        Arguments:
-            s {jnp.ndarray} -- Samples of s
-            u {jnp.ndarray} -- Samples of u
-            v {jnp.ndarray} -- Samples of v
-            w {jnp.ndarray} -- Samples of w
-            sigma {jnp.ndarray} -- Samples of sigma
-        Keyword Arguments:
-            data {jnp.ndarray} -- Count matrix (default: {None})
-        Returns:
-            [jnp.ndarray] -- log likelihood in broadcasted shape
-        """
-
-        theta_u = self.encode(data[self.count_key], u, s)
-        phi = self.intercept_matrix(w, s)
-        B = self.decoding_matrix(v)
-
-        theta_beta = jnp.matmul(theta_u, B)
-        theta_beta = self.decoder_function(theta_beta)
-
-        loc = theta_beta + phi
-        rv_gaussian = tfd.Normal(loc=loc, scale=sigma)
-
-        return {
-            "log_likelihood": rv_gaussian.log_prob(
-                data[self.count_key].astype(self.dtype)
-            ),
-            "loc": loc,
-            "scale": sigma
-        }
-
+        
     def create_distributions(self):
         """Create distribution objects"""
         self.bijectors = {
@@ -109,8 +83,10 @@ class GaussianFactorization(FactorizationModel):
             "s_eta": tfb.Softplus(),
             "s_tau": tfb.Softplus(),
             "w": tfb.Identity(),
-            "sigma": tfb.Softplus(),
         }
+        if 'gaussian' in self.likelihood_types:
+            self.bijectors['sigma'] = tfb.Softplus()
+
         symmetry_breaking_decay = (
             self.symmetry_breaking_decay
             ** jnp.arange(self.latent_dim, dtype=self.dtype)[jnp.newaxis, ...]
@@ -137,15 +113,17 @@ class GaussianFactorization(FactorizationModel):
                 ),
                 reinterpreted_batch_ndims=2
             ),
-            "sigma": tfd.Independent(
-                tfd.HalfCauchy(
-                    loc=jnp.zeros((1, self.feature_dim), dtype=self.dtype),
-                    scale=jnp.ones(
-                        (1, self.feature_dim),
-                        dtype=self.dtype)*self.sigma_scale
-                ), reinterpreted_batch_ndims=2
-            ),
         }
+        if 'gaussian' in self.likelihood_types:
+            distribution_dict['sigma'] = tfd.Independent(
+                tfd.HalfCauchy(
+                    loc=jnp.zeros(self.feature_dim, dtype=self.dtype),
+                    scale=jnp.ones(
+                        self.feature_dim,
+                        dtype=self.dtype)*self.sigma_scale
+                ), reinterpreted_batch_ndims=1
+            )
+
         if self.horseshoe_plus:
             distribution_dict = {
                 **distribution_dict,
@@ -320,3 +298,56 @@ class GaussianFactorization(FactorizationModel):
             )
         )
         self.params = self.surrogate_parameter_initializer()
+
+    def log_likelihood_components(
+        self,
+        s: Any,
+        u: Any,
+        v: Any,
+        w: Any,
+        data: Dict[str, Any],
+        *args,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Returns the log likelihood without summing along axes
+        Arguments:
+            s {jnp.ndarray} -- Samples of s
+            u {jnp.ndarray} -- Samples of u
+            v {jnp.ndarray} -- Samples of v
+            w {jnp.ndarray} -- Samples of w
+        Keyword Arguments:
+            data {jnp.ndarray} -- Count matrix (default: {None})
+        Returns:
+            [jnp.ndarray] -- log likelihood in broadcasted shape
+        """
+
+        theta_u = self.encode(data[self.count_key], u, s)
+        phi = self.intercept_matrix(w, s)
+        B = self.decoding_matrix(v)
+
+        theta_beta = jnp.matmul(theta_u, B)
+        theta_beta = self.decoder_function(theta_beta)
+
+        loc = theta_beta + phi
+        
+        log_likelihoods = []
+        for i, likelihood_type in enumerate(self.likelihood_types):
+            if likelihood_type == 'poisson':
+                rv = tfd.Poisson(rate=loc[..., i])
+                ll = rv.log_prob(data[self.count_key][..., i].astype(self.dtype))
+            elif likelihood_type == 'bernoulli':
+                rv = tfd.Bernoulli(logits=loc[..., i])
+                ll = rv.log_prob(data[self.count_key][..., i].astype(self.dtype))
+            elif likelihood_type == 'gaussian':
+                sigma = kwargs['sigma']
+                rv = tfd.Normal(loc=loc[..., i], scale=sigma[..., i])
+                ll = rv.log_prob(data[self.count_key][..., i].astype(self.dtype))
+            else:
+                raise ValueError(f"Unknown likelihood type: {likelihood_type}")
+            
+            log_likelihoods.append(ll)
+
+        return {
+            "log_likelihood": jnp.stack(log_likelihoods, axis=-1),
+            "loc": loc,
+        }

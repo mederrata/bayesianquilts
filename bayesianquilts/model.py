@@ -15,13 +15,29 @@ from jax import random
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
-from bayesianquilts.distributions import FactorizedDistributionMoments
 from bayesianquilts.jax.parameter import Interactions
 from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 
+def FactorizedDistributionMoments(dist, samples=100):
+    try:
+        # Try analytical moments
+        mean = dist.mean()
+        var = dist.variance()
+        return mean, var
+    except Exception:
+        # Fallback to sampling
+        s = dist.sample(samples)
+        if isinstance(s, dict):
+            mean = {k: jnp.mean(v, axis=0) for k, v in s.items()}
+            var = {k: jnp.var(v, axis=0) for k, v in s.items()}
+        else:
+            mean = jnp.mean(s, axis=0)
+            var = jnp.var(s, axis=0)
+        return mean, var
 
-class BayesianModel(ABC, nnx.Module):
+
+class BayesianModel(nnx.Module, ABC):
     surrogate_distribution = None
     surrogate_sample = None
     prior_distribution = None
