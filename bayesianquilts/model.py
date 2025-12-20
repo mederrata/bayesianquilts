@@ -104,6 +104,7 @@ class BayesianModel(nnx.Module, ABC):
         patience: int = 3,
         initial_values: Dict[str, jax.typing.ArrayLike] | None = None,
         unormalized_log_prob_fn: Callable | None = None,
+        verbose: bool = True,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -145,6 +146,7 @@ class BayesianModel(nnx.Module, ABC):
                 num_epochs=num_epochs,
                 accumulation_steps=accumulation_steps,
                 data_iterator=batched_data_factory,
+                verbose=verbose,
                 **kwargs,
             )
             return losses
