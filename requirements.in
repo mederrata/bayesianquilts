@@ -1,6 +1,6 @@
 optax
 flax
-tensorflow-probability
+tfp-nightly[jax]
 jax
 tqdm
 pandas
