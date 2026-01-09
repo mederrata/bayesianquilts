@@ -128,6 +128,7 @@ def training_loop(
     clip_norm: float | None = None,
     nan_recovery_strategy: str = "adaptive",
     max_nan_recoveries: int = 10,
+    verbose: bool = True,
 ):
     """
     Advanced training loop with checkpointing, early stopping, LR decay on plateau,
@@ -168,6 +169,8 @@ def training_loop(
         "reset_to_best", "partial_reset", "gaussian_noise" (default: "adaptive")
     max_nan_recoveries : int, optional
         Maximum number of NaN recovery attempts before stopping (default: 10)
+    verbose : bool, optional
+        Whether to print progress and logs (default: True)
 
     Returns
     -------
@@ -218,13 +221,14 @@ def training_loop(
         ocp.test_utils.erase_and_create_empty(checkpoint_dir)
         checkpointer = ocp.Checkpointer(ocp.CompositeCheckpointHandler())
 
-    print("--- Starting Training ---")
-    print(f"Patience for early stopping: {patience} epochs")
-    print(f"LR decay factor on plateau: {lr_decay_factor}")
-    print(f"Convergence will be checked every: {check_convergence_every} epoch(s)")
-    print(f"Checkpoints will be saved to: {checkpoint_dir}")
-    print(f"Optimizing keys: {optimize_keys}")
-    print("-------------------------")
+    if verbose:
+        print("--- Starting Training ---")
+        print(f"Patience for early stopping: {patience} epochs")
+        print(f"LR decay factor on plateau: {lr_decay_factor}")
+        print(f"Convergence will be checked every: {check_convergence_every} epoch(s)")
+        print(f"Checkpoints will be saved to: {checkpoint_dir}")
+        print(f"Optimizing keys: {optimize_keys}")
+        print("-------------------------")
     params = dict(initial_values)
     # 3. Main training loop
     train_step_fn = mk_train_step_fn(optimizer)
@@ -242,6 +246,7 @@ def training_loop(
                 desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})",
                 unit="batch",
                 leave=False,
+                disable=not verbose,
             ) as pbar:
                 for _ in pbar:
                     try:
@@ -300,8 +305,9 @@ def training_loop(
                                 jnp.zeros_like, unfreeze(filter_params(params))
                             )
 
-                            print(f"   -> Reduced learning rate to: {current_lr:.6f}")
-                            print(f"   -> Reinitialized optimizer and gradient accumulator")
+                            if verbose:
+                                print(f"   -> Reduced learning rate to: {current_lr:.6f}")
+                                print(f"   -> Reinitialized optimizer and gradient accumulator")
                             continue
 
                         # Normal processing - no NaN/Inf detected
@@ -333,7 +339,7 @@ def training_loop(
                         )
                     except KeyboardInterrupt:
                         print("\nTraining interrupted by user.")
-                        return epoch_losses, params
+                        raise
             avg_epoch_loss = epoch_loss / steps_per_epoch
             epoch_losses += [avg_epoch_loss]
             # 4. Check for improvement, save checkpoints, and decay LR
@@ -356,12 +362,14 @@ def training_loop(
                             f"{checkpoint_dir}/best_model_{epoch}",
                             args=ocp.args.Composite(state=ocp.args.StandardSave(ckpt)),
                         )
-                    print(f"  -> New best loss found. Checkpoint saved.                    ")
+                    if verbose:
+                         print(f"  -> New best loss found. Checkpoint saved.                    ")
                 else:
                     checks_no_improve += 1
-                    print(
-                        f"  -> No improvement in loss for {checks_no_improve} check(s).                    "
-                    )
+                    if verbose:
+                        print(
+                            f"  -> No improvement in loss for {checks_no_improve} check(s).                    "
+                        )
                     # Decay learning rate
                     current_lr *= lr_decay_factor
                     base_optimizer = base_optimizer_fn(current_lr)
@@ -375,23 +383,26 @@ def training_loop(
                     opt_state = optimizer.init(
                         filter_params(params)
                     )  # Re-initialize optimizer state with new LR
-                    print(f"  -> Decaying learning rate to: {current_lr:.6f}")
+                    if verbose:
+                        print(f"  -> Decaying learning rate to: {current_lr:.6f}")
 
                 # 5. Early stopping check
                 if checks_no_improve >= patience:
-                    print(
-                        f"\nEarly stopping triggered after {patience} epochs with no improvement."
-                    )
+                    if verbose:
+                        print(
+                            f"\nEarly stopping triggered after {patience} epochs with no improvement."
+                        )
                     break
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")
         print(f"Completed {len(epoch_losses)} epochs before interruption.")
-        return epoch_losses, params
+        raise
 
-    print("\n--- Training Finished ---")
-    if nan_recovery_count > 0:
-        print(f"NaN/Inf recovery was triggered {nan_recovery_count} times during training.")
+    if verbose:
+        print("\n--- Training Finished ---")
+        if nan_recovery_count > 0:
+            print(f"NaN/Inf recovery was triggered {nan_recovery_count} times during training.")
 
     # 6. Restore from best snapshot if needed
     if checkpoint_dir is not None:
