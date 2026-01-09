@@ -11,15 +11,14 @@ nest_asyncio.apply()
 
 import importlib
 
-import tensorflow as tf
-import tensorflow_probability as tfp
+import jax.numpy as jnp
 
 # %%
 
 
 
 # %%
-print(tf.__version__, tfp.__version__)
+
 
 # %%
 logistic_horseshoe_code = """
@@ -131,19 +130,6 @@ sm = CmdStanModel(stan_file="/tmp/ovarian_model.stan")
 for i in tqdm(range(n)):
     y_ = y.drop(i)
     X_ = X_scaled.drop(i)
-    _tfdata = tf.data.Dataset.from_tensor_slices({'X': X_scaled.drop(i), 'y':y.drop(i)})
-
-    def _data_factory_factory(batch_size=batch_size, repeat=False, shuffle=False):
-        def _data_factory(batch_size=batch_size):
-            if shuffle:
-                out = _tfdata.shuffle(batch_size*10)
-            else:
-                out = _tfdata
-            
-            if repeat:
-                out = out.repeat()
-            return out.batch(batch_size)
-        return _data_factory
     
     _ovarian_data = {
         "N": n,
@@ -172,10 +158,10 @@ for i in tqdm(range(n)):
     
     params = fit.stan_variables()
     params.keys()
-    params['c'] = params['c'][:, tf.newaxis]
-    params['tau'] = params['tau'][:, tf.newaxis]
-    params['caux'] = params['caux'][:, tf.newaxis]
-    params['beta0'] = params['beta0'][:, tf.newaxis]
+    params['c'] = params['c'][:, jnp.newaxis]
+    params['tau'] = params['tau'][:, jnp.newaxis]
+    params['caux'] = params['caux'][:, jnp.newaxis]
+    params['beta0'] = params['beta0'][:, jnp.newaxis]
     
     np.save(f'/tmp/ovarian_loo_{i}.npy', params)
 
