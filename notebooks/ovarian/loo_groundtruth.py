@@ -1,6 +1,6 @@
 
 import json
-
+import os
 import nest_asyncio
 import numpy as np
 import pandas as pd
@@ -13,14 +13,6 @@ import importlib
 
 import jax.numpy as jnp
 
-# %%
-
-
-
-# %%
-
-
-# %%
 logistic_horseshoe_code = """
 data {
   int <lower=0> N;                // number  of  observations
@@ -75,14 +67,19 @@ generated quantities {
 }
 """
 
-with open("/tmp/ovarian_model.stan", 'w') as f:
+try:
+  os.makedirs("/tmp/ovarian")
+except:
+  pass
+with open("/tmp/ovarian/ovarian_model.stan", 'w') as f:
   f.writelines(logistic_horseshoe_code)
 
 
-# %%
+with importlib.resources.path('bayesianquilts.data',   "overianx.csv") as xpath:
+  X = pd.read_csv(xpath, header=None)
+with importlib.resources.path('bayesianquilts.data',   "overiany.csv") as ypath:
+  y = pd.read_csv(ypath, header=None)
 
-X = pd.read_csv(f"{importlib.resources.path('bayesianquilts', 'data')}/overianx.csv", header=None)
-y = pd.read_csv(f"{importlib.resources.path('bayesianquilts', 'data')}/overiany.csv", header=None)
 batch_size = 6
 
 X_scaled = (X - X.mean())/X.std()
@@ -92,26 +89,6 @@ p = X_scaled.shape[1]
 
 print((n, p))
 
-
-# %%
-
-
-tfdata = tf.data.Dataset.from_tensor_slices({'X': X_scaled, 'y':y})
-
-def data_factory_factory(batch_size=batch_size, repeat=False, shuffle=False):
-    def data_factory(batch_size=batch_size):
-        if shuffle:
-            out = tfdata.shuffle(batch_size*10)
-        else:
-            out = tfdata
-        
-        if repeat:
-            out = out.repeat()
-        return out.batch(batch_size)
-    return data_factory
-
-# %%
-
 guessnumrelevcov = n / 10  # 20.
 slab_scale = 2.5
 scale_icept = 5.0
@@ -120,13 +97,11 @@ nu_local = 1
 slab_df = 1
 scale_global = guessnumrelevcov / ((p - guessnumrelevcov) * np.sqrt(n))
 
-control = {"adapt_delta": 0.9999, "max_treedepth": 15}
+control = {"adapt_delta": 0.999, "max_treedepth": 14}
 
 
-# %%
-sm = CmdStanModel(stan_file="/tmp/ovarian_model.stan")
+sm = CmdStanModel(stan_file="/tmp/ovarian/ovarian_model.stan")
 
-# %%
 for i in tqdm(range(n)):
     y_ = y.drop(i)
     X_ = X_scaled.drop(i)
@@ -144,11 +119,11 @@ for i in tqdm(range(n)):
         "x": X_.to_numpy().tolist(),
     }
     
-    with open("/tmp/_ovarian_data.json", "w") as f:
+    with open(f"/tmp/ovarian/_ovarian_data_{i}.json", "w") as f:
         json.dump(_ovarian_data, f)
         
     fit = sm.sample(
-        data="/tmp/_ovarian_data.json",
+        data=f"/tmp/ovarian/_ovarian_data_{i}.json",
         iter_warmup=20000,
         iter_sampling=2000,
         thin=2,
@@ -163,6 +138,6 @@ for i in tqdm(range(n)):
     params['caux'] = params['caux'][:, jnp.newaxis]
     params['beta0'] = params['beta0'][:, jnp.newaxis]
     
-    np.save(f'/tmp/ovarian_loo_{i}.npy', params)
+    np.save(f'/tmp/ovarian/ovarian_loo_{i}.npy', params)
 
 
