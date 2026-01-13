@@ -17,8 +17,8 @@ logistic_horseshoe_code = """
 data {
   int <lower=0> N;                // number  of  observations
   int <lower=0> d;                // number  of  predictors
-  array[N-1] int<lower=0,upper=1> y;      // outputs
-  matrix[N-1,d] x;                  // inputs
+  array[N] int<lower=0,upper=1> y;      // outputs
+  matrix[N,d] x;                  // inputs
   real <lower=0>  scale_icept;    // prior  std for  the  intercept
   real <lower=0>  scale_global;   // scale  for  the half -t prior  for  tau
   real <lower=1>  nu_global;      // degrees  of  freedom  for the half -t prior for tau
@@ -41,7 +41,7 @@ transformed  parameters {
   vector <lower =0>[d] lambda_tilde;    // ’truncated ’ local  shrinkage  parameter
   real <lower=0> c;                     // slab  scale
   vector[d] beta;                       // regression  coefficients
-  vector[N-1] f;                          // latent  function  values
+  vector[N] f;                          // latent  function  values
   c = slab_scale * sqrt(caux);
   lambda_tilde = sqrt( c^2 * square(lambda) ./ (c^2 + tau^2* square(lambda )) );
   beta = z .*  lambda_tilde*tau;
@@ -56,10 +56,10 @@ model {
   y ~ bernoulli_logit(f);
 }
 generated quantities {
-  vector[N-1] log_lik;
+  vector[N] log_lik;
   // vector[N_tilde] loo_log_lik;
 
-  for (nn in 1:(N-1))
+  for (nn in 1:(N))
     log_lik[nn] = bernoulli_logit_lpmf(y[nn] | x[nn] * beta + beta0);
 
   //for (nn in 1:N_tilde)
@@ -102,12 +102,16 @@ control = {"adapt_delta": 0.999, "max_treedepth": 14}
 
 sm = CmdStanModel(stan_file="/tmp/ovarian/ovarian_model.stan")
 
-for i in tqdm(range(n)):
-    y_ = y.drop(i)
-    X_ = X_scaled.drop(i)
+for i in tqdm(range(n+1)):
+    if i == 0:
+      y_ = y.copy()
+      X_ = X_scaled.copy()
+    else:
+      y_ = y.drop(i-1)
+      X_ = X_scaled.drop(i-1)
     
     _ovarian_data = {
-        "N": n,
+        "N": len(y_),
         "d": p,
         "slab_df": slab_df,
         "slab_scale": slab_scale,
