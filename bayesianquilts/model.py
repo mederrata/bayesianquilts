@@ -2,7 +2,7 @@ import gzip
 import inspect
 import pathlib
 from abc import ABC, abstractmethod
-from typing import Callable, Dict
+from typing import Any, Callable, Dict
 
 import dill
 import jax
@@ -18,7 +18,7 @@ from tqdm import tqdm
 from bayesianquilts.jax.parameter import Interactions
 from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
-import bayesianquilts.util.tfp_patch
+import bayesianquilts.tfp_patch
 
 def FactorizedDistributionMoments(dist, samples=100):
     try:
@@ -39,13 +39,13 @@ def FactorizedDistributionMoments(dist, samples=100):
 
 
 class BayesianModel(nnx.Module, ABC):
-    surrogate_distribution = None
-    surrogate_sample = None
-    prior_distribution = None
-    data = None
-    data_cardinality = None
-    var_list = []
-    bijectors = []
+    surrogate_distribution: Any = nnx.Variable(None)
+    surrogate_sample: Any = nnx.Variable(None)
+    prior_distribution: Any = nnx.Variable(None)
+    data: Any = nnx.Variable(None)
+    data_cardinality: Any = nnx.Variable(None)
+    var_list: list = []
+    bijectors: list = []
 
     def __init__(
         self,
