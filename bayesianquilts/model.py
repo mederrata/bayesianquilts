@@ -18,6 +18,7 @@ from tqdm import tqdm
 from bayesianquilts.jax.parameter import Interactions
 from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
+import bayesianquilts.util.tfp_patch
 
 def FactorizedDistributionMoments(dist, samples=100):
     try:
