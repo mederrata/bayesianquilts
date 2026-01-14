@@ -373,12 +373,18 @@ class AdaptiveImportanceSampler:
         Q = -log_ell_prime  # Shape: (n_samples, n_data, n_params)
 
         # Standardize the direction
-        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, :]
-        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=-1)  # (n_samples, n_data)
-        Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)  # (1, n_data)
+        # Standardize the direction
+        pad_dims = Q.ndim - 2 - theta_std.ndim
+        theta_std_expanded = theta_std[jnp.newaxis, jnp.newaxis, ...]
+        
+        Q_standardized = Q / theta_std_expanded
+        
+        reduction_axes = tuple(range(2, Q_standardized.ndim))
+        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=reduction_axes, keepdims=True)
+        Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)  # (1, n_data, 1, 1...)
 
         # Compute step size
-        h = hbar / Q_norm[..., jnp.newaxis]  # (1, n_data, 1)
+        h = hbar / Q_norm
 
         # Apply transformation
         theta_expanded = theta[:, jnp.newaxis, :]  # (n_samples, 1, n_params)
@@ -447,21 +453,40 @@ class AdaptiveImportanceSampler:
                                log_ell_original: jnp.ndarray = None,
                                **kwargs) -> Dict[str, Any]:
         """KL divergence based transformation T_kl."""
+        
+        if variational and self.surrogate_log_prob_fn is not None:
+             raise NotImplementedError("Variational AIS-KL not implemented yet")
 
-        # This is a more complex transformation that uses the posterior weights
+        # This is a complex transformation
         log_pi_normalized = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
-
-        # The direction involves weighted likelihood gradients
-        # This is a simplified version - the full implementation would be more complex
-        weights = jnp.exp(log_pi_normalized)[:, jnp.newaxis]
-        Q = -log_ell_prime * weights[..., jnp.newaxis]
-
-        # Standardize and compute step size (similar to likelihood descent)
-        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, :]
-        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=-1)
+        # log_pi (S,) or (S, 1) -> weights (S, 1)
+        weights = jnp.exp(log_pi_normalized).reshape(log_pi.shape[0], 1)
+        
+        # Expand weights to match log_ell_prime rank (S, N, P...)
+        # We want weights to be (S, 1, 1...)
+        while weights.ndim < log_ell_prime.ndim:
+            weights = weights[..., jnp.newaxis]
+            
+        Q = -log_ell_prime * weights
+        
+        # Standardize using theta_std
+        # theta_std (P...) -> (1, 1, P...)
+        pad_dims = Q.ndim - 2 - theta_std.ndim
+        # If theta_std matches P dimensions exactly, pad_dims=0. 
+        # But we need (1, 1) prefix.
+        theta_std_expanded = theta_std[jnp.newaxis, jnp.newaxis, ...]
+        
+        Q_standardized = Q / theta_std_expanded
+        
+        # Reduce over all parameter dimensions (axes 2+) to get scalar h per (S, N)
+        reduction_axes = tuple(range(2, Q_standardized.ndim))
+        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=reduction_axes, keepdims=True)
+        # Reduce over samples (axis 0) ?? Logic says 'axis=0' in original code.
+        # Original: Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)
+        # We'll keep that generic normalization across samples.
         Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)
 
-        h = hbar / Q_norm[..., jnp.newaxis]
+        h = hbar / Q_norm
         theta_new = theta[:, jnp.newaxis, :] + h * Q
 
         log_jacobian = jnp.zeros((theta.shape[0], log_ell.shape[1]))
@@ -479,6 +504,8 @@ class AdaptiveImportanceSampler:
                         params_new[key],
                         params_new_i[key][:, jnp.newaxis, ...]
                     ], axis=1)
+        
+
 
         # Compute importance weights and return results
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
@@ -526,16 +553,21 @@ class AdaptiveImportanceSampler:
         # Use Hessian information for the transformation direction
         # This is simplified - full implementation would use second-order information
         log_pi_normalized = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
-        weights = jnp.exp(log_pi_normalized)[:, jnp.newaxis]
+        weights = jnp.exp(log_pi_normalized).reshape(log_pi.shape[0], 1)
+        
+        while weights.ndim < log_ell_prime.ndim:
+            weights = weights[..., jnp.newaxis]
 
         # Direction based on curvature information
-        Q = -log_ell_prime * weights[..., jnp.newaxis] * jnp.abs(log_ell_doubleprime)
+        Q = -log_ell_prime * weights * jnp.abs(log_ell_doubleprime)
 
-        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, :]
-        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=-1)
+        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, ...]
+        
+        reduction_axes = tuple(range(2, Q_standardized.ndim))
+        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=reduction_axes, keepdims=True)
         Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)
 
-        h = hbar / Q_norm[..., jnp.newaxis]
+        h = hbar / Q_norm
         theta_new = theta[:, jnp.newaxis, :] + h * Q
 
         log_jacobian = jnp.zeros((theta.shape[0], log_ell.shape[1]))
@@ -682,20 +714,28 @@ class AdaptiveImportanceSampler:
                 var_w = jnp.sum(w_norm * (v_expanded - mean_expanded_w)**2, axis=0)
                 var = jnp.mean((value - mean)**2, axis=0)
                 
-            else: # Shape S x K
-                # Broadcast weights to S x N x 1
-                w_expanded = w_norm[..., jnp.newaxis] 
+            else: # Shape S x K or S x P1 x P2...
+                # Broadcast weights to matches value dimensions
+                # value: (S, P...) -> v_expanded (S, 1, P...)
+                v_expanded = value[:, jnp.newaxis, ...]
                 
-                # Broadcast value to S x 1 x K
-                v_expanded = value[:, jnp.newaxis, :]
+                # w_norm: (S, N) -> w_expanded (S, N, 1...) to match v_expanded rank
+                w_expanded = w_norm
+                while w_expanded.ndim < v_expanded.ndim:
+                    w_expanded = w_expanded[..., jnp.newaxis]
                 
-                # Weighted mean: sum(w * v, axis=0) -> N x K
+                # Weighted mean: sum(w * v, axis=0) -> N x P...
                 mean_w = jnp.sum(w_expanded * v_expanded, axis=0)
-                mean = jnp.mean(value, axis=0) # K
+                mean = jnp.mean(value, axis=0) # P...
                 
-                # Weighted variance: sum(w * (v - mean)^2, axis=0) -> N x K
+                # Weighted variance: sum(w * (v - mean)^2, axis=0) -> N x P...
+                # Note: mean_w is (N, P...), v_expanded is (S, 1, P...)
+                # Broadcasting (S, 1, P...) with (N, P...) -> (S, N, P...)
                 var_w = jnp.sum(w_expanded * (v_expanded - mean_w)**2, axis=0)
-                var = jnp.mean((value - mean[jnp.newaxis, :])**2, axis=0)
+                
+                # Unweighted variance
+                # mean is (P...). value is (S, P...). Broadcasts fine.
+                var = jnp.mean((value - mean)**2, axis=0)
             
             moments[name] = {
                 'mean': mean,
@@ -815,8 +855,9 @@ class AdaptiveImportanceSampler:
                 new_value = term1 + m['mean_w'][jnp.newaxis, :, :]
                 new_params[name] = new_value
                 
-                # Log Jacobian: sum over K dimensions
-                log_det_jac += jnp.sum(jnp.log(ratio), axis=-1)[jnp.newaxis, :]
+                # Log Jacobian: sum over parameter dimensions
+                reduction_axes = tuple(range(1, ratio.ndim))
+                log_det_jac += jnp.sum(jnp.log(ratio), axis=reduction_axes)[jnp.newaxis, :]
                 
         log_jacobian = log_det_jac
         
@@ -952,8 +993,9 @@ class AdaptiveImportanceSampler:
                 
                 new_params[name] = value[:, jnp.newaxis, :] * scale[jnp.newaxis, :, :] + shift[jnp.newaxis, :, :]
                 
-                # Jacobian: sum(log(scale))
-                log_det_jac += jnp.sum(jnp.log(jnp.abs(scale)), axis=-1)[jnp.newaxis, :]
+                # Jacobian: sum(log(scale)) over parameter dimensions
+                reduction_axes = tuple(range(1, scale.ndim))
+                log_det_jac += jnp.sum(jnp.log(jnp.abs(scale)), axis=reduction_axes)[jnp.newaxis, :]
                 
         log_jacobian = log_det_jac
         
