@@ -445,6 +445,7 @@ class BayesianModel(nnx.Module, ABC):
         max_tree_depth: int = 10,
         step_size: float = 0.1,
         init_strategy: str = "prior",
+        initial_states: Dict[str, jnp.ndarray] = None,  # NEW: accept custom initial states
         seed: int = None,
         verbose: bool = True,
         **kwargs,
@@ -459,10 +460,12 @@ class BayesianModel(nnx.Module, ABC):
             num_warmup: Number of warmup/burn-in steps per chain (Stan default: 1000)
             num_samples: Number of post-warmup samples per chain (Stan default: 1000)
             target_accept_prob: Target acceptance probability for dual averaging
-                (Stan's adapt_delta, default: 0.8, increase to 0.9-0.99 for difficult posteriors)
+                (Stan's adapt_delta, default: 0.8, increase to 0.85-0.99 for difficult posteriors)
             max_tree_depth: Maximum tree depth for NUTS (Stan default: 10)
             step_size: Initial step size for HMC/NUTS (will be adapted during warmup)
-            init_strategy: How to initialize chains - "prior" or "zero"
+            init_strategy: How to initialize chains - "prior" or "zero" (ignored if initial_states provided)
+            initial_states: Optional dict with custom initial states of shape (num_chains, ...)
+                If provided, overrides init_strategy. Useful for MAP-based initialization.
             seed: Random seed (uses random seed if None)
             verbose: Whether to print progress information
 
@@ -485,9 +488,13 @@ class BayesianModel(nnx.Module, ABC):
 
         # Initialize chains
         key, init_key = random.split(key)
-        initial_states = self._create_initial_states(
-            num_chains, init_strategy, init_key
-        )
+        if initial_states is None:
+            initial_states = self._create_initial_states(
+                num_chains, init_strategy, init_key
+            )
+        else:
+            if verbose:
+                print("  Using custom initial states")
 
         # Run MCMC for each chain
         all_samples = {var: [] for var in self.var_list}
@@ -646,9 +653,10 @@ class BayesianModel(nnx.Module, ABC):
         )
 
         # Wrap with dual averaging step size adaptation
+        # Adapt for full warmup period for better convergence (was 80%)
         adaptive_kernel = tfmcmc.DualAveragingStepSizeAdaptation(
             inner_kernel=nuts_kernel,
-            num_adaptation_steps=int(num_warmup * 0.8),  # Adapt for 80% of warmup
+            num_adaptation_steps=num_warmup,
             target_accept_prob=target_accept_prob,
         )
 
