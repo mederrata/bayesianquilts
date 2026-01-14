@@ -27,16 +27,18 @@ Available models:
 """
 
 from bayesianquilts.predictors.regression.hierarchical_attention import (
-    HierarchicalAttention,
+    HierarchicalAttentionRegression as HierarchicalAttention,
 )
 from bayesianquilts.predictors.regression.linear_bayesianquilt import (
     LinearBayesianquilt,
 )
 from bayesianquilts.predictors.regression.linear_regression import LinearRegression
 from bayesianquilts.predictors.regression.linear_regression_reparam import (
-    LinearRegressionReparam,
+    LinearRegression2 as LinearRegressionReparam,
 )
-from bayesianquilts.predictors.regression.linear_ridge import LinearRidge
+from bayesianquilts.predictors.regression.linear_ridge import (
+    LinearRidgeRegression as LinearRidge,
+)
 from bayesianquilts.predictors.regression.regression_bayesianquilt import (
     RegressionBayesianquilt,
 )
@@ -48,6 +50,7 @@ from bayesianquilts.predictors.regression.regression_relunet import (
     RegressionRelunet,
     ShallowGaussianRegressionRelunet,
 )
+from bayesianquilts.predictors.regression.poisson import PoissonRegression
 
 __all__ = [
     # Linear models
@@ -64,4 +67,5 @@ __all__ = [
     "RegressionBayesianquilt",
     # Other
     "HierarchicalAttention",
+    "PoissonRegression",
 ]
