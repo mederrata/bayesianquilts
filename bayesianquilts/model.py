@@ -434,13 +434,26 @@ class BayesianModel(nnx.Module, ABC):
                 verbose=verbose,
             )
 
-            # Store results
+            # Store results if chain is healthy
+            if accept_ratio > 1e-6:
+                for var, sample in zip(self.var_list, samples):
+                    all_samples[var].append(sample)
+                all_accept_ratios.append(accept_ratio)
+            else:
+                if verbose:
+                    print(f"  Chain {chain_idx + 1} discarded (acceptance ratio {accept_ratio:.3e} too low)")
+
+        # Stack chains: (num_valid_chains, num_samples, ...)
+        result = {}
+        num_valid_chains = len(all_accept_ratios)
+        
+        if num_valid_chains == 0:
+            print("WARNING: All chains failed to converge (zero acceptance). Returning last chain to avoid crash.")
+            # Fallback: keep the last chain even if bad so we have structure
             for var, sample in zip(self.var_list, samples):
                 all_samples[var].append(sample)
             all_accept_ratios.append(accept_ratio)
 
-        # Stack chains: (num_chains, num_samples, ...)
-        result = {}
         for var in self.var_list:
             result[var] = jnp.stack(all_samples[var], axis=0)
 
