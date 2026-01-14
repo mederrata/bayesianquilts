@@ -3,6 +3,9 @@ import inspect
 import pathlib
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict
+import os
+import yaml
+import h5py
 
 import dill
 import jax
@@ -272,11 +275,87 @@ class BayesianModel(nnx.Module, ABC):
             with open(filename, "wb") as file:
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
-        else:
-            filename = filename.with_suffix(".pkl.gz")
-            with gzip.open(filename, "wb") as file:
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
+
+    def save_to_disk(self, path):
+        """Serialize model to disk using YAML config and HDF5 parameters."""
+        path = pathlib.Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        
+        # 1. Save Config (args to __init__)
+        argspec = inspect.getfullargspec(self.__init__)
+        args = argspec.args[1:] # skip self
+        config = {}
+        for arg in args:
+            if hasattr(self, arg):
+                config[arg] = getattr(self, arg)
+            elif hasattr(self, "_" + arg):
+                config[arg] = getattr(self, "_" + arg)
+        
+        def _clean(obj):
+            if isinstance(obj, (jnp.ndarray, np.ndarray)):
+                return obj.tolist()
+            if hasattr(obj, 'dtype'): # check if it is a type that looks like a dtype or array
+                 if isinstance(obj, type):
+                     return obj.__name__
+            if isinstance(obj, type): # generic type handling
+                return obj.__name__
+            if hasattr(obj, 'item'):
+                return obj.item()
+            if isinstance(obj, list):
+                return [_clean(x) for x in obj]
+            if isinstance(obj, dict):
+                return {k: _clean(v) for k, v in obj.items()}
+            return obj
+
+        config = _clean(config)
+        config['_class_name'] = self.__class__.__name__
+
+        with open(path / "config.yaml", "w") as f:
+            yaml.dump(config, f)
+            
+        # 2. Save Parameters (HDF5)
+        with h5py.File(path / "params.h5", "w") as f:
+            if self.params is not None:
+                grp = f.create_group("params")
+                for k, v in self.params.items():
+                    grp.create_dataset(k, data=np.array(v))
+            
+            if self.mcmc_samples is not None:
+                grp = f.create_group("mcmc_samples")
+                for k, v in self.mcmc_samples.items():
+                    grp.create_dataset(k, data=np.array(v))
+
+    @classmethod
+    def load_from_disk(cls, path):
+        """Load model from disk."""
+        path = pathlib.Path(path)
+        with open(path / "config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+            
+        class_name = config.pop('_class_name', None)
+        # Verify class name if needed
+        
+        # Filter config args that match __init__ to avoid unexpected kwargs error
+        argspec = inspect.getfullargspec(cls.__init__)
+        valid_args = set(argspec.args[1:] + argspec.kwonlyargs)
+        if argspec.varkw:
+             # accepts any kwargs
+             init_kwargs = config
+        else:
+             init_kwargs = {k: v for k, v in config.items() if k in valid_args}
+
+        instance = cls(**init_kwargs)
+        
+        if (path / "params.h5").exists():
+            with h5py.File(path / "params.h5", "r") as f:
+                if "params" in f:
+                    instance.params = {k: jnp.array(v) for k, v in f["params"].items()}
+                if "mcmc_samples" in f:
+                    instance.mcmc_samples = {k: jnp.array(v) for k, v in f["mcmc_samples"].items()}
+                    
+        return instance
 
 
     def unormalized_log_prob_list(self, data, params, prior_weight=1.0):
