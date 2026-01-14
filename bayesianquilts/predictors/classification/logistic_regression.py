@@ -8,7 +8,7 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.tf.parameter import Decomposed, Interactions
+from bayesianquilts.jax.parameter import Decomposed, Interactions
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 
