@@ -1373,3 +1373,101 @@ class LinearRegressionLikelihood(LikelihoodFunction):
             result["log_sigma"] = log_sigma
 
         return result
+class NeuralPoissonLikelihood(LikelihoodFunction):
+    def __init__(self, model):
+        self.model = model
+        self.dtype = model.dtype
+
+    def log_likelihood(self, data, params):
+        w0 = params['w_0']
+        # Check w_0 rank to detect if we have per-datum parameters
+        # Standard MCMC: (S, D_in, H) -> Rank 3
+        # AIS per-datum: (S, N, D_in, H) -> Rank 4
+        if w0.ndim == 4:
+             # Case: (S, N, D, H). We must map over N.
+             X = data['X']
+             y = data['y']
+
+             def single_data_ll(x_i, y_i, params_i):
+                 # params_i: (S, D, H)
+                 d = {'X': x_i[None, :], 'y': y_i} 
+                 ll = self.model.log_likelihood(d, **params_i)
+                 # ll should be (S, 1) or (S,)
+                 return jnp.squeeze(ll)
+
+             # Map over N (axis 0 of data, axis 1 of params)
+             in_axes_params = jax.tree_util.tree_map(lambda x: 1, params)
+
+             # Result: (N, S)
+             ll_val = jax.vmap(single_data_ll, in_axes=(0, 0, in_axes_params))(X, y, params)
+             
+             # Return (S, N). Use swapaxes to be safe for high rank
+             # If ll_val is (N, S), swaps to (S, N)
+             return jnp.swapaxes(ll_val, 0, 1)
+        else:
+             return self.model.log_likelihood(data, **params)
+
+    def _flatten_params(self, params):
+        flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(params)
+        return flat_params, unflatten_fn
+
+    def log_likelihood_gradient(self, data, params):
+        # Optimized gradient computation per datum
+        one_sample_params = jax.tree_util.tree_map(lambda x: x[0], params)
+        flat_proto, unflatten = jax.flatten_util.ravel_pytree(one_sample_params)
+        flat_params_S = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
+        X = data['X']
+        y = data['y']
+
+        def log_lik_fn(flat_theta, x, y):
+            theta = unflatten(flat_theta)
+            d = {'X': x[None, :], 'y': y}
+            ll = self.model.log_likelihood(d, **theta)
+            return jnp.squeeze(ll)
+
+        grad_fn = jax.grad(log_lik_fn)
+        grad_vmap_N = jax.vmap(grad_fn, in_axes=(None, 0, 0))
+        grads = jax.vmap(lambda p: grad_vmap_N(p, X, y))(flat_params_S)
+        return grads
+
+    def log_likelihood_hessian_diag(self, data, params):
+        one_sample_params = jax.tree_util.tree_map(lambda x: x[0], params)
+        flat_proto, unflatten = jax.flatten_util.ravel_pytree(one_sample_params)
+        flat_params_S = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
+        X = data['X']
+        y = data['y']
+
+        def log_lik_fn(flat_theta, x, y):
+            theta = unflatten(flat_theta)
+            d = {'X': x[None, :], 'y': y}
+            ll = self.model.log_likelihood(d, **theta)
+            return jnp.squeeze(ll)
+
+        def hess_diag_fn(flat_theta, x, y):
+            return jnp.diag(jax.hessian(log_lik_fn)(flat_theta, x, y))
+
+        hess_diag_vmap_N = jax.vmap(hess_diag_fn, in_axes=(None, 0, 0))
+        hess_diag = jax.vmap(lambda p: hess_diag_vmap_N(p, X, y))(flat_params_S)
+        return hess_diag
+
+    def extract_parameters(self, params):
+        flat_params = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
+        return flat_params
+
+    def reconstruct_parameters(self, flat_params, template):
+        if isinstance(template.get('w_0'), jnp.ndarray) and template['w_0'].ndim > 2:
+             template = jax.tree_util.tree_map(lambda x: x[0], template)
+        dummy_flat, unflatten = jax.flatten_util.ravel_pytree(template)
+        K = dummy_flat.shape[0]
+        input_shape = flat_params.shape
+        if input_shape[-1] != K:
+             raise ValueError(f"Last dimension {input_shape} != K={K}")
+        batch_dims = input_shape[:-1]
+        n_batch = 1
+        for d in batch_dims: n_batch *= d
+        flat_reshaped = flat_params.reshape((n_batch, K))
+        unflattened_flat = jax.vmap(unflatten)(flat_reshaped)
+        def reshape_leaf(leaf):
+             leaf_param_shape = leaf.shape[1:]
+             return leaf.reshape(batch_dims + leaf_param_shape)
+        return jax.tree_util.tree_map(reshape_leaf, unflattened_flat)
