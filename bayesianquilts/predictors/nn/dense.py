@@ -317,6 +317,7 @@ class DenseGaussian(BayesianModel):
         self.layer_sizes = [input_size] + layer_sizes
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
+        self.extra_batch_dims = kwargs.get("extra_batch_dims", 0)
         self.nn = Dense(
             input_size=input_size,
             layer_sizes=layer_sizes,
@@ -426,11 +427,11 @@ class DenseGaussian(BayesianModel):
 
         self.bijectors = bijectors
         self.prior_distribution = tfd.JointDistributionNamed(distribution_dict)
-        self.surrogate_distribution = build_factored_surrogate_posterior_generator(
-            self.prior_distribution, bijectors, dtype=self.dtype, initializers=initial
+        self.surrogate_distribution_generator, self.surrogate_parameter_initializer = build_factored_surrogate_posterior_generator(
+            self.prior_distribution, bijectors, dtype=self.dtype, surrogate_initializers=initial
         )
-        self.var_list = list(self.surrogate_distribution.model.keys())
-        self.surrogate_vars = self.surrogate_distribution.variables
+        self.params = self.surrogate_parameter_initializer()
+        self.var_list = list(self.prior_distribution.model.keys())
 
 
     @abstractmethod
