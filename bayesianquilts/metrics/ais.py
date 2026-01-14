@@ -175,7 +175,7 @@ class AdaptiveImportanceSampler:
             grad_log_pi = jnp.sum(log_ell_prime, axis=1) + grad_log_prior
 
         # Compute parameter standard deviations for standardization
-        theta_std = jnp.std(theta, axis=0, keepdims=True)
+        theta_std = jnp.std(theta, axis=0)  # Shape: (n_params,)
         theta_std = jnp.maximum(theta_std, 1e-6)  # Avoid division by zero
 
         results = {}
@@ -214,32 +214,64 @@ class AdaptiveImportanceSampler:
                                   params_transformed: Dict[str, Any],
                                   log_jacobian: jnp.ndarray,
                                   variational: bool,
-                                  log_pi_original: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
-        """Compute importance weights and related quantities."""
+                                  log_pi_original: jnp.ndarray,
+                                  log_ell_original: jnp.ndarray = None) -> Tuple[jnp.ndarray, ...]:
+        """Compute importance weights and related quantities.
+        
+        For LOO importance sampling, we compute:
+            w[s, i] ∝ p_{-i}(θ'[s,i]) / p_{-i}(θ[s])
+        
+        Where p_{-i} is the LOO posterior (posterior without data point i).
+        
+        The LOO posterior satisfies: log p_{-i}(θ) = log p(θ) - log p(y_i | θ)
+        
+        Args:
+            data: Input data
+            params_original: Original (untransformed) parameters
+            params_transformed: Transformed parameters (shape includes data dimension)
+            log_jacobian: Log Jacobian of the transformation
+            variational: Whether using variational approximation
+            log_pi_original: Log posterior at original params, shape (n_samples,)
+            log_ell_original: Original log likelihoods, shape (n_samples, n_data)
+        """
 
         # Compute likelihood for transformed parameters
         log_ell_new = self.likelihood_fn.log_likelihood(data, params_transformed)
 
         if variational and self.surrogate_log_prob_fn is not None:
             # Trust variational approximation
-            delta_log_pi = (self.surrogate_log_prob_fn(params_transformed) -
+            log_pi_trans = self.surrogate_log_prob_fn(params_transformed)
+            delta_log_pi = (log_pi_trans -
                           log_pi_original[:, jnp.newaxis])
             delta_log_pi = delta_log_pi - jnp.max(delta_log_pi, axis=0, keepdims=True)
         else:
-            # Compute full posterior difference
-            if self.prior_log_prob_fn is not None:
-                log_prior_new = self.prior_log_prob_fn(params_transformed)
-                log_prior_old = self.prior_log_prob_fn(params_original)
-                delta_log_prior = log_prior_new - log_prior_old[:, jnp.newaxis]
+            # Compute LOO posterior difference properly
+            # 
+            # For LOO at data point i:
+            #   log p_{-i}(θ') = log p(θ') - log p(y_i | θ')
+            #   log p_{-i}(θ)  = log p(θ)  - log p(y_i | θ)
+            # 
+            # So: delta_log_pi[s, i] = [log p(θ'[s,i]) - log ell_new[s,i]] - [log p(θ[s]) - log ell[s,i]]
+            #                        = log p(θ'[s,i]) - log p(θ[s]) - log ell_new[s,i] + log ell[s,i]
+            #
+            # Since we're doing leave-one-out, we assume log p(θ') ≈ log p(θ) for small transformations
+            # (the transformation is designed to be a small perturbation along the gradient)
+            # 
+            # Simplified: delta_log_pi ≈ log_ell_original - log_ell_new
+            
+            if log_ell_original is not None:
+                # Use the LOO formula: difference in log likelihoods at the left-out point
+                delta_log_pi = log_ell_original - log_ell_new
             else:
-                delta_log_prior = 0.0
-
-            log_pi_new = jnp.sum(log_ell_new, axis=-1)
-            delta_log_pi = log_pi_new - log_pi_original[:, jnp.newaxis] + delta_log_prior
+                # Fallback: assume no posterior change (will give poor results)
+                delta_log_pi = jnp.zeros_like(log_ell_new)
 
         # Compute importance weights
-        log_eta_weights = delta_log_pi - log_ell_new + log_jacobian
-        log_eta_weights = log_eta_weights - jnp.max(log_eta_weights, axis=0)
+        # w ∝ exp(delta_log_pi + log_jacobian)
+        # For LOO prediction of y_i, we don't want log_ell_new in the weights since
+        # that's what we're trying to estimate
+        log_eta_weights = delta_log_pi + log_jacobian
+        log_eta_weights = log_eta_weights - jnp.max(log_eta_weights, axis=0, keepdims=True)
 
         # Apply PSIS
         psis_weights, khat = nppsis.psislw(log_eta_weights)
@@ -248,10 +280,11 @@ class AdaptiveImportanceSampler:
         eta_weights = jnp.exp(log_eta_weights)
         eta_weights = eta_weights / jnp.sum(eta_weights, axis=0, keepdims=True)
 
-        psis_weights = jnp.exp(psis_weights)
+        psis_weights = jnp.exp(psis_weights) 
         psis_weights = psis_weights / jnp.sum(psis_weights, axis=0, keepdims=True)
 
         return eta_weights, psis_weights, khat, log_ell_new
+
 
     def _transform_likelihood_descent(self,
                                     data: Any,
@@ -279,10 +312,11 @@ class AdaptiveImportanceSampler:
         h = hbar / Q_norm[..., jnp.newaxis]  # (1, n_data, 1)
 
         # Apply transformation
-        theta_new = theta[:, jnp.newaxis, :] + h * Q  # (n_samples, n_data, n_params)
+        theta_expanded = theta[:, jnp.newaxis, :]  # (n_samples, 1, n_params)
+        hQ = h * Q  # (n_samples, n_data, n_params)
+        theta_new = theta_expanded + hQ  # (n_samples, n_data, n_params)
 
         # Compute Jacobian (for simple additive transformation, this is often identity in log space)
-        # For more complex transformations, this would need to be computed properly
         log_jacobian = jnp.zeros((theta.shape[0], log_ell.shape[1]))
 
         # Reconstruct parameters
@@ -301,7 +335,7 @@ class AdaptiveImportanceSampler:
 
         # Compute importance weights
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         # Compute predictions and diagnostics
@@ -377,7 +411,7 @@ class AdaptiveImportanceSampler:
 
         # Compute importance weights and return results
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         predictions = self.likelihood_fn.log_likelihood(data, params_new)
@@ -448,7 +482,7 @@ class AdaptiveImportanceSampler:
                     ], axis=1)
 
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         predictions = self.likelihood_fn.log_likelihood(data, params_new)
@@ -505,7 +539,7 @@ class AdaptiveImportanceSampler:
         log_jacobian = jnp.zeros((n_samples, n_data))
 
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         predictions = log_ell  # No transformation, so predictions are original likelihoods
@@ -583,7 +617,10 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         intercept = params["intercept"]  # (n_samples,)
 
         # Linear predictor: X @ beta.T + intercept
-        mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]  # (n_samples, n_data)
+        if beta.ndim == 3:
+            mu = jnp.einsum('df,sdf->sd', X, beta) + intercept
+        else:
+            mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
 
         # Sigmoid and log-likelihood
         sigma = jax.nn.sigmoid(mu)
@@ -670,12 +707,18 @@ class PoissonRegressionLikelihood(LikelihoodFunction):
         """Compute log-likelihood for Poisson regression."""
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)  # counts
+        y = jnp.squeeze(y)
 
         beta = params["beta"]
         intercept = params["intercept"]
+        intercept = jnp.squeeze(intercept)
 
         # Log rate
-        log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
+        if beta.ndim == 3:
+            log_rate = jnp.einsum('df,sdf->sd', X, beta) + intercept
+        else:
+            log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
+        
         rate = jnp.exp(log_rate)
 
         # Poisson log-likelihood: y * log(rate) - rate - log(y!)
@@ -688,11 +731,16 @@ class PoissonRegressionLikelihood(LikelihoodFunction):
         """Compute gradient of log-likelihood."""
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)
+        y = jnp.squeeze(y)
 
         beta = params["beta"]
         intercept = params["intercept"]
+        intercept = jnp.squeeze(intercept)
 
-        log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
+        if beta.ndim == 3:
+            log_rate = jnp.einsum('df,sdf->sd', X, beta) + intercept
+        else:
+            log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
         rate = jnp.exp(log_rate)
 
         # Gradient w.r.t. log rate
@@ -711,11 +759,16 @@ class PoissonRegressionLikelihood(LikelihoodFunction):
         """Compute diagonal of Hessian."""
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)
+        y = jnp.squeeze(y)
 
         beta = params["beta"]
         intercept = params["intercept"]
+        intercept = jnp.squeeze(intercept)
 
-        log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
+        if beta.ndim == 3:
+            log_rate = jnp.einsum('df,sdf->sd', X, beta) + intercept
+        else:
+            log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
         rate = jnp.exp(log_rate)
 
         # Hessian diagonal w.r.t. log rate
@@ -734,6 +787,7 @@ class PoissonRegressionLikelihood(LikelihoodFunction):
         """Extract parameters into flattened array."""
         beta = params["beta"]
         intercept = params["intercept"]
+        intercept = jnp.squeeze(intercept)
         theta = jnp.concatenate([beta, intercept[:, jnp.newaxis]], axis=-1)
         return theta
 
@@ -742,7 +796,7 @@ class PoissonRegressionLikelihood(LikelihoodFunction):
         n_features = template["beta"].shape[-1]
         beta = flat_params[..., :n_features]
         intercept = flat_params[..., n_features]
-        return {"beta": beta, "intercept": intercept}
+        return {"beta": beta, "intercept": intercept[..., jnp.newaxis]}
 
 
 class LinearRegressionLikelihood(LikelihoodFunction):
@@ -761,8 +815,14 @@ class LinearRegressionLikelihood(LikelihoodFunction):
         log_sigma = params.get("log_sigma", jnp.zeros((beta.shape[0],)))  # Log noise std
 
         # Predictions
-        mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
-        sigma = jnp.exp(log_sigma)[:, jnp.newaxis]
+        if beta.ndim == 3:
+            mu = jnp.einsum('df,sdf->sd', X, beta) + intercept
+        else:
+            mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
+        
+        sigma = jnp.exp(log_sigma)
+        if log_sigma.ndim == 1:
+             sigma = sigma[:, jnp.newaxis]
 
         # Gaussian log-likelihood
         residuals = y[jnp.newaxis, :] - mu
