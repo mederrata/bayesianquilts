@@ -26,6 +26,7 @@ class NeuralPoissonRegression(DenseGaussian):
             activation_fn=jax.nn.relu,
             weight_scale=0.1,
             bias_scale=0.1,
+            prior_scale=prior_scale,
             dtype=dtype,
             **kwargs
         )
