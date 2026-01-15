@@ -19,7 +19,7 @@ class SqrtInverseGamma(tfd.TransformedDistribution):
         super(SqrtInverseGamma, self).__init__(
             distribution=tfd.InverseGamma(
                 concentration=concentration, scale=scale),
-            bijector=tfb.Sqrt(),
+            bijector=tfb.Power(power=0.5),
             validate_args=validate_args,
             parameters=parameters,
             name=name,

@@ -282,13 +282,14 @@ class DenseHorseshoe(BayesianModel):
         self.params = self.surrogate_parameter_initializer()
         self.var_list = list(self.prior_distribution.model.keys())
 
-    @abstractmethod
-    def predictive_distribution(self, data: dict[str, tf.Tensor], **params):
-        pass
+    def unormalized_log_prob(self, data=None, prior_weight=1.0, **params):
+        return self.prior_distribution.log_prob(params)
 
-    @abstractmethod
+    def predictive_distribution(self, data: dict[str, tf.Tensor], **params):
+        return None
+
     def log_likelihood(self, data: dict[str, tf.Tensor], **params):
-        pass
+        return 0.0
 
 
 class DenseGaussian(BayesianModel):
