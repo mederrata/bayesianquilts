@@ -4,9 +4,9 @@ import jax.numpy as jnp
 import tensorflow_probability.substrates.jax as tfp
 import tensorflow_probability.substrates.jax.distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
-from bayesianquilts.predictors.nn.dense import DenseHorseshoe
+from bayesianquilts.predictors.nn.dense import DenseGaussian
 
-class NeuralPoissonRegression(DenseHorseshoe):
+class NeuralPoissonRegression(DenseGaussian):
     def __init__(
         self,
         dim_regressors: int,
@@ -26,7 +26,6 @@ class NeuralPoissonRegression(DenseHorseshoe):
             activation_fn=jax.nn.relu,
             weight_scale=0.1,
             bias_scale=0.1,
-            prior_scale=prior_scale,
             dtype=dtype,
             **kwargs
         )

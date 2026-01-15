@@ -310,6 +310,7 @@ class DenseGaussian(BayesianModel):
         activation_fn: Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike] | None = None,
         weight_scale: float = 1.0,
         bias_scale: float = 1.0,
+        prior_scale: float = 1.0,
         dtype: jnp.dtype = jnp.float64,
         **kwargs,
     ) -> None:
@@ -320,6 +321,7 @@ class DenseGaussian(BayesianModel):
         self.layer_sizes = [input_size] + layer_sizes
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
+        self.prior_scale = prior_scale
         self.extra_batch_dims = kwargs.get("extra_batch_dims", 0)
         self.nn = Dense(
             input_size=input_size,
@@ -381,7 +383,7 @@ class DenseGaussian(BayesianModel):
                         + [self.layer_sizes[j], self.layer_sizes[j + 1]],
                         dtype=self.dtype,
                     ),
-                    scale=jnp.ones(
+                    scale=self.prior_scale * jnp.ones(
                         [1] * self.extra_batch_dims
                         + [self.layer_sizes[j], self.layer_sizes[j + 1]],
                         dtype=self.dtype,
@@ -417,7 +419,7 @@ class DenseGaussian(BayesianModel):
                         ],
                         dtype=self.dtype,
                     ),
-                    scale=jnp.ones(
+                    scale=self.prior_scale * jnp.ones(
                         [1] * self.extra_batch_dims
                         + [
                             self.layer_sizes[j + 1],
