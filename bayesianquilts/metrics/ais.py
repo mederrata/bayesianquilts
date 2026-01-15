@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 import tensorflow as tf
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Callable, Tuple, Optional
+from typing import Dict, Any, Callable, Tuple, Optional, List
 from bayesianquilts.metrics import nppsis
 
 
@@ -121,91 +121,158 @@ class AdaptiveImportanceSampler:
         return -jnp.sum(probs * jnp.log(probs + 1e-10), axis=0)
 
     def adaptive_is_loo(self,
-                       data: Any,
-                       params: Dict[str, Any],
-                       hbar: float = 1.0,
-                       variational: bool = True,
-                       transformations: Optional[list] = None) -> Dict[str, Any]:
-        """Perform adaptive importance sampling leave-one-out cross-validation.
-
+                        data: Dict[str, Any],
+                        params: Dict[str, Any],
+                        hbar: float = 1.0,
+                        rhos: List[float] = None,
+                        variational: bool = True,
+                        transformations: List[str] = ['identity', 'll', 'kl', 'var']) -> Dict[str, Any]:
+        """Perform adaptive IS for LOO-CV.
+        
         Args:
-            data: Input data for evaluation
-            params: Posterior parameter samples
-            hbar: Step size parameter for transformations
-            variational: Whether to use variational approximation
-            transformations: List of transformation names to apply
-
+            data: Dictionary of data (X, y)
+            params: Dictionary of parameters (shape: S x ...)
+            hbar: Step size for transformations (legacy single value)
+            rhos: List of step sizes to sweep over. If provided, overrides hbar.
+            variational: Whether parameters come from a VI approximation
+            transformations: List of transformation names to try
+            
         Returns:
-            Dictionary containing results for each transformation
+            Dictionary of results for each transformation (+ 'best' if sweeping)
         """
-        if transformations is None:
-            transformations = ['ll', 'kl', 'var', 'identity']
-
-        # Compute base quantities
-        log_ell = self.likelihood_fn.log_likelihood(data, params)
-        log_ell_prime = self.likelihood_fn.log_likelihood_gradient(data, params)
-        log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
-
-        # Get initial PSIS diagnostics
-        _, khat0 = nppsis.psislw(-log_ell)
-
-        # Extract parameter arrays
+        
+        if rhos is None:
+            rhos = [hbar]
+            
         theta = self.likelihood_fn.extract_parameters(params)
-        n_samples, n_params = theta.shape
-        n_data = log_ell.shape[1]
+        theta_std = jnp.std(theta, axis=0) # (K,)
+        # Ensure std is not zero
+        theta_std = jnp.where(theta_std < 1e-6, 1.0, theta_std)
 
-        # Compute posterior gradient if needed
+        log_ell = self.likelihood_fn.log_likelihood(data, params) # (S, N)
         if variational and self.surrogate_log_prob_fn is not None:
-            # Use surrogate distribution gradients
-            log_pi = self.surrogate_log_prob_fn(params)
-            log_pi = log_pi - jnp.max(log_pi, axis=0)
-            grad_log_pi = jax.grad(self.surrogate_log_prob_fn)(params)
-            grad_log_pi = self.likelihood_fn.extract_parameters(grad_log_pi)
+            log_pi = self.surrogate_log_prob_fn(params) # (S,)
+            # Reshape for broadcasting
+            log_pi = log_pi[:, jnp.newaxis] # (S, 1)
         else:
-            # Use full posterior gradients
-            if self.prior_log_prob_fn is not None:
-                log_prior = self.prior_log_prob_fn(params)
-                grad_log_prior = jax.grad(self.prior_log_prob_fn)(params)
-                grad_log_prior = self.likelihood_fn.extract_parameters(grad_log_prior)
+            # If MCMC samples, log_pi is effectively constant/uniform if we assume samples 
+            # are from the posterior. Or we can compute log_prob.
+            # However, standard AIS usually starts with weights=1 for MCMC samples.
+            # But the logic below expects log_pi. 
+            # Let's set it to log_ell + log_prior (posterior)
+            # Or just zeros if we treat MCMC samples as having proposal = target
+            # For now, let's calculate the log joint prob as log_pi
+            # This assumes a 'model' attribute exists, which is not defined in __init__.
+            # For faithfulness to the instruction, I'm including it, but it might require
+            # self.model to be passed in __init__ or set elsewhere.
+            # If self.model is not available, this will cause an AttributeError.
+            # A safer fallback for non-variational might be:
+            # log_prior = self.prior_log_prob_fn(params) if self.prior_log_prob_fn else jnp.zeros(theta.shape[0])
+            # log_pi = jnp.sum(log_ell, axis=1) + log_prior
+            # log_pi = log_pi[:, jnp.newaxis]
+            # For now, following the instruction's provided code:
+            if hasattr(self, 'model') and hasattr(self.model, 'unormalized_log_prob'):
+                log_pi = self.model.unormalized_log_prob(data, **params)
+                log_pi = log_pi[:, jnp.newaxis]
             else:
-                log_prior = jnp.zeros(n_samples)
-                grad_log_prior = jnp.zeros_like(theta)
+                # Fallback if self.model is not available, using existing prior_log_prob_fn
+                log_prior = self.prior_log_prob_fn(params) if self.prior_log_prob_fn else jnp.zeros(theta.shape[0])
+                log_pi = jnp.sum(log_ell, axis=1) + log_prior
+                log_pi = log_pi[:, jnp.newaxis]
 
-            log_pi = jnp.sum(log_ell, axis=1) + log_prior
-            grad_log_pi = jnp.sum(log_ell_prime, axis=1) + grad_log_prior
 
-        # Compute parameter standard deviations for standardization
-        theta_std = jnp.std(theta, axis=0, keepdims=True)
-        theta_std = jnp.maximum(theta_std, 1e-6)  # Avoid division by zero
-
+        # Pre-compute gradients if needed (only once)
+        log_ell_prime = self.likelihood_fn.log_likelihood_gradient(data, params) # (S, N, K)
+        
+        # Hessian diagonal for var-based transformation
+        log_ell_doubleprime = None
+        if 'var' in transformations:
+            log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(data, params) # (S, N, K)
+            
+        grad_log_pi = None
+        # grad_log_pi isn't strictly needed for current transformations but good for extensibility
+        
         results = {}
+        
+        # Storage for best-khat logic
+        # best_khat: (N,) initialized to inf
+        # best_results: dictionaries per N? That's messy.
+        # Structure: results['best'] = { 'khat': (N,), 'p_loo_eta': (N,), ... }
+        
+        n_data = log_ell.shape[1]
+        best_khat = jnp.inf * jnp.ones(n_data)
+        best_metrics = {
+             'p_loo_eta': jnp.zeros(n_data),
+             'p_loo_psis': jnp.zeros(n_data),
+             'khat': jnp.inf * jnp.ones(n_data)
+        }
+        
+        # Helper to map legacy names to methods
+        method_map = {
+            'identity': self._transform_identity,
+            'll': self._transform_likelihood_descent,
+            'kl': self._transform_kl_divergence,
+            'var': self._transform_variance_based,
+            'mm1': self._transform_mm1,
+            'mm2': self._transform_mm2,
+            'pmm1': self._transform_pmm1,
+            'pmm2': self._transform_pmm2
+        }
 
-        for transform_name in transformations:
-            if transform_name == 'll':
-                result = self._transform_likelihood_descent(
-                    data, params, theta, log_ell, log_ell_prime, log_ell_doubleprime,
-                    theta_std, hbar, variational, log_pi, grad_log_pi
-                )
-            elif transform_name == 'kl':
-                result = self._transform_kl_divergence(
-                    data, params, theta, log_ell, log_ell_prime, log_ell_doubleprime,
-                    theta_std, hbar, variational, log_pi, grad_log_pi
-                )
-            elif transform_name == 'var':
-                result = self._transform_variance_based(
-                    data, params, theta, log_ell, log_ell_prime, log_ell_doubleprime,
-                    theta_std, hbar, variational, log_pi, grad_log_pi
-                )
-            elif transform_name == 'identity':
-                result = self._transform_identity(
-                    data, params, theta, log_ell, log_ell_prime, log_ell_doubleprime,
-                    theta_std, hbar, variational, log_pi, grad_log_pi
-                )
-            else:
-                raise ValueError(f"Unknown transformation: {transform_name}")
+        for method_name in transformations:
+            if method_name not in method_map:
+                print(f"Warning: Unknown transformation {method_name}")
+                continue
+                
+            transform_fn = method_map[method_name]
+            
+            # Determine which rhos to loop over for this method
+            # Identity, MM1, MM2 don't use hbar/rho
+            current_rhos = rhos
+            if method_name in ['identity', 'mm1', 'mm2']:
+                current_rhos = [1.0] # Dummy loop
+                
+            for rho in current_rhos:
+                key = f"{method_name}"
+                if len(rhos) > 1 and method_name not in ['identity', 'mm1', 'mm2']:
+                     key = f"{method_name}_rho{rho}"
 
-            results[transform_name] = result
-
+                # Call transformation
+                # Note: kwargs are passed. PMM1/PMM2 use 'hbar'. LL/KL/Var use 'hbar'.
+                res = transform_fn(
+                    data=data,
+                    params=params,
+                    theta=theta,
+                    log_ell=log_ell,
+                    log_ell_prime=log_ell_prime,
+                    log_ell_doubleprime=log_ell_doubleprime,
+                    theta_std=theta_std,
+                    hbar=rho,
+                    variational=variational,
+                    log_pi=log_pi,
+                    grad_log_pi=grad_log_pi,
+                    log_ell_original=log_ell
+                )
+                
+                # Check for NaNs in khat
+                khat_safe = jnp.where(jnp.isnan(res['khat']), jnp.inf, res['khat'])
+                res['khat'] = khat_safe
+                
+                results[key] = res
+                
+                # Update best metrics
+                # Find indices where current method is better
+                improved_idx = khat_safe < best_khat
+                best_khat = jnp.where(improved_idx, khat_safe, best_khat)
+                
+                best_metrics['khat'] = best_khat
+                best_metrics['p_loo_eta'] = jnp.where(improved_idx, res['p_loo_eta'], best_metrics['p_loo_eta'])
+                best_metrics['p_loo_psis'] = jnp.where(improved_idx, res['p_loo_psis'], best_metrics['p_loo_psis'])
+                
+        # Add 'best' entry if we swept
+        if len(results) > 0:
+            results['best'] = best_metrics
+            
         return results
 
     def _compute_importance_weights(self,
@@ -214,32 +281,64 @@ class AdaptiveImportanceSampler:
                                   params_transformed: Dict[str, Any],
                                   log_jacobian: jnp.ndarray,
                                   variational: bool,
-                                  log_pi_original: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
-        """Compute importance weights and related quantities."""
+                                  log_pi_original: jnp.ndarray,
+                                  log_ell_original: jnp.ndarray = None) -> Tuple[jnp.ndarray, ...]:
+        """Compute importance weights and related quantities.
+        
+        For LOO importance sampling, we compute:
+            w[s, i] ~ p_{-i}(theta_prime[s,i]) / p_{-i}(theta[s])
+        
+        Where p_{-i} is the LOO posterior (posterior without data point i).
+        
+        The LOO posterior satisfies: log p_{-i}(θ) = log p(θ) - log p(y_i | θ)
+        
+        Args:
+            data: Input data
+            params_original: Original (untransformed) parameters
+            params_transformed: Transformed parameters (shape includes data dimension)
+            log_jacobian: Log Jacobian of the transformation
+            variational: Whether using variational approximation
+            log_pi_original: Log posterior at original params, shape (n_samples,)
+            log_ell_original: Original log likelihoods, shape (n_samples, n_data)
+        """
 
         # Compute likelihood for transformed parameters
         log_ell_new = self.likelihood_fn.log_likelihood(data, params_transformed)
 
         if variational and self.surrogate_log_prob_fn is not None:
             # Trust variational approximation
-            delta_log_pi = (self.surrogate_log_prob_fn(params_transformed) -
+            log_pi_trans = self.surrogate_log_prob_fn(params_transformed)
+            delta_log_pi = (log_pi_trans -
                           log_pi_original[:, jnp.newaxis])
             delta_log_pi = delta_log_pi - jnp.max(delta_log_pi, axis=0, keepdims=True)
         else:
-            # Compute full posterior difference
-            if self.prior_log_prob_fn is not None:
-                log_prior_new = self.prior_log_prob_fn(params_transformed)
-                log_prior_old = self.prior_log_prob_fn(params_original)
-                delta_log_prior = log_prior_new - log_prior_old[:, jnp.newaxis]
+            # Compute LOO posterior difference properly
+            # 
+            # For LOO at data point i:
+            #   log p_{-i}(θ') = log p(θ') - log p(y_i | θ')
+            #   log p_{-i}(θ)  = log p(θ)  - log p(y_i | θ)
+            # 
+            # So: delta_log_pi[s, i] = [log p(θ'[s,i]) - log ell_new[s,i]] - [log p(θ[s]) - log ell[s,i]]
+            #                        = log p(θ'[s,i]) - log p(θ[s]) - log ell_new[s,i] + log ell[s,i]
+            #
+            # Since we're doing leave-one-out, we assume log p(θ') ≈ log p(θ) for small transformations
+            # (the transformation is designed to be a small perturbation along the gradient)
+            # 
+            # Simplified: delta_log_pi ≈ log_ell_original - log_ell_new
+            
+            if log_ell_original is not None:
+                # Use the LOO formula: difference in log likelihoods at the left-out point
+                delta_log_pi = log_ell_original - log_ell_new
             else:
-                delta_log_prior = 0.0
-
-            log_pi_new = jnp.sum(log_ell_new, axis=-1)
-            delta_log_pi = log_pi_new - log_pi_original[:, jnp.newaxis] + delta_log_prior
+                # Fallback: assume no posterior change (will give poor results)
+                delta_log_pi = jnp.zeros_like(log_ell_new)
 
         # Compute importance weights
-        log_eta_weights = delta_log_pi - log_ell_new + log_jacobian
-        log_eta_weights = log_eta_weights - jnp.max(log_eta_weights, axis=0)
+        # w ∝ exp(delta_log_pi + log_jacobian)
+        # For LOO prediction of y_i, we don't want log_ell_new in the weights since
+        # that's what we're trying to estimate
+        log_eta_weights = delta_log_pi + log_jacobian
+        log_eta_weights = log_eta_weights - jnp.max(log_eta_weights, axis=0, keepdims=True)
 
         # Apply PSIS
         psis_weights, khat = nppsis.psislw(log_eta_weights)
@@ -248,10 +347,11 @@ class AdaptiveImportanceSampler:
         eta_weights = jnp.exp(log_eta_weights)
         eta_weights = eta_weights / jnp.sum(eta_weights, axis=0, keepdims=True)
 
-        psis_weights = jnp.exp(psis_weights)
+        psis_weights = jnp.exp(psis_weights) 
         psis_weights = psis_weights / jnp.sum(psis_weights, axis=0, keepdims=True)
 
         return eta_weights, psis_weights, khat, log_ell_new
+
 
     def _transform_likelihood_descent(self,
                                     data: Any,
@@ -264,25 +364,34 @@ class AdaptiveImportanceSampler:
                                     hbar: float,
                                     variational: bool,
                                     log_pi: jnp.ndarray,
-                                    grad_log_pi: jnp.ndarray) -> Dict[str, Any]:
+                                    grad_log_pi: jnp.ndarray,
+                                    log_ell_original: jnp.ndarray = None,
+                                    **kwargs) -> Dict[str, Any]:
         """Likelihood descent transformation T_ll."""
 
         # Compute direction: negative log-likelihood gradient
         Q = -log_ell_prime  # Shape: (n_samples, n_data, n_params)
 
         # Standardize the direction
-        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, :]
-        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=-1)  # (n_samples, n_data)
-        Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)  # (1, n_data)
+        # Standardize the direction
+        pad_dims = Q.ndim - 2 - theta_std.ndim
+        theta_std_expanded = theta_std[jnp.newaxis, jnp.newaxis, ...]
+        
+        Q_standardized = Q / theta_std_expanded
+        
+        reduction_axes = tuple(range(2, Q_standardized.ndim))
+        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=reduction_axes, keepdims=True)
+        Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)  # (1, n_data, 1, 1...)
 
         # Compute step size
-        h = hbar / Q_norm[..., jnp.newaxis]  # (1, n_data, 1)
+        h = hbar / Q_norm
 
         # Apply transformation
-        theta_new = theta[:, jnp.newaxis, :] + h * Q  # (n_samples, n_data, n_params)
+        theta_expanded = theta[:, jnp.newaxis, :]  # (n_samples, 1, n_params)
+        hQ = h * Q  # (n_samples, n_data, n_params)
+        theta_new = theta_expanded + hQ  # (n_samples, n_data, n_params)
 
         # Compute Jacobian (for simple additive transformation, this is often identity in log space)
-        # For more complex transformations, this would need to be computed properly
         log_jacobian = jnp.zeros((theta.shape[0], log_ell.shape[1]))
 
         # Reconstruct parameters
@@ -301,7 +410,7 @@ class AdaptiveImportanceSampler:
 
         # Compute importance weights
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         # Compute predictions and diagnostics
@@ -340,23 +449,44 @@ class AdaptiveImportanceSampler:
                                hbar: float,
                                variational: bool,
                                log_pi: jnp.ndarray,
-                               grad_log_pi: jnp.ndarray) -> Dict[str, Any]:
+                               grad_log_pi: jnp.ndarray,
+                               log_ell_original: jnp.ndarray = None,
+                               **kwargs) -> Dict[str, Any]:
         """KL divergence based transformation T_kl."""
+        
+        if variational and self.surrogate_log_prob_fn is not None:
+             raise NotImplementedError("Variational AIS-KL not implemented yet")
 
-        # This is a more complex transformation that uses the posterior weights
+        # This is a complex transformation
         log_pi_normalized = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
-
-        # The direction involves weighted likelihood gradients
-        # This is a simplified version - the full implementation would be more complex
-        weights = jnp.exp(log_pi_normalized)[:, jnp.newaxis]
-        Q = -log_ell_prime * weights[..., jnp.newaxis]
-
-        # Standardize and compute step size (similar to likelihood descent)
-        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, :]
-        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=-1)
+        # log_pi (S,) or (S, 1) -> weights (S, 1)
+        weights = jnp.exp(log_pi_normalized).reshape(log_pi.shape[0], 1)
+        
+        # Expand weights to match log_ell_prime rank (S, N, P...)
+        # We want weights to be (S, 1, 1...)
+        while weights.ndim < log_ell_prime.ndim:
+            weights = weights[..., jnp.newaxis]
+            
+        Q = -log_ell_prime * weights
+        
+        # Standardize using theta_std
+        # theta_std (P...) -> (1, 1, P...)
+        pad_dims = Q.ndim - 2 - theta_std.ndim
+        # If theta_std matches P dimensions exactly, pad_dims=0. 
+        # But we need (1, 1) prefix.
+        theta_std_expanded = theta_std[jnp.newaxis, jnp.newaxis, ...]
+        
+        Q_standardized = Q / theta_std_expanded
+        
+        # Reduce over all parameter dimensions (axes 2+) to get scalar h per (S, N)
+        reduction_axes = tuple(range(2, Q_standardized.ndim))
+        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=reduction_axes, keepdims=True)
+        # Reduce over samples (axis 0) ?? Logic says 'axis=0' in original code.
+        # Original: Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)
+        # We'll keep that generic normalization across samples.
         Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)
 
-        h = hbar / Q_norm[..., jnp.newaxis]
+        h = hbar / Q_norm
         theta_new = theta[:, jnp.newaxis, :] + h * Q
 
         log_jacobian = jnp.zeros((theta.shape[0], log_ell.shape[1]))
@@ -374,10 +504,12 @@ class AdaptiveImportanceSampler:
                         params_new[key],
                         params_new_i[key][:, jnp.newaxis, ...]
                     ], axis=1)
+        
+
 
         # Compute importance weights and return results
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         predictions = self.likelihood_fn.log_likelihood(data, params_new)
@@ -413,22 +545,29 @@ class AdaptiveImportanceSampler:
                                 hbar: float,
                                 variational: bool,
                                 log_pi: jnp.ndarray,
-                                grad_log_pi: jnp.ndarray) -> Dict[str, Any]:
+                                grad_log_pi: jnp.ndarray,
+                                log_ell_original: jnp.ndarray = None,
+                                **kwargs) -> Dict[str, Any]:
         """Variance-based transformation T_var."""
 
         # Use Hessian information for the transformation direction
         # This is simplified - full implementation would use second-order information
         log_pi_normalized = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
-        weights = jnp.exp(log_pi_normalized)[:, jnp.newaxis]
+        weights = jnp.exp(log_pi_normalized).reshape(log_pi.shape[0], 1)
+        
+        while weights.ndim < log_ell_prime.ndim:
+            weights = weights[..., jnp.newaxis]
 
         # Direction based on curvature information
-        Q = -log_ell_prime * weights[..., jnp.newaxis] * jnp.abs(log_ell_doubleprime)
+        Q = -log_ell_prime * weights * jnp.abs(log_ell_doubleprime)
 
-        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, :]
-        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=-1)
+        Q_standardized = Q / theta_std[jnp.newaxis, jnp.newaxis, ...]
+        
+        reduction_axes = tuple(range(2, Q_standardized.ndim))
+        Q_norm = jnp.max(jnp.abs(Q_standardized), axis=reduction_axes, keepdims=True)
         Q_norm = jnp.max(Q_norm, axis=0, keepdims=True)
 
-        h = hbar / Q_norm[..., jnp.newaxis]
+        h = hbar / Q_norm
         theta_new = theta[:, jnp.newaxis, :] + h * Q
 
         log_jacobian = jnp.zeros((theta.shape[0], log_ell.shape[1]))
@@ -448,7 +587,7 @@ class AdaptiveImportanceSampler:
                     ], axis=1)
 
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         predictions = self.likelihood_fn.log_likelihood(data, params_new)
@@ -484,7 +623,9 @@ class AdaptiveImportanceSampler:
                            hbar: float,
                            variational: bool,
                            log_pi: jnp.ndarray,
-                           grad_log_pi: jnp.ndarray) -> Dict[str, Any]:
+                           grad_log_pi: jnp.ndarray,
+                           log_ell_original: jnp.ndarray = None,
+                           **kwargs) -> Dict[str, Any]:
         """Identity transformation T_I (no transformation)."""
 
         # No transformation - just compute standard importance weights
@@ -505,7 +646,7 @@ class AdaptiveImportanceSampler:
         log_jacobian = jnp.zeros((n_samples, n_data))
 
         eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
-            data, params, params_new, log_jacobian, variational, log_pi
+            data, params, params_new, log_jacobian, variational, log_pi, log_ell_original=log_ell
         )
 
         predictions = log_ell  # No transformation, so predictions are original likelihoods
@@ -530,6 +671,362 @@ class AdaptiveImportanceSampler:
             'predictions': predictions
         }
 
+
+    def _compute_moments(self, params: Dict[str, Any], weights: jnp.ndarray) -> Dict[str, Any]:
+        """Compute weighted and unweighted moments for parameters.
+        
+        Args:
+            params: Dictionary of parameters (shape: S x ...)
+            weights: Importance weights (shape: S x N)
+            
+        Returns:
+            Dictionary containing means and variances
+        """
+        moments = {}
+        # Normalize weights along sample dimension (axis 0)
+        # weights is S x N
+        # We want weights sum to 1 for each n
+        w_sum = jnp.sum(weights, axis=0, keepdims=True)
+        w_norm = weights / (w_sum + 1e-10)
+        
+        for name, value in params.items():
+            # value shape: S x ... (e.g., S x K or S)
+            # weights shape: S x N
+            
+            # Weighted mean
+            # Need to broadcast weights to match value dimensions
+            # If value is S x K, we want result N x K
+            # If value is S, we want result N
+            
+            if value.ndim == 1: # Shape S
+                # Broadcast value to S x N
+                v_expanded = value[:, jnp.newaxis] # S x 1
+                
+                # Weighted mean: sum(w * v, axis=0) -> N
+                mean_w = jnp.sum(w_norm * v_expanded, axis=0)
+                mean = jnp.mean(value, axis=0) # Scalar
+                
+                # Expand mean for variance calc: N
+                mean_expanded_w = mean_w
+                mean_expanded = mean      
+
+                # Weighted variance
+                var_w = jnp.sum(w_norm * (v_expanded - mean_expanded_w)**2, axis=0)
+                var = jnp.mean((value - mean)**2, axis=0)
+                
+            else: # Shape S x K or S x P1 x P2...
+                # Broadcast weights to matches value dimensions
+                # value: (S, P...) -> v_expanded (S, 1, P...)
+                v_expanded = value[:, jnp.newaxis, ...]
+                
+                # w_norm: (S, N) -> w_expanded (S, N, 1...) to match v_expanded rank
+                w_expanded = w_norm
+                while w_expanded.ndim < v_expanded.ndim:
+                    w_expanded = w_expanded[..., jnp.newaxis]
+                
+                # Weighted mean: sum(w * v, axis=0) -> N x P...
+                mean_w = jnp.sum(w_expanded * v_expanded, axis=0)
+                mean = jnp.mean(value, axis=0) # P...
+                
+                # Weighted variance: sum(w * (v - mean)^2, axis=0) -> N x P...
+                # Note: mean_w is (N, P...), v_expanded is (S, 1, P...)
+                # Broadcasting (S, 1, P...) with (N, P...) -> (S, N, P...)
+                var_w = jnp.sum(w_expanded * (v_expanded - mean_w)**2, axis=0)
+                
+                # Unweighted variance
+                # mean is (P...). value is (S, P...). Broadcasts fine.
+                var = jnp.mean((value - mean)**2, axis=0)
+            
+            moments[name] = {
+                'mean': mean,
+                'mean_w': mean_w,
+                'var': var,
+                'var_w': var_w
+            }
+            
+        return moments
+
+    def _transform_mm1(self, params: Dict[str, Any], data: Dict[str, Any],
+                       weight_fn=None, log_ell_original=None, variational=False, log_pi=None, **kwargs) -> Dict[str, Any]:
+        """Moment Matching transformation 1 (Shift by weighted mean diff)."""
+        if log_ell_original is None:
+             raise ValueError("log_ell_original is required for MM1 transformation")
+        # Fix: Compute weights correctly using the helper (which computes log_ell)
+        # We need log_ell_original if not provided
+        log_w = -log_ell_original
+        log_w = jax.lax.stop_gradient(log_w)
+        weights = jnp.exp(log_w)
+        
+        moments = self._compute_moments(params, weights)
+        
+        new_params = {}
+        for name, value in params.items():
+            m = moments[name]
+            # beta_adj = beta + 1 * (-beta_hat + beta_hat_w)
+            # Shapes: value (S x ...), mean (Scalar or K), mean_w (N or N x K)
+            
+            if value.ndim == 1:
+                # Value: S
+                # Mean: Scalar
+                # Mean_w: N
+                diff = -m['mean'] + m['mean_w'] # N
+                new_params[name] = value[:, jnp.newaxis] + diff[jnp.newaxis, :] # S x N
+            else:
+                # Value: S x K
+                # Mean: K
+                # Mean_w: N x K
+                diff = -m['mean'][jnp.newaxis, :] + m['mean_w'] # N x K
+                new_params[name] = value[:, jnp.newaxis, :] + diff[jnp.newaxis, :, :] # S x N x K
+                
+        # MM1 returns 0 log Jacobian adjustment (see validaty in notebook) or implies volume preservation?
+        # The notebook returns tf.zeros_like(ell). It's a pure shift so jacobian is 0.
+        log_jacobian = jnp.zeros_like(log_w)
+        
+        # Compute final importance weights
+        eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
+            data, params, new_params, log_jacobian, variational, log_pi_original=log_pi, log_ell_original=log_ell_original
+        )
+        
+        # Compute predictions and diagnostics
+        predictions = self.likelihood_fn.log_likelihood(data, new_params)
+        
+        weight_entropy = self.entropy(eta_weights)
+        psis_entropy = self.entropy(psis_weights)
+        
+        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
+        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+        
+        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
+        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+        
+        return {
+            'eta_weights': eta_weights,
+            'psis_weights': psis_weights,
+            'p_loo_eta': p_loo_eta,
+            'p_loo_psis': p_loo_psis,
+            'll_loo_eta': ll_loo_eta,
+            'll_loo_psis': ll_loo_psis,
+            'weight_entropy': weight_entropy,
+            'psis_entropy': psis_entropy,
+            'khat': khat
+        }
+
+    def _transform_mm2(self, params: Dict[str, Any], data: Dict[str, Any],
+                       weight_fn=None, log_ell_original=None, variational=False, log_pi=None, **kwargs) -> Dict[str, Any]:
+        """Moment Matching transformation 2 (Shift + Scale)."""
+        if log_ell_original is None:
+              raise ValueError("log_ell_original is required for MM2 transformation")
+        
+        log_w = -log_ell_original
+        log_w = jax.lax.stop_gradient(log_w)
+        weights = jnp.exp(log_w)
+        
+        moments = self._compute_moments(params, weights)
+        
+        new_params = {}
+        # log_det_jac needs to match shape of log_w (S, N)
+        # Calculating per-parameter contribution and summing
+        log_det_jac = jnp.zeros_like(log_w)
+        
+        for name, value in params.items():
+            m = moments[name]
+            # beta_adj = beta + 1 * ( (sqrt(v_w/v) - 1)*beta - sqrt(v_w/v)*beta_hat + beta_hat_w )
+            # This simplifies to: beta_adj = sqrt(v_w/v)*(beta - beta_hat) + beta_hat_w
+            
+            if value.ndim == 1:
+                ratio = jnp.sqrt(m['var_w'] / (m['var'] + 1e-10)) # N
+                # Term 1: ratio * (value - mean)
+                term1 = ratio[jnp.newaxis, :] * (value[:, jnp.newaxis] - m['mean']) # S x N
+                new_value = term1 + m['mean_w'][jnp.newaxis, :] # S x N
+                new_params[name] = new_value
+                
+                # Log Jacobian: sum log(ratio)
+                # Here dimension is 1, so just log(ratio)
+                log_det_jac += jnp.log(ratio)[jnp.newaxis, :]
+            else:
+                # Ratio: N x K
+                ratio = jnp.sqrt(m['var_w'] / (m['var'][jnp.newaxis, :] + 1e-10)) 
+                
+                # Term 1: ratio * (value - mean)
+                # value: S x K -> S x 1 x K
+                # mean: K -> 1 x 1 x K
+                # term1: S x N x K
+                term1 = ratio[jnp.newaxis, :, :] * (value[:, jnp.newaxis, :] - m['mean'][jnp.newaxis, jnp.newaxis, :])
+                new_value = term1 + m['mean_w'][jnp.newaxis, :, :]
+                new_params[name] = new_value
+                
+                # Log Jacobian: sum over parameter dimensions
+                reduction_axes = tuple(range(1, ratio.ndim))
+                log_det_jac += jnp.sum(jnp.log(ratio), axis=reduction_axes)[jnp.newaxis, :]
+                
+        log_jacobian = log_det_jac
+        
+        # Compute final importance weights
+        eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
+            data=data, params_original=params, params_transformed=new_params, log_jacobian=log_jacobian, variational=variational, log_pi_original=log_pi, log_ell_original=log_ell_original
+        )
+        
+        # Compute predictions and diagnostics
+        predictions = self.likelihood_fn.log_likelihood(data, new_params)
+        
+        weight_entropy = self.entropy(eta_weights)
+        psis_entropy = self.entropy(psis_weights)
+        
+        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
+        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+        
+        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
+        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+        
+        return {
+            'eta_weights': eta_weights,
+            'psis_weights': psis_weights,
+            'p_loo_eta': p_loo_eta,
+            'p_loo_psis': p_loo_psis,
+            'll_loo_eta': ll_loo_eta,
+            'll_loo_psis': ll_loo_psis,
+            'weight_entropy': weight_entropy,
+            'psis_entropy': psis_entropy,
+            'khat': khat
+        }
+
+    def _transform_pmm1(self, params: Dict[str, Any], data: Dict[str, Any],
+                        weight_fn=None, log_ell_original=None, hbar=1.0, variational=False, log_pi=None, **kwargs) -> Dict[str, Any]:
+        """Partial Moment Matching 1 (MM1 with step size hbar)."""
+        # Exactly like MM1 but scaled by hbar
+        # beta_adj = beta + hbar * (-beta_hat + beta_hat_w)
+        
+        if log_ell_original is None:
+              raise ValueError("log_ell_original is required for PMM1 transformation")
+        
+        log_w = -log_ell_original
+        log_w = jax.lax.stop_gradient(log_w)
+        weights = jnp.exp(log_w)
+        
+        moments = self._compute_moments(params, weights)
+        
+        new_params = {}
+        for name, value in params.items():
+            m = moments[name]
+            
+            if value.ndim == 1:
+                diff = -m['mean'] + m['mean_w'] # N
+                new_params[name] = value[:, jnp.newaxis] + hbar * diff[jnp.newaxis, :]
+            else:
+                diff = -m['mean'][jnp.newaxis, :] + m['mean_w'] # N x K
+                new_params[name] = value[:, jnp.newaxis, :] + hbar * diff[jnp.newaxis, :, :]
+                
+        # Jacobian is still 0 because it's a shift
+        log_jacobian = jnp.zeros_like(log_w)
+        
+        # Compute final importance weights
+        eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
+            data=data, params_original=params, params_transformed=new_params, log_jacobian=log_jacobian, variational=variational, log_pi_original=log_pi, log_ell_original=log_ell_original
+        )
+        
+        # Compute predictions and diagnostics
+        predictions = self.likelihood_fn.log_likelihood(data, new_params)
+        
+        weight_entropy = self.entropy(eta_weights)
+        psis_entropy = self.entropy(psis_weights)
+        
+        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
+        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+        
+        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
+        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+        
+        return {
+            'eta_weights': eta_weights,
+            'psis_weights': psis_weights,
+            'p_loo_eta': p_loo_eta,
+            'p_loo_psis': p_loo_psis,
+            'll_loo_eta': ll_loo_eta,
+            'll_loo_psis': ll_loo_psis,
+            'weight_entropy': weight_entropy,
+            'psis_entropy': psis_entropy,
+            'khat': khat
+        }
+
+    def _transform_pmm2(self, params: Dict[str, Any], data: Dict[str, Any],
+                        weight_fn=None, log_ell_original=None, hbar=1.0, variational=False, log_pi=None, **kwargs) -> Dict[str, Any]:
+        """Partial Moment Matching 2 (MM2 with step size hbar)."""
+        # beta_adj = beta + hbar * ( (sqrt(v_w/v) - 1)*beta - sqrt(v_w/v)*beta_hat + beta_hat_w )
+        # beta_adj = beta + hbar * ( (ratio - 1)*beta - ratio*mean + mean_w )
+        # beta_adj = beta * (1 + hbar*(ratio - 1)) + hbar*(mean_w - ratio*mean)
+        
+        if log_ell_original is None:
+             raise ValueError("log_ell_original is required for PMM2 transformation")
+        
+        log_w = -log_ell_original
+        log_w = jax.lax.stop_gradient(log_w)
+        weights = jnp.exp(log_w)
+        
+        moments = self._compute_moments(params, weights)
+        
+        new_params = {}
+        log_det_jac = jnp.zeros_like(log_w)
+        
+        for name, value in params.items():
+            m = moments[name]
+            
+            if value.ndim == 1:
+                ratio = jnp.sqrt(m['var_w'] / (m['var'] + 1e-10)) # N
+                
+                # Scaling factor: 1 + hbar * (ratio - 1)
+                scale = 1.0 + hbar * (ratio - 1.0) # N
+                
+                # Shift: hbar * (mean_w - ratio * mean)
+                shift = hbar * (m['mean_w'] - ratio * m['mean']) # N
+                
+                new_params[name] = value[:, jnp.newaxis] * scale[jnp.newaxis, :] + shift[jnp.newaxis, :]
+                
+                # Jacobian: log(scale)
+                log_det_jac += jnp.log(jnp.abs(scale))[jnp.newaxis, :]
+                
+            else:
+                # Ratio: N x K
+                ratio = jnp.sqrt(m['var_w'] / (m['var'][jnp.newaxis, :] + 1e-10)) 
+                
+                scale = 1.0 + hbar * (ratio - 1.0) # N x K
+                shift = hbar * (m['mean_w'] - ratio * m['mean'][jnp.newaxis, :]) # N x K
+                
+                new_params[name] = value[:, jnp.newaxis, :] * scale[jnp.newaxis, :, :] + shift[jnp.newaxis, :, :]
+                
+                # Jacobian: sum(log(scale)) over parameter dimensions
+                reduction_axes = tuple(range(1, scale.ndim))
+                log_det_jac += jnp.sum(jnp.log(jnp.abs(scale)), axis=reduction_axes)[jnp.newaxis, :]
+                
+        log_jacobian = log_det_jac
+        
+        # Compute final importance weights
+        eta_weights, psis_weights, khat, log_ell_new = self._compute_importance_weights(
+            data=data, params_original=params, params_transformed=new_params, log_jacobian=log_jacobian, variational=variational, log_pi_original=log_pi, log_ell_original=log_ell_original
+        )
+        
+        # Compute predictions and diagnostics
+        predictions = self.likelihood_fn.log_likelihood(data, new_params)
+        
+        weight_entropy = self.entropy(eta_weights)
+        psis_entropy = self.entropy(psis_weights)
+        
+        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
+        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+        
+        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
+        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+        
+        return {
+            'eta_weights': eta_weights,
+            'psis_weights': psis_weights,
+            'p_loo_eta': p_loo_eta,
+            'p_loo_psis': p_loo_psis,
+            'll_loo_eta': ll_loo_eta,
+            'll_loo_psis': ll_loo_psis,
+            'weight_entropy': weight_entropy,
+            'psis_entropy': psis_entropy,
+            'khat': khat
+        }
 
 # Legacy classes for backward compatibility
 class AdaptiveIsSampler(ABC):
@@ -566,6 +1063,7 @@ class SmallStepTransformation(Bijection):
         return
 
 
+
 # Example implementations for common likelihood functions
 
 class LogisticRegressionLikelihood(LikelihoodFunction):
@@ -583,7 +1081,10 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         intercept = params["intercept"]  # (n_samples,)
 
         # Linear predictor: X @ beta.T + intercept
-        mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]  # (n_samples, n_data)
+        if beta.ndim == 3:
+            mu = jnp.einsum('df,sdf->sd', X, beta) + intercept
+        else:
+            mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
 
         # Sigmoid and log-likelihood
         sigma = jax.nn.sigmoid(mu)
@@ -660,89 +1161,7 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         return {"beta": beta, "intercept": intercept}
 
 
-class PoissonRegressionLikelihood(LikelihoodFunction):
-    """Likelihood function for Poisson regression."""
 
-    def __init__(self, dtype=jnp.float32):
-        self.dtype = dtype
-
-    def log_likelihood(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
-        """Compute log-likelihood for Poisson regression."""
-        X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)  # counts
-
-        beta = params["beta"]
-        intercept = params["intercept"]
-
-        # Log rate
-        log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
-        rate = jnp.exp(log_rate)
-
-        # Poisson log-likelihood: y * log(rate) - rate - log(y!)
-        # We omit log(y!) as it doesn't depend on parameters
-        log_lik = y[jnp.newaxis, :] * log_rate - rate
-
-        return log_lik
-
-    def log_likelihood_gradient(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
-        """Compute gradient of log-likelihood."""
-        X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)
-
-        beta = params["beta"]
-        intercept = params["intercept"]
-
-        log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
-        rate = jnp.exp(log_rate)
-
-        # Gradient w.r.t. log rate
-        grad_log_rate = y[jnp.newaxis, :] - rate
-
-        # Gradient w.r.t. beta
-        grad_beta = jnp.einsum('df,sd->sdf', X, grad_log_rate)
-
-        # Gradient w.r.t. intercept
-        grad_intercept = grad_log_rate[..., jnp.newaxis]
-
-        gradients = jnp.concatenate([grad_beta, grad_intercept], axis=-1)
-        return gradients
-
-    def log_likelihood_hessian_diag(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
-        """Compute diagonal of Hessian."""
-        X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)
-
-        beta = params["beta"]
-        intercept = params["intercept"]
-
-        log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
-        rate = jnp.exp(log_rate)
-
-        # Hessian diagonal w.r.t. log rate
-        hess_diag_log_rate = -rate
-
-        # Hessian diagonal w.r.t. beta
-        hess_diag_beta = jnp.einsum('df,sd->sdf', X**2, hess_diag_log_rate)
-
-        # Hessian diagonal w.r.t. intercept
-        hess_diag_intercept = hess_diag_log_rate[..., jnp.newaxis]
-
-        hess_diag = jnp.concatenate([hess_diag_beta, hess_diag_intercept], axis=-1)
-        return hess_diag
-
-    def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
-        """Extract parameters into flattened array."""
-        beta = params["beta"]
-        intercept = params["intercept"]
-        theta = jnp.concatenate([beta, intercept[:, jnp.newaxis]], axis=-1)
-        return theta
-
-    def reconstruct_parameters(self, flat_params: jnp.ndarray, template: Dict[str, Any]) -> Dict[str, Any]:
-        """Reconstruct parameters from flattened array."""
-        n_features = template["beta"].shape[-1]
-        beta = flat_params[..., :n_features]
-        intercept = flat_params[..., n_features]
-        return {"beta": beta, "intercept": intercept}
 
 
 class LinearRegressionLikelihood(LikelihoodFunction):
@@ -761,8 +1180,14 @@ class LinearRegressionLikelihood(LikelihoodFunction):
         log_sigma = params.get("log_sigma", jnp.zeros((beta.shape[0],)))  # Log noise std
 
         # Predictions
-        mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
-        sigma = jnp.exp(log_sigma)[:, jnp.newaxis]
+        if beta.ndim == 3:
+            mu = jnp.einsum('df,sdf->sd', X, beta) + intercept
+        else:
+            mu = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
+        
+        sigma = jnp.exp(log_sigma)
+        if log_sigma.ndim == 1:
+             sigma = sigma[:, jnp.newaxis]
 
         # Gaussian log-likelihood
         residuals = y[jnp.newaxis, :] - mu
@@ -834,3 +1259,4 @@ class LinearRegressionLikelihood(LikelihoodFunction):
             result["log_sigma"] = log_sigma
 
         return result
+

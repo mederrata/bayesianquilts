@@ -15,3 +15,4 @@ numpy
 orbax-checkpoint
 grain
 arviz
+notebook

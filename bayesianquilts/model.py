@@ -2,7 +2,10 @@ import gzip
 import inspect
 import pathlib
 from abc import ABC, abstractmethod
-from typing import Callable, Dict
+from typing import Any, Callable, Dict
+import os
+import yaml
+import h5py
 
 import dill
 import jax
@@ -18,6 +21,11 @@ from tqdm import tqdm
 from bayesianquilts.jax.parameter import Interactions
 from bayesianquilts.util import training_loop
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
+import bayesianquilts.tfp_patch
+
+import tensorflow_probability.substrates.jax as tfp
+tfmcmc = tfp.mcmc
+tfd = tfp.distributions
 
 def FactorizedDistributionMoments(dist, samples=100):
     try:
@@ -38,13 +46,14 @@ def FactorizedDistributionMoments(dist, samples=100):
 
 
 class BayesianModel(nnx.Module, ABC):
-    surrogate_distribution = None
-    surrogate_sample = None
-    prior_distribution = None
-    data = None
-    data_cardinality = None
-    var_list = []
-    bijectors = []
+    surrogate_distribution: Any = nnx.data(None)
+    surrogate_sample: Any = nnx.data(None)
+    prior_distribution: Any = nnx.data(None)
+    data: Any = nnx.data(None)
+    data_cardinality: Any = nnx.data(None)
+    params: Any = nnx.data(None)
+    var_list: list = []
+    bijectors: list = []
 
     def __init__(
         self,
@@ -65,6 +74,8 @@ class BayesianModel(nnx.Module, ABC):
         self.data_transform_fn = data_transform_fn
 
         self.dtype = dtype
+        self.params = None
+        self.mcmc_samples = None
 
     def fit(
         self,
@@ -72,8 +83,18 @@ class BayesianModel(nnx.Module, ABC):
         initial_values: Dict[str, jax.typing.ArrayLike] = None,
         **kwargs,
     ):
+        def infinite_data_iterator():
+            while True:
+                # Re-instantiate the iterator from the factory
+                iterator = batched_data_factory()
+                try:
+                    yield from iterator
+                except TypeError:
+                    # If it's not iterable?
+                    yield iterator
+        
         res = self._calibrate_minibatch_advi(
-            iter(batched_data_factory()), initial_values=initial_values, **kwargs
+            infinite_data_iterator(), initial_values=initial_values, **kwargs
         )
         self.params = res[1]
         return res
@@ -256,11 +277,92 @@ class BayesianModel(nnx.Module, ABC):
             with open(filename, "wb") as file:
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
-        else:
-            filename = filename.with_suffix(".pkl.gz")
-            with gzip.open(filename, "wb") as file:
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
+
+    def save_to_disk(self, path):
+        """Serialize model to disk using YAML config and HDF5 parameters."""
+        path = pathlib.Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        
+        # 1. Save Config (args to __init__)
+        argspec = inspect.getfullargspec(self.__init__)
+        args = argspec.args[1:] # skip self
+        config = {}
+        for arg in args:
+            if hasattr(self, arg):
+                config[arg] = getattr(self, arg)
+            elif hasattr(self, "_" + arg):
+                config[arg] = getattr(self, "_" + arg)
+        
+        def _clean(obj):
+            if isinstance(obj, (jnp.ndarray, np.ndarray)):
+                return obj.tolist()
+            if hasattr(obj, 'dtype'): # check if it is a type that looks like a dtype or array
+                 if isinstance(obj, type):
+                     return obj.__name__
+            if isinstance(obj, type): # generic type handling
+                return obj.__name__
+            if hasattr(obj, 'item'):
+                return obj.item()
+            if isinstance(obj, list):
+                return [_clean(x) for x in obj]
+            if isinstance(obj, dict):
+                return {k: _clean(v) for k, v in obj.items()}
+            return obj
+
+        config = _clean(config)
+        config['_class_name'] = self.__class__.__name__
+
+        with open(path / "config.yaml", "w") as f:
+            yaml.dump(config, f)
+            
+        # 2. Save Parameters (HDF5)
+        with h5py.File(path / "params.h5", "w") as f:
+            if self.params is not None and hasattr(self.params, "items"):
+                grp = f.create_group("params")
+                for k, v in self.params.items():
+                    grp.create_dataset(k, data=np.array(v))
+            
+            if self.mcmc_samples is not None and hasattr(self.mcmc_samples, "items"):
+                grp = f.create_group("mcmc_samples")
+                for k, v in self.mcmc_samples.items():
+                    grp.create_dataset(k, data=np.array(v))
+
+    @classmethod
+    def load_from_disk(cls, path):
+        """Load model from disk."""
+        path = pathlib.Path(path)
+        with open(path / "config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+            
+        class_name = config.pop('_class_name', None)
+        # Verify class name if needed
+        
+        # Filter config args that match __init__ to avoid unexpected kwargs error
+        argspec = inspect.getfullargspec(cls.__init__)
+        valid_args = set(argspec.args[1:] + argspec.kwonlyargs)
+        if argspec.varkw:
+             # accepts any kwargs
+             init_kwargs = config
+        else:
+             init_kwargs = {k: v for k, v in config.items() if k in valid_args}
+
+        instance = cls(**init_kwargs)
+        
+        if (path / "params.h5").exists():
+            with h5py.File(path / "params.h5", "r") as f:
+                if "params" in f:
+                    instance.params = {k: jnp.array(v) for k, v in f["params"].items()}
+                if "mcmc_samples" in f:
+                    # Handle both group-style and dataset-style storage
+                    if isinstance(f["mcmc_samples"], h5py.Group):
+                        instance.mcmc_samples = {k: jnp.array(v) for k, v in f["mcmc_samples"].items()}
+                    else:
+                        # Fallback if it's stored differently
+                        instance.mcmc_samples = jnp.array(f["mcmc_samples"])
+                    
+        return instance
 
 
     def unormalized_log_prob_list(self, data, params, prior_weight=1.0):
@@ -333,6 +435,290 @@ class BayesianModel(nnx.Module, ABC):
             params = surrogate.sample(batch_shape, seed=sample_key)
         params = self.transform(params)
         return params
+
+    # =========================================================================
+    # MCMC Inference Methods
+    # =========================================================================
+
+    mcmc_samples: Any = nnx.data(None)  # Storage for MCMC samples
+
+    def fit_mcmc(
+        self,
+        data: Dict[str, jax.typing.ArrayLike],
+        num_chains: int = 4,
+        num_warmup: int = 1000,
+        num_samples: int = 1000,
+        target_accept_prob: float = 0.8,
+        max_tree_depth: int = 10,
+        step_size: float = 0.1,
+        init_strategy: str = "prior",
+        initial_states: Dict[str, jnp.ndarray] = None,  # NEW: accept custom initial states
+        seed: int = None,
+        verbose: bool = True,
+        **kwargs,
+    ) -> Dict[str, jnp.ndarray]:
+        """Perform MCMC inference using NUTS (No-U-Turn Sampler).
+
+        Uses Stan-like defaults for robust sampling.
+
+        Args:
+            data: Dictionary of data arrays (e.g., {'X': ..., 'y': ...})
+            num_chains: Number of independent chains (Stan default: 4)
+            num_warmup: Number of warmup/burn-in steps per chain (Stan default: 1000)
+            num_samples: Number of post-warmup samples per chain (Stan default: 1000)
+            target_accept_prob: Target acceptance probability for dual averaging
+                (Stan's adapt_delta, default: 0.8, increase to 0.85-0.99 for difficult posteriors)
+            max_tree_depth: Maximum tree depth for NUTS (Stan default: 10)
+            step_size: Initial step size for HMC/NUTS (will be adapted during warmup)
+            init_strategy: How to initialize chains - "prior" or "zero" (ignored if initial_states provided)
+            initial_states: Optional dict with custom initial states of shape (num_chains, ...)
+                If provided, overrides init_strategy. Useful for MAP-based initialization.
+            seed: Random seed (uses random seed if None)
+            verbose: Whether to print progress information
+
+        Returns:
+            Dictionary mapping parameter names to arrays of shape (num_chains, num_samples, ...)
+        """
+        if seed is None:
+            seed = np.random.randint(0, 2**31)
+        key = random.PRNGKey(seed)
+
+        if verbose:
+            print(f"Running NUTS with {num_chains} chains...")
+            print(f"  Warmup: {num_warmup}, Samples: {num_samples}")
+            print(f"  Target acceptance: {target_accept_prob}, Max tree depth: {max_tree_depth}")
+
+        # Create target log probability function
+        def target_log_prob_fn(*params_flat):
+            params_dict = {k: v for k, v in zip(self.var_list, params_flat)}
+            return self.unormalized_log_prob(data=data, prior_weight=1.0, **params_dict)
+
+        # Initialize chains
+        key, init_key = random.split(key)
+        if initial_states is None:
+            initial_states = self._create_initial_states(
+                num_chains, init_strategy, init_key
+            )
+        else:
+            if verbose:
+                print("  Using custom initial states")
+
+        # Run MCMC for each chain
+        all_samples = {var: [] for var in self.var_list}
+        all_accept_ratios = []
+
+        for chain_idx in range(num_chains):
+            key, chain_key = random.split(key)
+            
+            if verbose:
+                print(f"\nChain {chain_idx + 1}/{num_chains}:")
+
+            chain_initial = [initial_states[var][chain_idx] for var in self.var_list]
+            
+            samples, accept_ratio = self._run_nuts_chain(
+                target_log_prob_fn=target_log_prob_fn,
+                initial_state=chain_initial,
+                num_warmup=num_warmup,
+                num_samples=num_samples,
+                step_size=step_size,
+                target_accept_prob=target_accept_prob,
+                max_tree_depth=max_tree_depth,
+                seed=chain_key,
+                verbose=verbose,
+            )
+
+            # Store results if chain is healthy
+            if accept_ratio > 1e-6:
+                for var, sample in zip(self.var_list, samples):
+                    all_samples[var].append(sample)
+                all_accept_ratios.append(accept_ratio)
+            else:
+                if verbose:
+                    print(f"  Chain {chain_idx + 1} discarded (acceptance ratio {accept_ratio:.3e} too low)")
+
+        # Stack chains: (num_valid_chains, num_samples, ...)
+        result = {}
+        num_valid_chains = len(all_accept_ratios)
+        
+        if num_valid_chains == 0:
+            print("WARNING: All chains failed to converge (zero acceptance). Returning last chain to avoid crash.")
+            # Fallback: keep the last chain even if bad so we have structure
+            for var, sample in zip(self.var_list, samples):
+                all_samples[var].append(sample)
+            all_accept_ratios.append(accept_ratio)
+
+        for var in self.var_list:
+            result[var] = jnp.stack(all_samples[var], axis=0)
+
+        if verbose:
+            mean_accept = np.mean(all_accept_ratios)
+            print(f"\n--- MCMC Complete ---")
+            print(f"Mean acceptance ratio: {mean_accept:.3f}")
+            for var in self.var_list:
+                # Calculate R-hat
+                # potential_scale_reduction expects shape [num_chains, num_samples, ...]
+                # but TFP sometimes expects [num_samples, num_chains, ...] depending on version
+                # Checking docs: TFP uses [num_samples, num_chains, ...] by default but independent_chain_ndims=1
+                # lets us pass [num_chains, num_samples, ...]. 
+                # Actually, simpler to just transpose to [num_samples, num_chains, ...]
+                samples_transposed = jnp.swapaxes(result[var], 0, 1)
+                rhat = tfmcmc.potential_scale_reduction(samples_transposed)
+                
+                # Check for NaNs in R-hat (can happen if variance is 0)
+                rhat = jnp.where(jnp.isnan(rhat), 1.0, rhat)
+                max_rhat = jnp.max(rhat)
+                
+                samples_flat = result[var].reshape(-1, *result[var].shape[2:])
+                print(f"  {var}: mean={jnp.mean(samples_flat, axis=0)}, std={jnp.std(samples_flat, axis=0)}, max_rhat={max_rhat:.3f}")
+
+        # Store samples for later use
+        self.mcmc_samples = result
+        return result
+
+    def _create_initial_states(
+        self,
+        num_chains: int,
+        init_strategy: str,
+        key: jax.Array,
+    ) -> Dict[str, jnp.ndarray]:
+        """Create initial states for MCMC chains.
+
+        Args:
+            num_chains: Number of chains
+            init_strategy: "prior" to sample from prior, "zero" for zeros
+            key: JAX random key
+
+        Returns:
+            Dictionary mapping variable names to initial values of shape (num_chains, ...)
+        """
+        if init_strategy == "prior" and self.prior_distribution is not None:
+            # Sample from prior
+            samples = self.prior_distribution.sample(num_chains, seed=key)
+            if isinstance(samples, dict):
+                return samples
+            else:
+                return {self.var_list[0]: samples}
+        elif init_strategy == "zero":
+            # Initialize at zero (assumes unconstrained parameterization)
+            result = {}
+            # Get shapes from surrogate or prior
+            if hasattr(self, 'surrogate_parameter_initializer'):
+                template = self.surrogate_parameter_initializer(key=key)
+                for var in self.var_list:
+                    # Find the location parameter for this variable
+                    loc_key = f"{var}_loc" if f"{var}_loc" in template else var
+                    if loc_key in template:
+                        shape = template[loc_key].shape
+                        result[var] = jnp.zeros((num_chains,) + shape, dtype=self.dtype)
+            return result
+        else:
+            # Default: small random values
+            result = {}
+            keys = random.split(key, len(self.var_list))
+            if hasattr(self, 'surrogate_parameter_initializer'):
+                template = self.surrogate_parameter_initializer(key=key)
+                for i, var in enumerate(self.var_list):
+                    loc_key = f"{var}_loc" if f"{var}_loc" in template else var
+                    if loc_key in template:
+                        shape = template[loc_key].shape
+                        result[var] = random.normal(keys[i], (num_chains,) + shape, dtype=self.dtype) * 0.1
+            return result
+
+    def _run_nuts_chain(
+        self,
+        target_log_prob_fn: Callable,
+        initial_state: list,
+        num_warmup: int,
+        num_samples: int,
+        step_size: float,
+        target_accept_prob: float,
+        max_tree_depth: int,
+        seed: jax.Array,
+        verbose: bool = True,
+    ) -> tuple:
+        """Run a single NUTS chain.
+
+        Args:
+            target_log_prob_fn: Unnormalized log probability function
+            initial_state: List of initial values for each parameter
+            num_warmup: Number of warmup steps
+            num_samples: Number of sampling steps
+            step_size: Initial step size
+            target_accept_prob: Target acceptance probability
+            max_tree_depth: Maximum tree depth
+            seed: Random key
+            verbose: Print progress
+
+        Returns:
+            Tuple of (samples_list, mean_accept_ratio)
+        """
+        # Create NUTS kernel with step size adaptation
+        nuts_kernel = tfmcmc.NoUTurnSampler(
+            target_log_prob_fn=target_log_prob_fn,
+            step_size=step_size,
+            max_tree_depth=max_tree_depth,
+        )
+
+        # Wrap with dual averaging step size adaptation
+        # Adapt for full warmup period for better convergence (was 80%)
+        adaptive_kernel = tfmcmc.DualAveragingStepSizeAdaptation(
+            inner_kernel=nuts_kernel,
+            num_adaptation_steps=num_warmup,
+            target_accept_prob=target_accept_prob,
+        )
+
+        # Run the chain
+        @jax.jit
+        def run_chain(init_state, seed):
+            samples, kernel_results = tfmcmc.sample_chain(
+                num_results=num_samples,
+                num_burnin_steps=num_warmup,
+                current_state=init_state,
+                kernel=adaptive_kernel,
+                seed=seed,
+                trace_fn=lambda _, pkr: pkr.inner_results.is_accepted,
+            )
+            return samples, kernel_results
+
+        if verbose:
+            print("  Running warmup and sampling...")
+
+        samples, is_accepted = run_chain(initial_state, seed)
+
+        # Compute acceptance ratio
+        accept_ratio = jnp.mean(is_accepted.astype(jnp.float32))
+
+        if verbose:
+            print(f"  Acceptance ratio: {accept_ratio:.3f}")
+
+        return samples, float(accept_ratio)
+
+    def sample_mcmc(self, num_samples: int = None) -> Dict[str, jnp.ndarray]:
+        """Sample from stored MCMC results.
+
+        Args:
+            num_samples: Number of samples to return. If None, returns all.
+                Samples are drawn randomly from all chains.
+
+        Returns:
+            Dictionary of parameter samples with shape (num_samples, ...)
+        """
+        if self.mcmc_samples is None:
+            raise ValueError("No MCMC samples available. Run fit_mcmc() first.")
+
+        result = {}
+        for var, samples in self.mcmc_samples.items():
+            # Flatten chains: (num_chains, num_samples, ...) -> (total, ...)
+            flat = samples.reshape(-1, *samples.shape[2:])
+            if num_samples is not None and num_samples < flat.shape[0]:
+                # Random subsample
+                key = random.PRNGKey(np.random.randint(0, 2**31))
+                indices = random.choice(key, flat.shape[0], (num_samples,), replace=False)
+                result[var] = flat[indices]
+            else:
+                result[var] = flat
+        return result
+
 
     def to_arviz(self, data_factory=None):
         sample_stats = self.sample_stats(data_factory=data_factory)
