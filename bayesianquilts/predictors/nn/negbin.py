@@ -6,27 +6,48 @@ import tensorflow_probability.substrates.jax.distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from bayesianquilts.predictors.nn.dense import DenseHorseshoe
 
-class NeuralPoissonRegression(DenseHorseshoe):
+class NeuralNegativeBinomialRegression(DenseHorseshoe):
     def __init__(
         self,
         dim_regressors: int,
         hidden_size: int = 4,
         depth: int = 2,
         output_scale: float = 1.0,
-        prior_scale: float = 1.0,
+        zero_inflated: bool = True,
         dtype: tf.DType = jnp.float32,
         **kwargs
     ):
-        # Architecture: input -> [hidden]*depth -> output (1)
-        layer_sizes = [hidden_size] * depth + [1]
+        """
+        Neural Negative Binomial Regression with optional zero-inflation.
 
-        super(NeuralPoissonRegression, self).__init__(
+        Args:
+            dim_regressors: Number of input features
+            hidden_size: Number of neurons per hidden layer
+            depth: Number of hidden layers
+            output_scale: Scaling factor for mean parameter (typically y.mean())
+            zero_inflated: If True, uses zero-inflated negative binomial
+            dtype: Data type for computations
+
+        Network outputs:
+            If zero_inflated=True: [zero_logit, log_mean, log_concentration]
+            If zero_inflated=False: [log_mean, log_concentration]
+
+        Negative Binomial parameterization:
+            mean: Expected count (mu)
+            concentration: Overdispersion parameter (r or alpha)
+            variance = mean + mean^2 / concentration
+            As concentration -> inf, approaches Poisson
+        """
+        # Output: 3 values if zero-inflated, 2 otherwise
+        output_size = 3 if zero_inflated else 2
+        layer_sizes = [hidden_size] * depth + [output_size]
+
+        super(NeuralNegativeBinomialRegression, self).__init__(
             input_size=dim_regressors,
             layer_sizes=layer_sizes,
             activation_fn=jax.nn.relu,
-            weight_scale=0.1,
-            bias_scale=0.1,
-            prior_scale=prior_scale,
+            weight_scale=0.05,
+            bias_scale=1.0,
             dtype=dtype,
             **kwargs
         )
@@ -35,32 +56,93 @@ class NeuralPoissonRegression(DenseHorseshoe):
         self.hidden_size = hidden_size
         self.depth = depth
         self.output_scale = output_scale
-        pass
-
+        self.zero_inflated = zero_inflated
 
     def predictive_distribution(self, data: dict, **params):
         X = data["X"].astype(self.dtype)
 
-        # Output of eval is (batch, 1) usually, or (samples, batch, 1)
-        # We need to handle parameter sampling dimensions
-        out = self.eval(X, params) # Shape: (..., batch_size, 1)
+        # Output of eval is (..., batch_size, output_size)
+        out = self.eval(X, params)
 
-        # Squeeze the last dimension to get rate log-scale
-        log_rate = jnp.squeeze(out, axis=-1)
-        # Apply output scaling: rate = output_scale * exp(network_output)
-        log_rate = log_rate + jnp.log(self.output_scale)
-        rate = jnp.exp(log_rate)
+        if self.zero_inflated:
+            # Split outputs: [zero_logit, log_mean, log_concentration]
+            zero_logit = out[..., 0]  # Logit for zero-inflation probability
+            log_mean = out[..., 1]
+            log_concentration = out[..., 2]
+
+            # Zero-inflation probability
+            zero_prob = jax.nn.sigmoid(zero_logit)
+        else:
+            # Split outputs: [log_mean, log_concentration]
+            log_mean = out[..., 0]
+            log_concentration = out[..., 1]
+            zero_prob = None
+
+        # Apply output scaling to mean
+        log_mean = log_mean + jnp.log(self.output_scale)
+        mean = jnp.exp(log_mean)
+
+        # Concentration (overdispersion parameter)
+        # Add small constant for numerical stability
+        concentration = jnp.exp(log_concentration) + 1e-6
+
+        # Convert (mean, concentration) to NegativeBinomial parameters
+        # For NegativeBinomial(total_count, probs):
+        #   mean = total_count * probs / (1 - probs)
+        # Solving: total_count = concentration, probs = concentration / (concentration + mean)
+        total_count = concentration
+        probs = concentration / (concentration + mean)
+
+        # Clip probs for numerical stability
+        probs = jnp.clip(probs, 1e-6, 1 - 1e-6)
 
         log_lik = None
         if 'y' in data:
-            rv = tfd.Poisson(rate=rate)
-            log_lik = rv.log_prob(data['y'])
+            y = data['y']
 
-        return {
-            "prediction": rate,
+            if self.zero_inflated:
+                # Zero-inflated negative binomial log-likelihood
+                # P(Y=0) = zero_prob + (1 - zero_prob) * NB(0)
+                # P(Y>0) = (1 - zero_prob) * NB(y)
+
+                nb_dist = tfd.NegativeBinomial(total_count=total_count, probs=probs)
+                nb_logprob = nb_dist.log_prob(y)
+
+                # For y=0: log(zero_prob + (1-zero_prob)*exp(nb_logprob(0)))
+                # For y>0: log(1-zero_prob) + nb_logprob(y)
+                nb_logprob_zero = nb_dist.log_prob(jnp.zeros_like(y))
+
+                # Compute log-likelihood for y=0 case
+                # log(p + (1-p)*q) = log(p + (1-p)*q) using logsumexp
+                log_zero_prob = jnp.log(zero_prob + 1e-10)
+                log_one_minus_zero_prob = jnp.log(1 - zero_prob + 1e-10)
+
+                ll_zero = jnp.logaddexp(
+                    log_zero_prob,
+                    log_one_minus_zero_prob + nb_logprob_zero
+                )
+
+                # Compute log-likelihood for y>0 case
+                ll_nonzero = log_one_minus_zero_prob + nb_logprob
+
+                # Select based on whether y is zero
+                log_lik = jnp.where(y == 0, ll_zero, ll_nonzero)
+            else:
+                # Standard negative binomial
+                rv = tfd.NegativeBinomial(total_count=total_count, probs=probs)
+                log_lik = rv.log_prob(y)
+
+        result = {
+            "prediction": mean,
             "log_likelihood": log_lik,
-             "log_rate": log_rate
+            "mean": mean,
+            "concentration": concentration,
         }
+
+        if self.zero_inflated:
+            result["zero_prob"] = zero_prob
+
+        return result
 
     def log_likelihood(self, data, **params):
         return self.predictive_distribution(data, **params)["log_likelihood"]
@@ -68,8 +150,7 @@ class NeuralPoissonRegression(DenseHorseshoe):
     def unormalized_log_prob(self, data, prior_weight=1.0, **params):
         log_lik = self.log_likelihood(data, **params)
         prior = self.prior_distribution.log_prob(params)
-        # Sum log_lik over data points?
-        # log_lik shape: (S, N) or (N,)
+
         if log_lik.ndim > 1:
             total_ll = jnp.sum(log_lik, axis=-1)
         else:
@@ -80,36 +161,25 @@ class NeuralPoissonRegression(DenseHorseshoe):
 from bayesianquilts.metrics.ais import LikelihoodFunction
 import jax.flatten_util
 
-class NeuralPoissonLikelihood(LikelihoodFunction):
+class NeuralNegativeBinomialLikelihood(LikelihoodFunction):
     def __init__(self, model):
         self.model = model
         self.dtype = model.dtype
 
     def log_likelihood(self, data, params):
         w0 = params['w_0']
-        # Check w_0 rank to detect if we have per-datum parameters
-        # Standard MCMC: (S, D_in, H) -> Rank 3
-        # AIS per-datum: (S, N, D_in, H) -> Rank 4
         if w0.ndim == 4:
              # Case: (S, N, D, H). We must map over N.
              X = data['X']
              y = data['y']
 
              def single_data_ll(x_i, y_i, params_i):
-                 # params_i: (S, D, H)
-                 d = {'X': x_i[None, :], 'y': y_i} 
+                 d = {'X': x_i[None, :], 'y': y_i}
                  ll = self.model.log_likelihood(d, **params_i)
-                 # ll should be (S, 1) or (S,)
                  return jnp.squeeze(ll)
 
-             # Map over N (axis 0 of data, axis 1 of params)
              in_axes_params = jax.tree_util.tree_map(lambda x: 1, params)
-
-             # Result: (N, S)
              ll_val = jax.vmap(single_data_ll, in_axes=(0, 0, in_axes_params))(X, y, params)
-             
-             # Return (S, N). Use swapaxes to be safe for high rank
-             # If ll_val is (N, S), swaps to (S, N)
              return jnp.swapaxes(ll_val, 0, 1)
         else:
              return self.model.log_likelihood(data, **params)
@@ -119,7 +189,6 @@ class NeuralPoissonLikelihood(LikelihoodFunction):
         return flat_params, unflatten_fn
 
     def log_likelihood_gradient(self, data, params):
-        # Optimized gradient computation per datum
         one_sample_params = jax.tree_util.tree_map(lambda x: x[0], params)
         flat_proto, unflatten = jax.flatten_util.ravel_pytree(one_sample_params)
         flat_params_S = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)

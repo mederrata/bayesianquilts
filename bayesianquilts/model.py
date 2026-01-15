@@ -74,6 +74,8 @@ class BayesianModel(nnx.Module, ABC):
         self.data_transform_fn = data_transform_fn
 
         self.dtype = dtype
+        self.params = None
+        self.mcmc_samples = None
 
     def fit(
         self,
@@ -317,12 +319,12 @@ class BayesianModel(nnx.Module, ABC):
             
         # 2. Save Parameters (HDF5)
         with h5py.File(path / "params.h5", "w") as f:
-            if self.params is not None:
+            if self.params is not None and hasattr(self.params, "items"):
                 grp = f.create_group("params")
                 for k, v in self.params.items():
                     grp.create_dataset(k, data=np.array(v))
             
-            if self.mcmc_samples is not None:
+            if self.mcmc_samples is not None and hasattr(self.mcmc_samples, "items"):
                 grp = f.create_group("mcmc_samples")
                 for k, v in self.mcmc_samples.items():
                     grp.create_dataset(k, data=np.array(v))
@@ -353,7 +355,12 @@ class BayesianModel(nnx.Module, ABC):
                 if "params" in f:
                     instance.params = {k: jnp.array(v) for k, v in f["params"].items()}
                 if "mcmc_samples" in f:
-                    instance.mcmc_samples = {k: jnp.array(v) for k, v in f["mcmc_samples"].items()}
+                    # Handle both group-style and dataset-style storage
+                    if isinstance(f["mcmc_samples"], h5py.Group):
+                        instance.mcmc_samples = {k: jnp.array(v) for k, v in f["mcmc_samples"].items()}
+                    else:
+                        # Fallback if it's stored differently
+                        instance.mcmc_samples = jnp.array(f["mcmc_samples"])
                     
         return instance
 

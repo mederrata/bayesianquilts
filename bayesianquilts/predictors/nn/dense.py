@@ -161,6 +161,7 @@ class DenseHorseshoe(BayesianModel):
         activation_fn: Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike] | None = None,
         weight_scale: float = 1.0,
         bias_scale: float = 1.0,
+        prior_scale: float = 1.0,
         extra_batch_dims=0,
         dtype: jax.typing.DTypeLike = jnp.float64,
         **kwargs,
@@ -172,6 +173,7 @@ class DenseHorseshoe(BayesianModel):
         self.layer_sizes = [input_size] + layer_sizes
         self.weight_scale = weight_scale
         self.bias_scale = bias_scale
+        self.prior_scale = prior_scale
         self.nn = Dense(
             input_size=input_size,
             layer_sizes=layer_sizes,
@@ -228,7 +230,7 @@ class DenseHorseshoe(BayesianModel):
             bijectors[f"w_{j}"] = tfp.bijectors.Identity()
             distribution_dict[f"w_{j}"] = tfd.Independent(
                 tfd.Horseshoe(
-                    scale=jnp.ones(
+                    scale=self.prior_scale * jnp.ones(
                         [1] * self.extra_batch_dims
                         + [self.layer_sizes[j], self.layer_sizes[j + 1]],
                         dtype=self.dtype,
@@ -257,7 +259,7 @@ class DenseHorseshoe(BayesianModel):
 
             distribution_dict[f"b_{j}"] = tfd.Independent(
                 tfd.Horseshoe(
-                    scale=jnp.ones(
+                    scale=self.prior_scale * jnp.ones(
                         [1] * self.extra_batch_dims
                         + [
                             self.layer_sizes[j + 1],
@@ -278,6 +280,7 @@ class DenseHorseshoe(BayesianModel):
             )
         )
         self.params = self.surrogate_parameter_initializer()
+        self.var_list = list(self.prior_distribution.model.keys())
 
     @abstractmethod
     def predictive_distribution(self, data: dict[str, tf.Tensor], **params):
