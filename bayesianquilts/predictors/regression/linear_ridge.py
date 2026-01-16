@@ -8,7 +8,7 @@ from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.jax.parameter import Decomposed, Interactions
-from bayesianquilts.vi.advi import build_surrogate_posterior
+from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 
 class LinearRidgeRegression(BayesianModel):
@@ -96,9 +96,12 @@ class LinearRidgeRegression(BayesianModel):
         )
 
         regression_model = tfd.JointDistributionNamed(regression_dict)
-        regression_surrogate = build_surrogate_posterior(
-            regression_model, initializers=regressor_tensors
+        
+        reg_gen, reg_init = build_factored_surrogate_posterior_generator(
+            regression_model, surrogate_initializers=regressor_tensors
         )
+        self.regression_params = reg_init()
+        regression_surrogate = reg_gen(self.regression_params)
 
         #  Exponential params
         (
@@ -123,9 +126,12 @@ class LinearRidgeRegression(BayesianModel):
             )
 
         intercept_prior = tfd.JointDistributionNamed(intercept_dict)
-        intercept_surrogate = build_surrogate_posterior(
-            intercept_prior, initializers=intercept_tensors
+        
+        int_gen, int_init = build_factored_surrogate_posterior_generator(
+            intercept_prior, surrogate_initializers=intercept_tensors
         )
+        self.intercept_params = int_init()
+        intercept_surrogate = int_gen(self.intercept_params)
 
         self.prior_distribution = tfd.JointDistributionNamed(
             {"regression_model": regression_model, "intercept_model": intercept_prior}
@@ -138,7 +144,7 @@ class LinearRidgeRegression(BayesianModel):
         self.regression_var_list = list(regression_surrogate.model.keys())
         self.intercept_var_list = list(intercept_surrogate.model.keys())
 
-        self.surrogate_vars = self.surrogate_distribution.variables
+        # self.surrogate_vars = self.surrogate_distribution.variables # Broken in JAX usually
         self.var_list = list(self.surrogate_distribution.model.keys())
         return None
 

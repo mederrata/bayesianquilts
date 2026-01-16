@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import tensorflow_probability.substrates.jax.distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
-from bayesianquilts.nn.dense import DenseGaussian, DenseHorseshoe
+from bayesianquilts.predictors.nn.dense import DenseGaussian, DenseHorseshoe
 
 
 class RegressionRelunet(DenseHorseshoe):
