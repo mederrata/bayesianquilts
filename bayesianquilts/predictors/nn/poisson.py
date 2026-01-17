@@ -77,10 +77,10 @@ class NeuralPoissonRegression(DenseGaussian):
 
         return total_ll + prior * prior_weight
 
-from bayesianquilts.metrics.ais import LikelihoodFunction
+from bayesianquilts.metrics.ais import LikelihoodFunction, AutoDiffLikelihoodMixin
 import jax.flatten_util
 
-class NeuralPoissonLikelihood(LikelihoodFunction):
+class NeuralPoissonLikelihood(AutoDiffLikelihoodMixin):
     def __init__(self, model):
         self.model = model
         self.dtype = model.dtype
@@ -117,45 +117,6 @@ class NeuralPoissonLikelihood(LikelihoodFunction):
     def _flatten_params(self, params):
         flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(params)
         return flat_params, unflatten_fn
-
-    def log_likelihood_gradient(self, data, params):
-        # Optimized gradient computation per datum
-        one_sample_params = jax.tree_util.tree_map(lambda x: x[0], params)
-        flat_proto, unflatten = jax.flatten_util.ravel_pytree(one_sample_params)
-        flat_params_S = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
-        X = data['X']
-        y = data['y']
-
-        def log_lik_fn(flat_theta, x, y):
-            theta = unflatten(flat_theta)
-            d = {'X': x[None, :], 'y': y}
-            ll = self.model.log_likelihood(d, **theta)
-            return jnp.squeeze(ll)
-
-        grad_fn = jax.grad(log_lik_fn)
-        grad_vmap_N = jax.vmap(grad_fn, in_axes=(None, 0, 0))
-        grads = jax.vmap(lambda p: grad_vmap_N(p, X, y))(flat_params_S)
-        return grads
-
-    def log_likelihood_hessian_diag(self, data, params):
-        one_sample_params = jax.tree_util.tree_map(lambda x: x[0], params)
-        flat_proto, unflatten = jax.flatten_util.ravel_pytree(one_sample_params)
-        flat_params_S = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
-        X = data['X']
-        y = data['y']
-
-        def log_lik_fn(flat_theta, x, y):
-            theta = unflatten(flat_theta)
-            d = {'X': x[None, :], 'y': y}
-            ll = self.model.log_likelihood(d, **theta)
-            return jnp.squeeze(ll)
-
-        def hess_diag_fn(flat_theta, x, y):
-            return jnp.diag(jax.hessian(log_lik_fn)(flat_theta, x, y))
-
-        hess_diag_vmap_N = jax.vmap(hess_diag_fn, in_axes=(None, 0, 0))
-        hess_diag = jax.vmap(lambda p: hess_diag_vmap_N(p, X, y))(flat_params_S)
-        return hess_diag
 
     def extract_parameters(self, params):
         flat_params = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
