@@ -1,10 +1,9 @@
-
 import jax
 import jax.numpy as jnp
-import tensorflow_probability.substrates.jax as tfp
 import tensorflow_probability.substrates.jax.distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from bayesianquilts.predictors.nn.dense import DenseHorseshoe
+
 
 class NeuralNegativeBinomialRegression(DenseHorseshoe):
     def __init__(
@@ -15,7 +14,7 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
         output_scale: float = 1.0,
         zero_inflated: bool = True,
         dtype: tf.DType = jnp.float32,
-        **kwargs
+        **kwargs,
     ):
         """
         Neural Negative Binomial Regression with optional zero-inflation.
@@ -49,7 +48,7 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
             weight_scale=0.05,
             bias_scale=1.0,
             dtype=dtype,
-            **kwargs
+            **kwargs,
         )
         self.input_dim = dim_regressors
         self.dim_regressors = dim_regressors
@@ -97,8 +96,8 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
         probs = jnp.clip(probs, 1e-6, 1 - 1e-6)
 
         log_lik = None
-        if 'y' in data:
-            y = data['y']
+        if "y" in data:
+            y = data["y"]
 
             if self.zero_inflated:
                 # Zero-inflated negative binomial log-likelihood
@@ -118,8 +117,7 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
                 log_one_minus_zero_prob = jnp.log(1 - zero_prob + 1e-10)
 
                 ll_zero = jnp.logaddexp(
-                    log_zero_prob,
-                    log_one_minus_zero_prob + nb_logprob_zero
+                    log_zero_prob, log_one_minus_zero_prob + nb_logprob_zero
                 )
 
                 # Compute log-likelihood for y>0 case
@@ -158,8 +156,10 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
 
         return total_ll + prior * prior_weight
 
-from bayesianquilts.metrics.ais import LikelihoodFunction
+
+from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 import jax.flatten_util
+
 
 class NeuralNegativeBinomialLikelihood(AutoDiffLikelihoodMixin):
     def __init__(self, model):
@@ -168,7 +168,7 @@ class NeuralNegativeBinomialLikelihood(AutoDiffLikelihoodMixin):
 
     def log_likelihood(self, data, params):
         # We need to handle potential sample dimension in params
-        # NeuralNegativeBinomialRegression.log_likelihood expects (..., Batch, Output) 
+        # NeuralNegativeBinomialRegression.log_likelihood expects (..., Batch, Output)
         # but AIS params can have (S, N, K) or (S, K).
         # The model's eval handles this if we passparams correctly.
         return self.model.log_likelihood(data, **params)
@@ -178,19 +178,22 @@ class NeuralNegativeBinomialLikelihood(AutoDiffLikelihoodMixin):
         return flat_params
 
     def reconstruct_parameters(self, flat_params, template):
-        if isinstance(template.get('w_0'), jnp.ndarray) and template['w_0'].ndim > 2:
-             template = jax.tree_util.tree_map(lambda x: x[0], template)
+        if isinstance(template.get("w_0"), jnp.ndarray) and template["w_0"].ndim > 2:
+            template = jax.tree_util.tree_map(lambda x: x[0], template)
         dummy_flat, unflatten = jax.flatten_util.ravel_pytree(template)
         K = dummy_flat.shape[0]
         input_shape = flat_params.shape
         if input_shape[-1] != K:
-             raise ValueError(f"Last dimension {input_shape} != K={K}")
+            raise ValueError(f"Last dimension {input_shape} != K={K}")
         batch_dims = input_shape[:-1]
         n_batch = 1
-        for d in batch_dims: n_batch *= d
+        for d in batch_dims:
+            n_batch *= d
         flat_reshaped = flat_params.reshape((n_batch, K))
         unflattened_flat = jax.vmap(unflatten)(flat_reshaped)
+
         def reshape_leaf(leaf):
-             leaf_param_shape = leaf.shape[1:]
-             return leaf.reshape(batch_dims + leaf_param_shape)
+            leaf_param_shape = leaf.shape[1:]
+            return leaf.reshape(batch_dims + leaf_param_shape)
+
         return jax.tree_util.tree_map(reshape_leaf, unflattened_flat)
