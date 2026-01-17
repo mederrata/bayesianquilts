@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import arviz as az
 import os
 import pickle
-import pkg_resources
+import importlib.resources
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
@@ -33,7 +33,7 @@ from bayesianquilts.predictors.regression.negbin import NegativeBinomialRegressi
 
 # Load the dataset
 try:
-    data_path = pkg_resources.resource_filename('bayesianquilts.data', 'roachdata.csv')
+    data_path = str(importlib.resources.files('bayesianquilts.data').joinpath('roachdata.csv'))
 except ImportError:
     # Fallback if package not installed
     data_path = '../../bayesianquilts/data/roachdata.csv'
@@ -288,10 +288,10 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
             model.fit_mcmc(
                 data=data_dict,
                 num_samples=2000,
-                num_warmup=10000,
+                num_warmup=12000,
                 num_chains=4,
-                target_accept_prob=0.85,
-                step_size=1e-4,
+                target_accept_prob=0.95,
+                step_size=1e-3,
                 initial_states=chain_inits
             )
             print("✓ MCMC Complete.")
@@ -317,10 +317,10 @@ else:
         model.fit_mcmc(
             data=data_dict,
             num_samples=2000,
-            num_warmup=10000,
+            num_warmup=12000,
             num_chains=4,
-            target_accept_prob=0.85,
-            step_size=1e-4,
+            target_accept_prob=0.95,
+            step_size=1e-3,
             initial_states=chain_inits
         )
         print("✓ MCMC Complete.")
