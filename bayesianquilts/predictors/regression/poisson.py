@@ -106,9 +106,10 @@ class PoissonRegression(BayesianModel):
         return {'prediction': rate}
 
 from typing import Dict, Any
-from bayesianquilts.metrics.ais import LikelihoodFunction
 
-class PoissonRegressionLikelihood(LikelihoodFunction):
+from bayesianquilts.metrics.ais import LikelihoodFunction, AutoDiffLikelihoodMixin
+
+class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
     """Likelihood function for Poisson regression."""
 
     def __init__(self, dtype=jnp.float32):
@@ -153,6 +154,8 @@ class PoissonRegressionLikelihood(LikelihoodFunction):
         
         # Final squeeze to remove any trailing singleton dimensions
         intercept = jnp.squeeze(intercept)
+        if intercept.ndim == 0:
+            intercept = jnp.atleast_1d(intercept)
         
         # Now beta should be 2D or 3D, and intercept should match appropriately
         if beta.ndim == 2:
@@ -177,79 +180,6 @@ class PoissonRegressionLikelihood(LikelihoodFunction):
 
         return log_lik
 
-    def log_likelihood_gradient(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
-        """Compute gradient of log-likelihood."""
-        X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)
-        y = jnp.squeeze(y)
-
-        beta = params["beta"]
-        intercept = params["intercept"]
-        intercept = jnp.squeeze(intercept)
-        
-        # Handle accumulated dimensions (same as log_likelihood)
-        while beta.ndim > 3:
-            beta = jnp.squeeze(beta, axis=tuple(i for i in range(1, beta.ndim-1) if beta.shape[i] == 1))
-            if beta.ndim > 3:
-                if beta.ndim == 4 and beta.shape[1] == beta.shape[2]:
-                    beta = jnp.einsum('snnf->snf', beta)
-                else:
-                    beta = beta[:, 0, ...]
-
-        if beta.ndim == 3:
-            log_rate = jnp.einsum('df,sdf->sd', X, beta) + intercept
-        else:
-            log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
-        rate = jnp.exp(log_rate)
-
-        # Gradient w.r.t. log rate
-        grad_log_rate = y[jnp.newaxis, :] - rate
-
-        # Gradient w.r.t. beta
-        grad_beta = jnp.einsum('df,sd->sdf', X, grad_log_rate)
-
-        # Gradient w.r.t. intercept
-        grad_intercept = grad_log_rate[..., jnp.newaxis]
-
-        gradients = jnp.concatenate([grad_beta, grad_intercept], axis=-1)
-        return gradients
-
-    def log_likelihood_hessian_diag(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
-        """Compute diagonal of Hessian."""
-        X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)
-        y = jnp.squeeze(y)
-
-        beta = params["beta"]
-        intercept = params["intercept"]
-        intercept = jnp.squeeze(intercept)
-        
-        # Handle accumulated dimensions (same as log_likelihood)
-        while beta.ndim > 3:
-            beta = jnp.squeeze(beta, axis=tuple(i for i in range(1, beta.ndim-1) if beta.shape[i] == 1))
-            if beta.ndim > 3:
-                if beta.ndim == 4 and beta.shape[1] == beta.shape[2]:
-                    beta = jnp.einsum('snnf->snf', beta)
-                else:
-                    beta = beta[:, 0, ...]
-
-        if beta.ndim == 3:
-            log_rate = jnp.einsum('df,sdf->sd', X, beta) + intercept
-        else:
-            log_rate = jnp.einsum('df,sf->sd', X, beta) + intercept[:, jnp.newaxis]
-        rate = jnp.exp(log_rate)
-
-        # Hessian diagonal w.r.t. log rate
-        hess_diag_log_rate = -rate
-
-        # Hessian diagonal w.r.t. beta
-        hess_diag_beta = jnp.einsum('df,sd->sdf', X**2, hess_diag_log_rate)
-
-        # Hessian diagonal w.r.t. intercept
-        hess_diag_intercept = hess_diag_log_rate[..., jnp.newaxis]
-
-        hess_diag = jnp.concatenate([hess_diag_beta, hess_diag_intercept], axis=-1)
-        return hess_diag
 
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """Extract parameters into flattened array."""
