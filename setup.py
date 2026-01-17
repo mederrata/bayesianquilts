@@ -42,7 +42,7 @@ setuptools.setup(
         # We need to check for direct depends or we can delete scipy.
         'scipy',
         'scikit_learn',
-        'tfp-nightly[tf]',
+        'tfp-nightly[jax]',
         'jax',
         'natsort',
         'tqdm',
