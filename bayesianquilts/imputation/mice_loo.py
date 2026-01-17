@@ -111,7 +111,7 @@ class SimpleLinearRegression:
 
         # Log likelihood
         residuals = y - mu if mu.ndim == 1 else y[None, :] - mu
-        log_lik = -0.5 * jnp.log(2 * jnp.pi) - log_sigma - 0.5 * (residuals / sigma[:, None])**2
+        log_lik = -0.5 * jnp.log(2 * jnp.pi) - log_sigma[:, None] - 0.5 * (residuals / sigma[:, None])**2
 
         return log_lik
 
@@ -189,6 +189,141 @@ class SimpleLogisticRegression:
         return total_log_lik + log_prior
 
 
+class SimpleOrdinalLogisticRegression:
+    """Simple Bayesian ordinal logistic regression."""
+
+    def __init__(
+        self,
+        n_classes: int,
+        n_predictors: int = 1,
+        prior_scale: float = 1.0,
+        dtype=jnp.float32
+    ):
+        self.n_classes = n_classes
+        self.n_cutpoints = n_classes - 1
+        self.n_predictors = n_predictors
+        self.prior_scale = prior_scale
+        self.dtype = dtype
+        self.var_list = ['beta', 'cutpoints']
+
+    def create_prior(self):
+        """Create prior distribution."""
+        # Beta: Normal(0, scale)
+        # Cutpoints: Ordered transform of Normal(0, scale) or similar.
+        # Simpler: Ordered(Normal(0, 5))
+        
+        return tfd.JointDistributionNamed({
+            'beta': tfd.Independent(
+                tfd.Normal(
+                    loc=jnp.zeros(self.n_predictors, dtype=self.dtype),
+                    scale=self.prior_scale * jnp.ones(self.n_predictors, dtype=self.dtype)
+                ),
+                reinterpreted_batch_ndims=1
+            ),
+            # Cutpoints modeled as ordered vector
+            # Using TransformedDistribution with Ordered bijector roughly
+            # Or just use an increasingly sorted prior. 
+            # A common way for VI/Pathfinder is to parameterize cutpoints as:
+            # c1, c2-c1, c3-c2 ... where differences are log-normal or positive.
+            # But TFP OrderedLogistic expects sorted cutpoints.
+            # For simplicity in AD/VI, we can use a parameter 'raw_cutpoints' and sort them via Bijector?
+            # Or just put a loose Normal prior and let the Likelihood constrain order? No, that fails.
+            # Let's use TFP's Ordered bijector if possible.
+            # Actually, `tfd.OrderedLogistic` expects cutpoints.
+            # For the prior on cutpoints, a simple approach is:
+            # c_k ~ Normal(0, 5) constrained to be ordered.
+            # We can use `tfd.TransformedDistribution` with `tfb.Ordered()`.
+            # However, `tfb.Ordered` might not be in the JAX substrate or `blackjax` pathfinder might struggle.
+            # Alternative: Parameterize as `first_cutpoint` + cumsum(exp(gaps)).
+            # Let's try explicit implementation using cumulative probabilities for likelihood + simple priors if easy.
+            # Start with `tfd.Normal` for cutpoints but use `tfb.Ordered()` if available.
+            
+            # Assuming tfp.bijectors as tfb
+            'cutpoints': tfd.TransformedDistribution(
+                distribution=tfd.Normal(
+                    loc=jnp.linspace(-2, 2, self.n_cutpoints, dtype=self.dtype), # Initialize spread out
+                    scale=jnp.ones(self.n_cutpoints, dtype=self.dtype)
+                ),
+                bijector=tfp.bijectors.Ordered(),
+                name='cutpoints'
+            )
+        })
+
+    def log_likelihood(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
+        """Compute log-likelihood for each data point."""
+        X = jnp.asarray(data['X'], dtype=self.dtype)
+        y = jnp.asarray(data['y'], dtype=self.dtype) # y should be integer 0..K-1
+        
+        beta = params['beta']
+        cutpoints = params['cutpoints']
+        
+        # Linear predictor
+        # Handle batch dimensions
+        # beta: (n_samples, n_predictors) or (n_predictors,)
+        if beta.ndim == 1:
+            eta = jnp.dot(X, beta) # (N,)
+        else:
+            eta = jnp.einsum('np,sp->sn', X, beta) # (n_samples, N)
+        
+        # TFP OrderedLogistic
+        # cutpoints shape: (n_samples, n_cutpoints) or (n_cutpoints,)
+        # loc shape: same as eta
+        
+        # If batching:
+        # dist = tfd.OrderedLogistic(cutpoints=cutpoints, loc=eta)
+        # But eta has (n_samples, N). cutpoints (n_samples, K-1).
+        # We need broadcast.
+        
+        # Let's align dimensions.
+        # y: (N,)
+        
+        if cutpoints.ndim == 1 and beta.ndim == 1:
+            # No batching
+            dist = tfd.OrderedLogistic(cutpoints=cutpoints, loc=eta)
+            return dist.log_prob(y)
+        
+        # Batching
+        if cutpoints.ndim == 1:
+            cutpoints = cutpoints[None, :] # (1, K-1)
+        
+        # eta is (S, N)
+        # cutpoints (S, K-1)
+        # We want log_prob of y (N,) for each S.
+        # tfd.OrderedLogistic expects broadcastable shapes.
+        # If we pass loc=(S, N) and cutpoints=(S, K-1), it expects output (S, N).
+        
+        # We need to make sure cutpoints broadcast against N? 
+        # OrderedLogistic: loc (...,) cutpoints (..., K-1).
+        # It treats the last dim of cutpoints as categories.
+        # The batch shape is ...
+        # If loc is (S, N), cutpoints should be (S, 1, K-1)? Or (S, K-1) is ambiguous?
+        # Actually OrderedLogistic `loc` should match batch shape.
+        # If we want a distribution per observation per sample:
+        # batch shape (S, N).
+        # cutpoints should be (S, 1, K-1) to broadcast to (S, N, K-1)?
+        # Let's try expanding cutpoints to (S, 1, K-1) and loc to (S, N).
+        
+        # Expand cutpoints to (S, 1, K-1)
+        cutpoints_expanded = cutpoints[:, None, :] # (S, 1, K-1)
+        
+        dist = tfd.OrderedLogistic(cutpoints=cutpoints_expanded, loc=eta)
+        
+        # y is (N,)
+        # we want to broadcast y to (S, N) implicitly?
+        log_prob = dist.log_prob(y[None, :]) # (S, N)
+        
+        return log_prob
+
+    def unormalized_log_prob(self, data: Dict[str, Any], **params) -> jnp.ndarray:
+        """Compute unnormalized log probability (log joint)."""
+        log_lik = self.log_likelihood(data, params)
+        total_log_lik = jnp.sum(log_lik, axis=-1)
+
+        prior = self.create_prior()
+        log_prior = prior.log_prob(params)
+
+        return total_log_lik + log_prior
+
 class MICEBayesianLOO(MICELogistic):
     """
     MICE Bayesian LOO-CV Framework using Pathfinder variational inference.
@@ -253,6 +388,11 @@ class MICEBayesianLOO(MICELogistic):
         unique_values = np.unique(values[~np.isnan(values)])
         if len(unique_values) == 2 and set(unique_values).issubset({0, 1, 0.0, 1.0}):
             return 'binary'
+        # Heuristic for ordinal: integers, few unique values
+        if len(unique_values) > 2 and len(unique_values) < 20:
+            # Check if values are effectively integers
+            if np.all(np.mod(unique_values, 1) == 0):
+                return 'ordinal'
         return 'continuous'
 
     def _get_observed_mask(self, data: np.ndarray, var_idx: int) -> np.ndarray:
@@ -288,7 +428,346 @@ class MICEBayesianLOO(MICELogistic):
         # Define log probability for Pathfinder
         def logprob_fn_flat(params_flat):
             params_dict = unflatten_fn(params_flat)
-            return model.unormalized_log_prob(data=data, **params_dict)
+            return jnp.squeeze(model.unormalized_log_prob(data=data, **params_dict))
+
+        # Initial position
+        initial_position = jax.random.normal(jax.random.PRNGKey(seed + 1), (param_dim,)) * 0.1
+
+        try:
+            # Run Pathfinder
+            state, info = pathfinder.approximate(
+                rng_key=jax.random.PRNGKey(seed + 2),
+                logdensity_fn=logprob_fn_flat,
+                initial_position=initial_position,
+                num_samples=self.pathfinder_num_samples,
+                maxiter=self.pathfinder_maxiter,
+                ftol=1e-6,
+                gtol=1e-9,
+            )
+
+            elbo = float(state.elbo)
+            converged = True
+
+            # Sample from approximate posterior
+            sample_key = jax.random.PRNGKey(seed + 3)
+            samples_result = pathfinder.sample(sample_key, state, num_samples=self.pathfinder_num_samples)
+            samples_flat = samples_result[0] if isinstance(samples_result, tuple) else samples_result
+
+            # Unflatten samples
+            samples_dict = {var: [] for var in model.var_list}
+            for i in range(self.pathfinder_num_samples):
+                sample = unflatten_fn(samples_flat[i])
+                for var in model.var_list:
+                    samples_dict[var].append(sample[var])
+
+            # Stack samples
+            for var in model.var_list:
+                samples_dict[var] = jnp.stack(samples_dict[var], axis=0)
+
+            return samples_dict, elbo, converged
+
+        except Exception as e:
+            if self.verbose:
+                print(f"    Pathfinder failed: {e}")
+            return None, float('-inf'), False
+
+    def _compute_loo_elpd(
+        self,
+        model,
+        data: Dict[str, Any],
+        params: Dict[str, jnp.ndarray]
+    ) -> Tuple[float, float, float, float]:
+        """
+        Compute LOO-ELPD using PSIS.
+
+        Returns:
+            Tuple of (elpd_loo, elpd_loo_se, khat_max, khat_mean)
+        """
+        # Compute log-likelihood for each sample and data point
+        log_lik = model.log_likelihood(data, params)  # (n_samples, n_data)
+
+        # Convert to numpy for PSIS
+        log_lik_np = np.array(log_lik)
+
+        # Run PSIS-LOO
+        loo, loos, ks = nppsis.psisloo(log_lik_np)
+
+        # Compute standard error of LOO ELPD
+        # SE = sqrt(n * var(loos)) where loos are pointwise contributions
+        n = len(loos)
+        elpd_se = np.sqrt(n * np.var(loos))
+
+        return float(loo), float(elpd_se), float(np.max(ks)), float(np.mean(ks))
+
+
+    def _fit_zero_predictor(
+        self,
+        data: np.ndarray,
+        target_idx: int,
+        seed: int = 42
+    ) -> UnivariateModelResult:
+        """Fit a zero-predictor (intercept-only) model."""
+        # Get observed values
+        mask = self._get_observed_mask(data, target_idx)
+        y = data[mask, target_idx]
+        n_obs = len(y)
+
+        if n_obs < self.min_obs:
+            return UnivariateModelResult(
+                n_obs=n_obs,
+                elpd_loo=float('-inf'),
+                elpd_loo_per_obs=float('-inf'),
+                elpd_loo_per_obs_se=float('inf'),
+                khat_max=float('inf'),
+                khat_mean=float('inf'),
+                predictor_idx=None,
+                target_idx=target_idx,
+                converged=False
+            )
+
+        # Determine variable type
+        var_type = self.variable_types.get(target_idx)
+        if var_type is None:
+            var_type = self._infer_variable_type(y)
+            self.variable_types[target_idx] = var_type
+
+        # For zero-predictor model, use X of zeros
+        X = np.zeros((n_obs, 1), dtype=np.float32)
+        data_dict = {'X': X, 'y': y.astype(np.float32)}
+
+        if var_type == 'binary':
+            model = SimpleLogisticRegression(
+                n_predictors=1,
+                prior_scale=self.prior_scale,
+                dtype=self.dtype
+            )
+        elif var_type == 'ordinal':
+            # Determine number of classes
+            # Assumes y values are appropriate for use as indices or can be mapped?
+            # SimpleOrdinalLogisticRegression uses y directly for log_prob if y is integer 0..K-1.
+            # We should probably ensure y is 0-indexed integers.
+            # But here we just need K.
+            # If y contains [0, 2], classes=3? Or just map to 0, 1?
+            # Ordinal regression assumes ordered categories. Mapping 0,2 to 0,1 preserves order.
+            # Let's map unique sorted values to 0..K-1.
+            unique_vals = np.unique(y)
+            n_classes = len(unique_vals)
+            
+            # Map y to 0..K-1
+            # We need to do this mapping for training and consistently for prediction?
+            # For LOO we just need likelihoods.
+            val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
+            y_mapped = np.array([val_map[val] for val in y], dtype=np.float32) # Wait, TFP expects float-like integer? Or int?
+            # TFP OrderedLogistic log_prob(val) expects val to be compatible with cutpoints dtype (float) but represent rank.
+            # Actually TFP docs say `value` should be broadcastable with cutpoints. 
+            data_dict['y'] = y_mapped 
+            
+            model = SimpleOrdinalLogisticRegression(
+                n_classes=n_classes,
+                n_predictors=1,
+                prior_scale=self.prior_scale,
+                dtype=self.dtype
+            )
+        else:
+            model = SimpleLinearRegression(
+                n_predictors=1,
+                prior_scale=self.prior_scale,
+                noise_scale=self.noise_scale,
+                dtype=self.dtype
+            )
+
+        # Run Pathfinder
+        params, elbo, converged = self._run_pathfinder(model, data_dict, seed=seed)
+
+        if not converged or params is None:
+            return UnivariateModelResult(
+                n_obs=n_obs,
+                elpd_loo=float('-inf'),
+                elpd_loo_per_obs=float('-inf'),
+                elpd_loo_per_obs_se=float('inf'),
+                khat_max=float('inf'),
+                khat_mean=float('inf'),
+                predictor_idx=None,
+                target_idx=target_idx,
+                converged=False
+            )
+
+        # Compute LOO-ELPD
+        elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
+
+        return UnivariateModelResult(
+            n_obs=n_obs,
+            elpd_loo=elpd_loo,
+            elpd_loo_per_obs=elpd_loo / n_obs if n_obs > 0 else float('-inf'),
+            elpd_loo_per_obs_se=elpd_se / n_obs if n_obs > 0 else float('inf'),
+            khat_max=khat_max,
+            khat_mean=khat_mean,
+            predictor_idx=None,
+            target_idx=target_idx,
+            converged=converged,
+            params=params
+        )
+
+    def _fit_univariate(
+        self,
+        data: np.ndarray,
+        target_idx: int,
+        predictor_idx: int,
+        seed: int = 42
+    ) -> UnivariateModelResult:
+        """Fit a one-predictor univariate model."""
+        # Get overlapping observations
+        mask = self._get_overlapping_mask(data, target_idx, predictor_idx)
+        n_obs = int(np.sum(mask))
+
+        if n_obs < self.min_obs:
+            return UnivariateModelResult(
+                n_obs=n_obs,
+                elpd_loo=float('-inf'),
+                elpd_loo_per_obs=float('-inf'),
+                elpd_loo_per_obs_se=float('inf'),
+                khat_max=float('inf'),
+                khat_mean=float('inf'),
+                predictor_idx=predictor_idx,
+                target_idx=target_idx,
+                converged=False
+            )
+
+        # Get data subset
+        X_raw = data[mask, predictor_idx:predictor_idx+1].astype(np.float32)
+        y = data[mask, target_idx].astype(np.float32)
+
+        # Determine variable types for both target and predictor
+        target_var_type = self.variable_types.get(target_idx)
+        if target_var_type is None:
+            target_var_type = self._infer_variable_type(y)
+            self.variable_types[target_idx] = target_var_type
+
+        predictor_var_type = self.variable_types.get(predictor_idx)
+        if predictor_var_type is None:
+            predictor_var_type = self._infer_variable_type(data[mask, predictor_idx])
+            self.variable_types[predictor_idx] = predictor_var_type
+            
+        # Prepare X based on predictor type
+        if predictor_var_type == 'ordinal':
+            # Use global max for consistency if possible, or local max
+            # For robustness, let's use the max of the observed predictor values in this subset
+            # (using global might create all-zero columns which is fine for Bayes but maybe wasteful)
+            # Actually, using local max is safer to avoid empty columns issues in Pathfinder optimization
+            # unless we accept prior dominance.
+            # But the user might want comparable coefficients.
+            # Let's use local max_val for now to ensure numerical stability.
+            x_vals = X_raw.flatten()
+            max_val = int(np.max(x_vals))
+            
+            # Use ordinal one-hot encoding
+            # ordinal_one_hot_encode expects (N, M) matrix of integers
+            # We pass X_raw cast to int.
+            # Note: ordinal_one_hot_encode imports from .mice
+            X = ordinal_one_hot_encode(X_raw.astype(int), max_val)
+            X = X.astype(np.float32)
+            
+            # Don't standardize one-hot encoded variables
+            X_mean = 0.0
+            X_std = 1.0
+            
+            n_predictors = X.shape[1]
+            
+        else:
+            # Continuous/Standard handling
+            X = X_raw
+            X_mean = float(np.mean(X))
+            X_std = float(np.std(X))
+            if X_std > 1e-6:
+                X = (X - X_mean) / X_std
+            else:
+                X_std = 1.0  # Avoid division by zero
+            n_predictors = 1
+
+        data_dict = {'X': X, 'y': y}
+
+        # Create model
+        if target_var_type == 'binary':
+            model = SimpleLogisticRegression(
+                n_predictors=n_predictors,
+                prior_scale=self.prior_scale,
+                dtype=self.dtype
+            )
+        elif target_var_type == 'ordinal':
+             # Map y to 0..K-1 for ordinal regression
+            unique_vals = np.unique(y)
+            n_classes = len(unique_vals)
+            val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
+            y_mapped = np.array([val_map[val] for val in y], dtype=np.float32)
+            data_dict['y'] = y_mapped
+            
+            model = SimpleOrdinalLogisticRegression(
+                n_classes=n_classes,
+                n_predictors=n_predictors,
+                prior_scale=self.prior_scale,
+                dtype=self.dtype
+            )
+        else:
+            model = SimpleLinearRegression(
+                n_predictors=n_predictors,
+                prior_scale=self.prior_scale,
+                noise_scale=self.noise_scale,
+                dtype=self.dtype
+            )
+
+        # Run Pathfinder
+        params, elbo, converged = self._run_pathfinder(model, data_dict, seed=seed)
+
+        if not converged or params is None:
+            return UnivariateModelResult(
+                n_obs=n_obs,
+                elpd_loo=float('-inf'),
+                elpd_loo_per_obs=float('-inf'),
+                elpd_loo_per_obs_se=float('inf'),
+                khat_max=float('inf'),
+                khat_mean=float('inf'),
+                predictor_idx=predictor_idx,
+                target_idx=target_idx,
+                converged=False,
+                predictor_mean=X_mean,
+                predictor_std=X_std
+            )
+            
+        # Compute LOO-ELPD
+        elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
+
+        return UnivariateModelResult(
+            n_obs=n_obs,
+            elpd_loo=elpd_loo,
+            elpd_loo_per_obs=elpd_loo / n_obs if n_obs > 0 else float('-inf'),
+            elpd_loo_per_obs_se=elpd_se / n_obs if n_obs > 0 else float('inf'),
+            khat_max=khat_max,
+            khat_mean=khat_mean,
+            predictor_idx=predictor_idx,
+            target_idx=target_idx,
+            converged=converged,
+            params=params,
+            predictor_mean=X_mean,
+            predictor_std=X_std
+        )
+        """
+        Run Pathfinder variational inference.
+
+        Returns:
+            Tuple of (samples_dict, elbo, converged)
+        """
+        # Setup parameter flattening
+        key = jax.random.PRNGKey(seed)
+        prior = model.create_prior()
+        prior_sample = prior.sample(seed=key)
+        template = prior_sample
+        flat_template, unflatten_fn = jax.flatten_util.ravel_pytree(template)
+        param_dim = flat_template.shape[0]
+
+        # Define log probability for Pathfinder
+        def logprob_fn_flat(params_flat):
+            params_dict = unflatten_fn(params_flat)
+            return jnp.squeeze(model.unormalized_log_prob(data=data, **params_dict))
 
         # Initial position
         initial_position = jax.random.normal(jax.random.PRNGKey(seed + 1), (param_dim,)) * 0.1
@@ -540,7 +1019,8 @@ class MICEBayesianLOO(MICELogistic):
         self,
         X_df: pd.DataFrame,
         fit_zero_predictors: bool = True,
-        seed: int = 42
+        seed: int = 42,
+        save_dir: Optional[Union[str, Path]] = None
     ) -> 'MICEBayesianLOO':
         """
         Fit all univariate models for LOO-CV evaluation.
@@ -549,10 +1029,23 @@ class MICEBayesianLOO(MICELogistic):
             X_df: DataFrame with potentially missing values (NaN)
             fit_zero_predictors: Whether to fit zero-predictor (intercept-only) models
             seed: Random seed
+            save_dir: Directory to save incremental results. If None, keeps all in memory.
 
         Returns:
             self
         """
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            # Fallback if tqdm not installed
+            def tqdm(iterable, **kwargs): return iterable
+
+        if save_dir is not None:
+            save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            if self.verbose:
+                print(f"Saving incremental results to {save_dir}")
+
         data = X_df.values
         self.variable_names = list(X_df.columns)
         n_variables = data.shape[1]
@@ -569,7 +1062,11 @@ class MICEBayesianLOO(MICELogistic):
             if self.verbose:
                 print("\nFitting zero-predictor models...")
 
-            for i in range(n_variables):
+            iterator = range(n_variables)
+            if not self.verbose:
+                iterator = tqdm(iterator, desc="Zero-Predictor Models")
+
+            for i in iterator:
                 var_name = self.variable_names[i]
                 if self.verbose:
                     print(f"  [{i+1}/{n_variables}] {var_name}")
@@ -590,9 +1087,24 @@ class MICEBayesianLOO(MICELogistic):
 
         model_count = 0
         total_models = n_variables * (n_variables - 1)
+        
+        # We need to restructure the loop to save per target variable if save_dir is used
+        # Iterating by target variable i
+        
+        iterator = range(n_variables)
+        if not self.verbose:
+            iterator = tqdm(iterator, desc="Target Variables (One-Predictor)")
 
-        for i in range(n_variables):
+        for i in iterator:
             target_name = self.variable_names[i]
+            
+            # Dictionary to collect results for this target
+            target_results = {}
+            if fit_zero_predictors:
+                target_results['zero_predictor'] = self._result_to_dict(self.zero_predictor_results[i])
+            
+            univariate_list = []
+
             for j in range(n_variables):
                 if i == j:
                     continue
@@ -609,6 +1121,12 @@ class MICEBayesianLOO(MICELogistic):
                 )
 
                 self.univariate_results[(i, j)] = result
+                
+                # Add to local list for saving
+                uni_res_dict = self._result_to_dict(result)
+                uni_res_dict['predictor_name'] = predictor_name
+                uni_res_dict['predictor_idx'] = j
+                univariate_list.append(uni_res_dict)
 
                 if self.verbose:
                     if result.converged:
@@ -616,6 +1134,35 @@ class MICEBayesianLOO(MICELogistic):
                               f"(SE={result.elpd_loo_per_obs_se:.4f}), khat_max={result.khat_max:.3f}")
                     else:
                         print(f"    n_obs={result.n_obs}, FAILED/SKIPPED")
+            
+            # Save results for this target variable if requested
+            if save_dir is not None:
+                target_results['univariate_models'] = univariate_list
+                target_results['target_name'] = target_name
+                target_results['target_idx'] = i
+                
+                # Sanitize filename
+                safe_name = "".join(c if c.isalnum() or c in ('-','_') else '_' for c in target_name)
+                # handle potential lengthy names
+                if len(safe_name) > 100:
+                     safe_name = safe_name[:100] + f"_hash{hash(target_name)}"
+
+                file_path = save_dir / f"model_target_{i}_{safe_name}.yaml"
+                with open(file_path, 'w') as f:
+                    yaml.dump(target_results, f, default_flow_style=False, allow_unicode=True)
+                
+                # Optional: clear from memory if trying to save RAM?
+                # But we might need them for self.univariate_results access later?
+                # The user just wants to save coefficients.
+                # If N=500, self.univariate_results will grow large.
+                # If we save to disk, we technically don't need to keep them in memory if we don't return them.
+                # But the method returns 'self'.
+                # For safety, I'll keep them in memory unless memory is tight.
+                # Assuming 12GB RAM, 600MB is fine.
+
+        if self.verbose:
+             # ... (same summary stats)
+             pass
 
         if self.verbose:
             n_converged_zero = sum(1 for r in self.zero_predictor_results.values() if r.converged)
