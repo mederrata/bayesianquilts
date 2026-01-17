@@ -93,6 +93,164 @@ class LikelihoodFunction(ABC):
         pass
 
 
+class AutoDiffLikelihoodMixin(LikelihoodFunction):
+    """Mixin to provide automatic differentiation for LikelihoodFunction.
+    
+    This mixin implements log_likelihood_gradient and log_likelihood_hessian_diag
+    using JAX automatic differentiation.
+    """
+    
+    def log_likelihood_gradient(self, data: Any, params: Dict[str, Any]) -> jnp.ndarray:
+        """Compute gradient of log-likelihood w.r.t. parameters using autodiff."""
+        # We need a function that maps flattened params -> scalar log likelihood per data point
+        
+        # 1. Extract params
+        flat_params = self.extract_parameters(params) # (S, K)
+        n_samples, n_features = flat_params.shape
+        
+        # 2. Reconstruct parameters template
+        # We need to know the structure to reconstruct inside the transform
+        
+        def single_point_ll(theta_flat, x_i, y_i):
+            # theta_flat: (K,)
+            # x_i: (F,) or whatever single data point structure
+            # y_i: scalar or single label
+            
+            # Reconstruct params for single sample
+            # We need to reshape theta_flat to be (1, K) for reconstruct_parameters
+            # because reconstruct_parameters expects batch dim if params have batch dim
+            # But here we just want to reconstruct a single set of params.
+            
+            # Let's assume reconstruct_parameters handles unbatched input or we add a batch dim
+            params_reconstructed = self.reconstruct_parameters(theta_flat[jnp.newaxis, :], params)
+            
+            # Remove the batch dim we added, because we want single sample params
+            params_single = jax.tree_util.tree_map(lambda x: jnp.squeeze(x, axis=0), params_reconstructed)
+            
+            # Data wrapper for single point
+            data_single = {'X': x_i[jnp.newaxis, ...], 'y': y_i[jnp.newaxis, ...]}
+            
+            # Helper to wrap reconstruct_parameters properly is tricky because 
+            # log_likelihood method expects batched params usually.
+            
+            # Alternative approach:
+            # Vmap over samples (S) and data points (N)
+            pass 
+
+        # Let's use a cleaner approach:
+        # Define a function f(theta_flat) -> log_likelihood(theta_flat, data)
+        # But log_likelihood returns (N,). We need gradients per data point.
+        # So we need Jacobian of F(theta) w.r.t theta, where output is N-dim.
+        # Jac will be (N, K).
+        
+        X = data['X']
+        y = data['y']
+        n_data = X.shape[0]
+        
+        def batch_log_likelihood(theta_s):
+            # theta_s: (K,)
+            
+            # Reconstruct params
+            # We assume reconstruct_parameters preserves leading dims
+            p = self.reconstruct_parameters(theta_s, params) 
+            
+            # Add singleton batch dimension to simulate batch size of 1
+            # Params will go from (F,) -> (1, F)
+            p_batched = jax.tree_util.tree_map(lambda x: x[jnp.newaxis, ...], p)
+            
+            ll = self.log_likelihood(data, p_batched)
+            # If ll result has shape (1, N) squeeze it
+            return jnp.squeeze(ll)
+
+        # Grad of sum is sum of grads. We want per-point gradients.
+        # Jacobian of mapping theta -> [ll_1, ll_2, ... ll_N]
+        # Jacobian shape: (N, K)
+        
+        # We need to vmap this Jacobian computation over samples S
+        
+        jac_fn = jax.jacrev(batch_log_likelihood)
+        
+        # Vmap over samples
+        # flat_params: (S, K)
+        # Output: (S, N, K)
+        gradients = jax.vmap(jac_fn)(flat_params)
+        
+        return gradients
+
+    def log_likelihood_hessian_diag(self, data: Any, params: Dict[str, Any]) -> jnp.ndarray:
+        """Compute diagonal of Hessian of log-likelihood w.r.t. parameters using autodiff."""
+        
+        flat_params = self.extract_parameters(params) # (S, K)
+        
+        def batch_log_likelihood(theta_s):
+            p = self.reconstruct_parameters(theta_s, params)
+            ll = self.log_likelihood(data, p)
+            return jnp.squeeze(ll) # (N,)
+
+        # Hessian is (N, K, K). We need diagonal (N, K).
+        # Computing full Hessian is expensive (K*K).
+        # We can computer diagonal directly if we treat it elementwise? No.
+        
+        # We want [d^2 L_i / d theta_j^2] for each i, j.
+        # This is the diagonal of the Hessian of L_i w.r.t theta.
+        
+        def hessian_diag_fn(theta_s):
+            # Returns (N, K)
+            # define scalar function L_i(theta) -> Hessian_i(theta)
+            
+            # To define efficient diagonal hessian:
+            # h(theta) = diagonal(Hessian(scalar_func))
+            pass
+            
+            # Just use full Hessian and take diag for now for simplicity/correctness, 
+            # unless K is large. K includes ALL features.
+            # For Bouldering data, K might be small enough?
+            # Or use forward-over-reverse.
+            
+            # Map over data points?
+            # Let's compute Jacobian of Gradient.
+            
+            def grad_fn(t): 
+                return jax.jacrev(batch_log_likelihood)(t) # (N, K)
+                
+            # We want diagonal of Jacobian of Gradient.
+            # grad_fn returns (N, K). 
+            # We want d(grad_fn_ij)/d(theta_j).
+            
+            # Let's iterate over N?
+            # Or use a scan?
+            pass
+        
+        # Fallback to full Hessian per point if needed, but slow.
+        # Better:
+        
+        def per_point_hessian_diag(theta_s):
+            # theta_s: (K,)
+            
+            # We effectively want to vmap the hessian diag over data points N?
+            # But the likelihood function vectorizes over N internally.
+            
+            # Let's construct a function that returns the vector of LLs (N,)
+            def val_fn(theta_s):
+                p = self.reconstruct_parameters(theta_s, params)
+                p_batched = jax.tree_util.tree_map(lambda x: x[jnp.newaxis, ...], p)
+                ll = self.log_likelihood(data, p_batched)
+                return jnp.squeeze(ll)
+
+            
+            # We want diag(H_i) for each i.
+            # H_i is Hessian of i-th output w.r.t input.
+            
+            hessian_fn = jax.hessian(val_fn) # Returns (N, K, K)
+            
+            H = hessian_fn(theta_s)
+            return jax.vmap(jnp.diag)(H) # (N, K)
+
+        # Vmap over samples S
+        hess_diags = jax.vmap(per_point_hessian_diag)(flat_params)
+        
+        return hess_diags
+
 class AdaptiveImportanceSampler:
     """Generalized Adaptive Importance Sampling for Leave-One-Out Cross-Validation.
 
@@ -391,8 +549,36 @@ class AdaptiveImportanceSampler:
         hQ = h * Q  # (n_samples, n_data, n_params)
         theta_new = theta_expanded + hQ  # (n_samples, n_data, n_params)
 
-        # Compute Jacobian (for simple additive transformation, this is often identity in log space)
-        log_jacobian = jnp.zeros((theta.shape[0], log_ell.shape[1]))
+        # Compute Jacobian approximation
+        # log|J| ~ log|1 + h * Tr(H)|
+        # Q = -grad(log_ell)
+        # T(theta) = theta - h * grad(log_ell)
+        # J = I - h * Hessian(log_ell)
+        # Since Q is negative gradient, we have:
+        # theta_new = theta + h * Q = theta - h * grad(log_ell)
+        # So J = I - h * H
+        # trace(J) approx is 1 - h * trace(H) ? No, determinant is product of eigenvalues.
+        # det(I + A) ~ 1 + trace(A) for small A.
+        # det(I - hH) ~ 1 - h * trace(H)
+        
+        # We need trace(H).
+        # We can get diagonal of H.
+        
+        hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params) # (S, N, K)
+        trace_H = jnp.sum(hess_diag, axis=-1) # (S, N)
+        
+        # The update rule in code is: theta_new = theta + h * Q
+        # Q = -log_ell_prime (negative gradient)
+        # So theta_new = theta - h * grad(log_ell)
+        # Jacobian matrix J_matrix = d(theta_new)/d(theta) = I - h * Hessian(log_ell)
+        
+        # det(J_matrix) approx 1 - h * trace(H)
+        # log det(J_matrix) approx log(abs(1 - h * trace(H)))
+        
+        log_jacobian = jnp.log(jnp.abs(1.0 - h * trace_H)) # (S, N) with broadcasting if h is (1, N, 1)
+        
+        if log_jacobian.ndim > 2:
+             log_jacobian = jnp.squeeze(log_jacobian)
 
         # Reconstruct parameters
         params_new = {}
