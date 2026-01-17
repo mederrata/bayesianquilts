@@ -1,10 +1,11 @@
-
 import jax
 import jax.numpy as jnp
-import tensorflow_probability.substrates.jax as tfp
+import jax.flatten_util
 import tensorflow_probability.substrates.jax.distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
+from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 from bayesianquilts.predictors.nn.dense import DenseHorseshoe
+
 
 class NeuralNegativeBinomialRegression(DenseHorseshoe):
     def __init__(
@@ -15,7 +16,7 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
         output_scale: float = 1.0,
         zero_inflated: bool = True,
         dtype: tf.DType = jnp.float32,
-        **kwargs
+        **kwargs,
     ):
         """
         Neural Negative Binomial Regression with optional zero-inflation.
@@ -49,7 +50,7 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
             weight_scale=0.05,
             bias_scale=1.0,
             dtype=dtype,
-            **kwargs
+            **kwargs,
         )
         self.input_dim = dim_regressors
         self.dim_regressors = dim_regressors
@@ -97,8 +98,8 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
         probs = jnp.clip(probs, 1e-6, 1 - 1e-6)
 
         log_lik = None
-        if 'y' in data:
-            y = data['y']
+        if "y" in data:
+            y = data["y"]
 
             if self.zero_inflated:
                 # Zero-inflated negative binomial log-likelihood
@@ -118,8 +119,7 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
                 log_one_minus_zero_prob = jnp.log(1 - zero_prob + 1e-10)
 
                 ll_zero = jnp.logaddexp(
-                    log_zero_prob,
-                    log_one_minus_zero_prob + nb_logprob_zero
+                    log_zero_prob, log_one_minus_zero_prob + nb_logprob_zero
                 )
 
                 # Compute log-likelihood for y>0 case
@@ -158,92 +158,43 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
 
         return total_ll + prior * prior_weight
 
-from bayesianquilts.metrics.ais import LikelihoodFunction
-import jax.flatten_util
 
-class NeuralNegativeBinomialLikelihood(LikelihoodFunction):
+
+
+
+class NeuralNegativeBinomialLikelihood(AutoDiffLikelihoodMixin):
     def __init__(self, model):
         self.model = model
         self.dtype = model.dtype
 
     def log_likelihood(self, data, params):
-        w0 = params['w_0']
-        if w0.ndim == 4:
-             # Case: (S, N, D, H). We must map over N.
-             X = data['X']
-             y = data['y']
-
-             def single_data_ll(x_i, y_i, params_i):
-                 d = {'X': x_i[None, :], 'y': y_i}
-                 ll = self.model.log_likelihood(d, **params_i)
-                 return jnp.squeeze(ll)
-
-             in_axes_params = jax.tree_util.tree_map(lambda x: 1, params)
-             ll_val = jax.vmap(single_data_ll, in_axes=(0, 0, in_axes_params))(X, y, params)
-             return jnp.swapaxes(ll_val, 0, 1)
-        else:
-             return self.model.log_likelihood(data, **params)
-
-    def _flatten_params(self, params):
-        flat_params, unflatten_fn = jax.flatten_util.ravel_pytree(params)
-        return flat_params, unflatten_fn
-
-    def log_likelihood_gradient(self, data, params):
-        one_sample_params = jax.tree_util.tree_map(lambda x: x[0], params)
-        flat_proto, unflatten = jax.flatten_util.ravel_pytree(one_sample_params)
-        flat_params_S = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
-        X = data['X']
-        y = data['y']
-
-        def log_lik_fn(flat_theta, x, y):
-            theta = unflatten(flat_theta)
-            d = {'X': x[None, :], 'y': y}
-            ll = self.model.log_likelihood(d, **theta)
-            return jnp.squeeze(ll)
-
-        grad_fn = jax.grad(log_lik_fn)
-        grad_vmap_N = jax.vmap(grad_fn, in_axes=(None, 0, 0))
-        grads = jax.vmap(lambda p: grad_vmap_N(p, X, y))(flat_params_S)
-        return grads
-
-    def log_likelihood_hessian_diag(self, data, params):
-        one_sample_params = jax.tree_util.tree_map(lambda x: x[0], params)
-        flat_proto, unflatten = jax.flatten_util.ravel_pytree(one_sample_params)
-        flat_params_S = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
-        X = data['X']
-        y = data['y']
-
-        def log_lik_fn(flat_theta, x, y):
-            theta = unflatten(flat_theta)
-            d = {'X': x[None, :], 'y': y}
-            ll = self.model.log_likelihood(d, **theta)
-            return jnp.squeeze(ll)
-
-        def hess_diag_fn(flat_theta, x, y):
-            return jnp.diag(jax.hessian(log_lik_fn)(flat_theta, x, y))
-
-        hess_diag_vmap_N = jax.vmap(hess_diag_fn, in_axes=(None, 0, 0))
-        hess_diag = jax.vmap(lambda p: hess_diag_vmap_N(p, X, y))(flat_params_S)
-        return hess_diag
+        # We need to handle potential sample dimension in params
+        # NeuralNegativeBinomialRegression.log_likelihood expects (..., Batch, Output)
+        # but AIS params can have (S, N, K) or (S, K).
+        # The model's eval handles this if we passparams correctly.
+        return self.model.log_likelihood(data, **params)
 
     def extract_parameters(self, params):
         flat_params = jax.vmap(lambda p: jax.flatten_util.ravel_pytree(p)[0])(params)
         return flat_params
 
     def reconstruct_parameters(self, flat_params, template):
-        if isinstance(template.get('w_0'), jnp.ndarray) and template['w_0'].ndim > 2:
-             template = jax.tree_util.tree_map(lambda x: x[0], template)
+        if isinstance(template.get("w_0"), jnp.ndarray) and template["w_0"].ndim > 2:
+            template = jax.tree_util.tree_map(lambda x: x[0], template)
         dummy_flat, unflatten = jax.flatten_util.ravel_pytree(template)
         K = dummy_flat.shape[0]
         input_shape = flat_params.shape
         if input_shape[-1] != K:
-             raise ValueError(f"Last dimension {input_shape} != K={K}")
+            raise ValueError(f"Last dimension {input_shape} != K={K}")
         batch_dims = input_shape[:-1]
         n_batch = 1
-        for d in batch_dims: n_batch *= d
+        for d in batch_dims:
+            n_batch *= d
         flat_reshaped = flat_params.reshape((n_batch, K))
         unflattened_flat = jax.vmap(unflatten)(flat_reshaped)
+
         def reshape_leaf(leaf):
-             leaf_param_shape = leaf.shape[1:]
-             return leaf.reshape(batch_dims + leaf_param_shape)
+            leaf_param_shape = leaf.shape[1:]
+            return leaf.reshape(batch_dims + leaf_param_shape)
+
         return jax.tree_util.tree_map(reshape_leaf, unflattened_flat)

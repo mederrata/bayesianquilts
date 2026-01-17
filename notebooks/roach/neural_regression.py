@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import arviz as az
 import os
 import pickle
-import pkg_resources
+import importlib.resources
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
@@ -24,7 +24,8 @@ tfb = tfp.bijectors
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
-from bayesianquilts.predictors.nn.poisson import NeuralPoissonRegression
+from bayesianquilts.predictors.nn.negbin import NeuralNegativeBinomialRegression
+from bayesianquilts.predictors.nn.negbin import NeuralNegativeBinomialLikelihood
 from bayesianquilts.predictors.nn.poisson import NeuralPoissonLikelihood
 
 
@@ -33,7 +34,7 @@ from bayesianquilts.predictors.nn.poisson import NeuralPoissonLikelihood
 
 # Load the dataset
 try:
-    data_path = pkg_resources.resource_filename('bayesianquilts.data', 'roachdata.csv')
+    data_path = str(importlib.resources.files('bayesianquilts.data').joinpath('roachdata.csv'))
 except ImportError:
     # Fallback if package not installed
     data_path = '../../bayesianquilts/data/roachdata.csv'
@@ -86,22 +87,22 @@ if (y_data > 0).any():
 # Use the mean as the output scale
 output_mean = float(y_data.mean())
 
-model = NeuralPoissonRegression(
+model = NeuralNegativeBinomialRegression(
     dim_regressors=X_data.shape[1],
     hidden_size=4,
     depth=2,
     output_scale=output_mean,  # Scale the mean by y.mean()
-    prior_scale=0.1,
+    zero_inflated=True,  # Use zero-inflated model
     dtype=jnp.float32
 )
 
-print(f'\nModel: NeuralPoissonRegression')
-print(f'  - Likelihood: Poisson')
+print(f'\nModel: NeuralNegativeBinomialRegression (Zero-Inflated)')
+print(f'  - Likelihood: Zero-Inflated Negative Binomial')
 print(f'  - Output scale: {output_mean:.2f} (mean of y)')
-print(f'  - Network outputs: 1 (log_rate)')
+print(f'  - Network outputs: 3 (zero_logit, log_mean, log_concentration)')
 print(f'  - Hidden layers: 2 × {4} neurons')
 print(f'  - Activation: ReLU')
-print(f'  - Prior: Horseshoe (sparse)')
+print(f'  - Handles overdispersion and excess zeros')
 
 # Data dictionary
 data_dict = {'X': X_data, 'y': y_data}
@@ -264,9 +265,9 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
             model, data_dict, 
             num_chains=4, 
             num_samples=200,
-            maxiter=500,
-            ftol=1e-8,  # Conservative L-BFGS tolerance
-            gtol=1e-10   # Conservative gradient tolerance
+            maxiter=100,
+            ftol=1e-6,  # Conservative L-BFGS tolerance
+            gtol=1e-9   # Conservative gradient tolerance
         )
 
         # Run MCMC with conservative settings
@@ -275,10 +276,9 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
             model.fit_mcmc(
                 data=data_dict,
                 num_samples=2000,
-                num_burnin_steps=30000,
-                num_results=2000,
+                num_warmup=10000,
                 num_chains=4,
-                target_accept_prob=0.9995,
+                target_accept_prob=0.85,
                 step_size=1e-4,  # Conservative initial step size
                 initial_states=chain_inits
             )
@@ -296,9 +296,9 @@ else:
         model, data_dict,
         num_chains=4,
         num_samples=200,    # More importance samples = better diversity
-        maxiter=500,        # More iterations = better convergence
-        ftol=1e-8,          # Conservative function tolerance for L-BFGS
-        gtol=1e-10           # Conservative gradient tolerance for L-BFGS
+        maxiter=100,        # More iterations = better convergence
+        ftol=1e-6,          # Conservative function tolerance for L-BFGS
+        gtol=1e-9           # Conservative gradient tolerance for L-BFGS
     )
 
     # Run MCMC with Pathfinder initialization and conservative settings
@@ -307,9 +307,9 @@ else:
         model.fit_mcmc(
             data=data_dict,
             num_samples=2000,       # Post-warmup samples
-            num_warmup=30000,       # Long warmup for adaptation
+            num_warmup=10000,       # Long warmup for adaptation
             num_chains=4,           # 4 chains for convergence detection
-            target_accept_prob=0.95,# Higher for difficult posteriors
+            target_accept_prob=0.85,# Higher for difficult posteriors
             step_size=1e-4,         # Conservative initial step size (will adapt)
             initial_states=chain_inits  # Pathfinder initialization!
         )
@@ -358,8 +358,8 @@ import numpy as np
 import copy
 import gc
 
-# Initialize Likelihood and Sampler for POISSON regression
-likelihood_fn = NeuralPoissonLikelihood(model)
+# Initialize Likelihood and Sampler with ZERO-INFLATED NEGATIVE BINOMIAL likelihood
+likelihood_fn = NeuralNegativeBinomialLikelihood(model)
 ais_sampler = AdaptiveImportanceSampler(likelihood_fn=likelihood_fn)
 
 n_simulations = 100
@@ -371,8 +371,9 @@ base_transform = ['identity']
 other_transforms = ['ll', 'kl', 'var', 'mm1', 'mm2', 'pmm1', 'pmm2']
 
 print(f"Running {n_simulations} simulations with s={n_samples} samples per run.")
-print(f"Using POISSON likelihood")
+print(f"Using ZERO-INFLATED NEGATIVE BINOMIAL likelihood")
 print(f"  output_scale={model.output_scale:.2f}")
+print(f"  zero_inflated={model.zero_inflated}")
 print(f"Rhos: {rhos}")
 print(f"Base Transform: {base_transform}")
 print(f"Other Transforms: {other_transforms}")
@@ -495,7 +496,7 @@ for i in tqdm(range(n_simulations), desc="Simulations"):
 df_sims = pd.DataFrame(simulation_records)
 stats = df_sims.agg(['mean', 'std'])
 
-print("\n--- Table Metrics: Unsuccessful Adaptations (Roaches/Poisson) ---")
+print("\n--- Table Metrics: Unsuccessful Adaptations (Roaches/ZINB) ---")
 print(stats.round(1))
 
 # Optional: Format for LaTeX
