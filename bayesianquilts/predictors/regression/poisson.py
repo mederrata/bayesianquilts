@@ -180,13 +180,12 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
 
         return log_lik
 
-
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """Extract parameters into flattened array."""
         beta = params["beta"]
         intercept = params["intercept"]
         intercept = jnp.squeeze(intercept)
-        theta = jnp.concatenate([beta, intercept[:, jnp.newaxis]], axis=-1)
+        theta = jnp.concatenate([beta, intercept[..., jnp.newaxis]], axis=-1)
         return theta
 
     def reconstruct_parameters(self, flat_params: jnp.ndarray, template: Dict[str, Any]) -> Dict[str, Any]:

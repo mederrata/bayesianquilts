@@ -101,16 +101,32 @@ class NegativeBinomialRegression(BayesianModel):
         elif beta.ndim == 3:
             # Case 3: AIS per-datum parameters (S, N, n_feat)
             # X (N, D), beta (S, N, D) -> (S, N)
-            eta = jnp.einsum("nd,snd->sn", X, beta) + intercept
+            eta = jnp.einsum("nd,snd->sn", X, beta)
+            if intercept.ndim == 3:
+                eta = eta + jnp.squeeze(intercept, axis=-1)
+            else:
+                eta = eta + intercept
         else:
             raise ValueError(f"Unsupported beta dimensionality: {beta.ndim}")
 
         mean = jnp.exp(eta).astype(self.dtype)
-        concentration = (jnp.exp(log_concentration) + jnp.array(1e-6, dtype=self.dtype)).astype(self.dtype)
+        
+        if log_concentration.ndim == 3:
+            concentration = jnp.exp(jnp.squeeze(log_concentration, axis=-1))
+        else:
+            concentration = jnp.exp(log_concentration)
+        
+        concentration = (concentration + jnp.array(1e-6, dtype=self.dtype)).astype(self.dtype)
 
         # Convert to NegativeBinomial parameters
         total_count = concentration
-        probs = concentration / (concentration + mean)
+        # Broadcast concentration if needed for probs calculation
+        if total_count.ndim < mean.ndim:
+            total_count_exp = total_count[..., jnp.newaxis]
+        else:
+            total_count_exp = total_count
+            
+        probs = total_count_exp / (total_count_exp + mean)
         probs = jnp.clip(probs, jnp.array(1e-6, dtype=self.dtype), jnp.array(1 - 1e-6, dtype=self.dtype))
 
         return mean, total_count, probs
@@ -230,11 +246,10 @@ class NegativeBinomialRegression(BayesianModel):
             result['zero_prob'] = jax.nn.sigmoid(zero_logit).astype(self.dtype)
 
         return result
-
 from typing import Dict, Any
-from bayesianquilts.metrics.ais import LikelihoodFunction
+from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 
-class NegativeBinomialRegressionLikelihood(LikelihoodFunction):
+class NegativeBinomialRegressionLikelihood(AutoDiffLikelihoodMixin):
     """Likelihood function for Negative Binomial GLM regression."""
 
     def __init__(self, model):
@@ -246,160 +261,41 @@ class NegativeBinomialRegressionLikelihood(LikelihoodFunction):
         """Compute log-likelihood for Negative Binomial regression."""
         return self.model.log_likelihood(data, **params)
 
-    def log_likelihood_gradient(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
-        """Compute gradient of log-likelihood."""
-        X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)
-        y = jnp.squeeze(y)
-
-        beta = params["beta"]
-        intercept = params["intercept"]
-        log_concentration = params["log_concentration"]
-
-        # Handle different shapes
-        if beta.ndim == 1:
-            # Single sample: (F,), (1,), (1,)
-            intercept_val = jnp.squeeze(intercept)
-            log_concentration_val = jnp.squeeze(log_concentration)
-            param_list = [beta, jnp.array([intercept_val]), jnp.array([log_concentration_val])]
-            if self.zero_inflated:
-                zero_logit = params["zero_logit"]
-                zero_logit_val = jnp.squeeze(zero_logit)
-                param_list.append(jnp.array([zero_logit_val]))
-            flat_params = jnp.concatenate(param_list, axis=0)
-        else:
-            # Multiple samples: (S, F), (S, 1), (S, 1)
-            param_list = [beta, intercept, log_concentration]
-            if self.zero_inflated:
-                zero_logit = params["zero_logit"]
-                param_list.append(zero_logit)
-            flat_params = jnp.concatenate(param_list, axis=-1)
-
-        # Define log-likelihood function for single data point
-        def ll_fn(flat_theta, x_i, y_i):
-            n_feat = beta.shape[-1]
-            beta_i = flat_theta[:n_feat]
-            intercept_i = flat_theta[n_feat]
-            log_conc_i = flat_theta[n_feat + 1]
-
-            params_i = {
-                'beta': beta_i,
-                'intercept': intercept_i[jnp.newaxis],
-                'log_concentration': log_conc_i[jnp.newaxis]
-            }
-
-            if self.zero_inflated:
-                zero_logit_i = flat_theta[n_feat + 2]
-                params_i['zero_logit'] = zero_logit_i[jnp.newaxis]
-
-            data_i = {'X': x_i[jnp.newaxis, :], 'y': y_i[jnp.newaxis]}
-            ll = self.model.log_likelihood(data_i, **params_i)
-            return jnp.squeeze(ll)
-
-        # Gradient for each sample and data point
-        grad_fn = jax.grad(ll_fn)
-
-        # If beta is 2D (S, F), map over samples and data
-        if beta.ndim == 2:
-            grad_vmap_N = jax.vmap(grad_fn, in_axes=(None, 0, 0))
-            grads = jax.vmap(lambda p: grad_vmap_N(p, X, y))(flat_params)
-        else:
-            # Single sample
-            grads = jax.vmap(lambda x, y_val: grad_fn(flat_params, x, y_val))(X, y)
-
-        return grads
-
-    def log_likelihood_hessian_diag(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
-        """Compute diagonal of Hessian."""
-        X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)
-        y = jnp.squeeze(y)
-
-        beta = params["beta"]
-        intercept = params["intercept"]
-        log_concentration = params["log_concentration"]
-
-        # Handle different shapes
-        if beta.ndim == 1:
-            # Single sample
-            intercept_val = jnp.squeeze(intercept)
-            log_concentration_val = jnp.squeeze(log_concentration)
-            param_list = [beta, jnp.array([intercept_val]), jnp.array([log_concentration_val])]
-            if self.zero_inflated:
-                zero_logit = params["zero_logit"]
-                zero_logit_val = jnp.squeeze(zero_logit)
-                param_list.append(jnp.array([zero_logit_val]))
-            flat_params = jnp.concatenate(param_list, axis=0)
-        else:
-            # Multiple samples
-            param_list = [beta, intercept, log_concentration]
-            if self.zero_inflated:
-                zero_logit = params["zero_logit"]
-                param_list.append(zero_logit)
-            flat_params = jnp.concatenate(param_list, axis=-1)
-
-        # Define log-likelihood function
-        def ll_fn(flat_theta, x_i, y_i):
-            n_feat = beta.shape[-1]
-            beta_i = flat_theta[:n_feat]
-            intercept_i = flat_theta[n_feat]
-            log_conc_i = flat_theta[n_feat + 1]
-
-            params_i = {
-                'beta': beta_i,
-                'intercept': intercept_i[jnp.newaxis],
-                'log_concentration': log_conc_i[jnp.newaxis]
-            }
-
-            if self.zero_inflated:
-                zero_logit_i = flat_theta[n_feat + 2]
-                params_i['zero_logit'] = zero_logit_i[jnp.newaxis]
-
-            data_i = {'X': x_i[jnp.newaxis, :], 'y': y_i[jnp.newaxis]}
-            ll = self.model.log_likelihood(data_i, **params_i)
-            return jnp.squeeze(ll)
-
-        def hess_diag_fn(flat_theta, x_i, y_i):
-            return jnp.diag(jax.hessian(ll_fn)(flat_theta, x_i, y_i))
-
-        if beta.ndim == 2:
-            hess_diag_vmap_N = jax.vmap(hess_diag_fn, in_axes=(None, 0, 0))
-            hess_diag = jax.vmap(lambda p: hess_diag_vmap_N(p, X, y))(flat_params)
-        else:
-            hess_diag = jax.vmap(lambda x, y_val: hess_diag_fn(flat_params, x, y_val))(X, y)
-
-        return hess_diag
-
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """Extract parameters into flattened array."""
         beta = params["beta"]
         intercept = params["intercept"]
         log_concentration = params["log_concentration"]
 
-        # Handle different shapes
-        if beta.ndim == 1:
-            # Single sample
-            intercept_val = jnp.squeeze(intercept)
-            log_concentration_val = jnp.squeeze(log_concentration)
-            param_list = [beta, jnp.array([intercept_val]), jnp.array([log_concentration_val])]
-            if self.zero_inflated:
-                zero_logit = params["zero_logit"]
-                zero_logit_val = jnp.squeeze(zero_logit)
-                param_list.append(jnp.array([zero_logit_val]))
-            theta = jnp.concatenate(param_list, axis=0)
+        # Ensure consistent dimensions for concatenation
+        # We want (..., K)
+        param_list = [beta]
+        
+        # Squeeze intercept/conc if they have trailing 1 but match leading dims
+        if intercept.ndim > beta.ndim - 1:
+            param_list.append(jnp.squeeze(intercept, axis=-1)[..., jnp.newaxis])
         else:
-            # Multiple samples
-            param_list = [beta, intercept, log_concentration]
-            if self.zero_inflated:
-                zero_logit = params["zero_logit"]
-                param_list.append(zero_logit)
-            theta = jnp.concatenate(param_list, axis=-1)
+            param_list.append(intercept[..., jnp.newaxis])
+            
+        if log_concentration.ndim > beta.ndim - 1:
+             param_list.append(jnp.squeeze(log_concentration, axis=-1)[..., jnp.newaxis])
+        else:
+             param_list.append(log_concentration[..., jnp.newaxis])
 
+        if self.zero_inflated:
+            zero_logit = params["zero_logit"]
+            if zero_logit.ndim > beta.ndim - 1:
+                param_list.append(jnp.squeeze(zero_logit, axis=-1)[..., jnp.newaxis])
+            else:
+                param_list.append(zero_logit[..., jnp.newaxis])
+                
+        theta = jnp.concatenate(param_list, axis=-1)
         return theta
 
     def reconstruct_parameters(self, flat_params: jnp.ndarray, template: Dict[str, Any]) -> Dict[str, Any]:
         """Reconstruct parameters from flattened array."""
         n_features = template["beta"].shape[-1]
+        
         beta = flat_params[..., :n_features]
         intercept = flat_params[..., n_features]
         log_concentration = flat_params[..., n_features + 1]
