@@ -19,7 +19,6 @@ leave-one-out cross-validation predictions.
 
 import jax
 import jax.numpy as jnp
-import tensorflow as tf
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable, Tuple, Optional, List
 from bayesianquilts.metrics import nppsis
