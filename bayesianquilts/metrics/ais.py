@@ -268,13 +268,13 @@ class SmallStepTransformation(Transformation):
         # needing analytical derivation, and respects batching (S, N).
 
         K = theta.shape[-1]
-        divergence = jnp.zeros(theta.shape[:-1])  # (S, N)
+        divergence = jnp.zeros(theta.shape[:-1], dtype=theta.dtype)  # (S, N)
 
         def func(t):
             return self.compute_Q(t, data, params, current_log_ell, **kwargs)
 
         # Identity matrix for basis vectors
-        eye = jnp.eye(K)
+        eye = jnp.eye(K, dtype=theta.dtype)
 
         for k in range(K):
             # Basis vector e_k broadcast to (S, N, K)
@@ -1112,7 +1112,9 @@ class AdaptiveImportanceSampler:
             "ll": LikelihoodDescent(self.likelihood_fn),
             "likelihood_descent": LikelihoodDescent(self.likelihood_fn),
             "kl": KLDivergence(self.likelihood_fn),
+            "kl_divergence": KLDivergence(self.likelihood_fn),
             "var": Variance(self.likelihood_fn, log_f_fn=log_f_fn),
+            "variance_based": Variance(self.likelihood_fn, log_f_fn=log_f_fn),
             "pmm1": PMM1(self.likelihood_fn),
             "pmm2": PMM2(self.likelihood_fn),
             "mm1": MM1(self.likelihood_fn),
@@ -1402,7 +1404,6 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
     ) -> jnp.ndarray:
         """Compute diagonal of Hessian of log-likelihood."""
         X = jnp.asarray(data["X"], dtype=self.dtype)
-        y = jnp.asarray(data["y"], dtype=self.dtype)
 
         beta = params["beta"]
         intercept = params["intercept"]

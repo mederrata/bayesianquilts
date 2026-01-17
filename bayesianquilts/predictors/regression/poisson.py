@@ -1,10 +1,9 @@
 import jax
 import jax.numpy as jnp
-import tensorflow_probability.substrates.jax as tfp
 import tensorflow_probability.substrates.jax.distributions as tfd
 from typing import Dict, Any
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.metrics.ais import LikelihoodFunction, AutoDiffLikelihoodMixin
+from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 
 
 class PoissonRegression(BayesianModel):
