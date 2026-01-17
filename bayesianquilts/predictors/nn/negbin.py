@@ -1,7 +1,9 @@
 import jax
 import jax.numpy as jnp
+import jax.flatten_util
 import tensorflow_probability.substrates.jax.distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
+from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 from bayesianquilts.predictors.nn.dense import DenseHorseshoe
 
 
@@ -157,8 +159,7 @@ class NeuralNegativeBinomialRegression(DenseHorseshoe):
         return total_ll + prior * prior_weight
 
 
-from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
-import jax.flatten_util
+
 
 
 class NeuralNegativeBinomialLikelihood(AutoDiffLikelihoodMixin):

@@ -144,7 +144,6 @@ class Transformation(ABC):
 
                 # Expand mean for variance calc: N
                 mean_expanded_w = mean_w
-                mean_expanded = mean
 
                 # Weighted variance
                 var_w = jnp.sum(w_norm * (v_expanded - mean_expanded_w) ** 2, axis=0)
@@ -712,8 +711,6 @@ class PMM2(SmallStepTransformation):
 
         moments = Transformation.compute_moments(params, weights)
 
-        Q_vector_parts = []
-
         # We assume theta is flattened order of params iteration
         # extract_parameters usually iterates keys() or similar.
         # We need to be careful with ordering.
@@ -1255,9 +1252,19 @@ class AdaptiveImportanceSampler:
                         **common_kwargs,
                     )
 
-                    key = f"{name}"
+                    shorthand_map = {
+                        "likelihood_descent": "ll",
+                        "kl_divergence": "kl",
+                        "variance_based": "var",
+                        "pmm1": "pmm1",
+                        "pmm2": "pmm2",
+                        "mm1": "mm1",
+                        "mm2": "mm2",
+                    }
+                    shorthand = shorthand_map.get(name, name)
+                    key = f"{shorthand}"
                     if len(current_rhos) > 1:
-                        key = f"{name}_rho{rho:.2e}"
+                        key = f"{shorthand}_rho{rho:.2e}"
 
                     results[key] = res
 

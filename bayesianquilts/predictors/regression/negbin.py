@@ -1,7 +1,9 @@
 import jax
 import jax.numpy as jnp
 import tensorflow_probability.substrates.jax.distributions as tfd
+from typing import Dict, Any
 from bayesianquilts.model import BayesianModel
+from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 
 
 class NegativeBinomialRegression(BayesianModel):
@@ -338,10 +340,6 @@ class NegativeBinomialRegression(BayesianModel):
             result["zero_prob"] = jax.nn.sigmoid(zero_logit).astype(self.dtype)
 
         return result
-
-
-from typing import Dict, Any
-from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 
 
 class NegativeBinomialRegressionLikelihood(AutoDiffLikelihoodMixin):
