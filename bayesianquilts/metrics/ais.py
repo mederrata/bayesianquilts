@@ -785,10 +785,10 @@ class Variance(SmallStepTransformation):
     """
 
     def __init__(
-        self, likelihood_fn: LikelihoodFunction, log_f_fn: Optional[Callable] = None
+        self, likelihood_fn: LikelihoodFunction, f_fn: Callable
     ):
         super().__init__(likelihood_fn)
-        self.log_f_fn = log_f_fn
+        self.f_fn = f_fn
 
     def compute_Q(
         self,
@@ -810,30 +810,26 @@ class Variance(SmallStepTransformation):
             grad_log_ell = self.likelihood_fn.log_likelihood_gradient(data, params)
 
         # 2. Compute log_f and grad_log_f
-        if self.log_f_fn is not None:
-            # Helper for single sample
-            def single_sample_log_f(t):
-                # Shape adjustment for reconstruct which expects (S,...)
-                p = self.likelihood_fn.reconstruct_parameters(t[jnp.newaxis, :], params)
-                val = self.log_f_fn(data, **p)
-                return jnp.squeeze(val, axis=0)  # (N,)
+        # Helper for single sample
+        def single_sample_log_f(t):
+            # Shape adjustment for reconstruct which expects (S,...)
+            p = self.likelihood_fn.reconstruct_parameters(t[jnp.newaxis, :], params)
+            val = jnp.log(self.f_fn(data, **p))
+            return jnp.squeeze(val, axis=0)  # (N,)
 
-            log_f = kwargs.get("log_f", None)
-            grad_log_f = kwargs.get("grad_log_f", None)
+        log_f = kwargs.get("log_f", None)
+        grad_log_f = kwargs.get("grad_log_f", None)
 
-            if log_f is None:
-                log_f = self.log_f_fn(data, **params)
+        if log_f is None:
+            log_f = jnp.log(self.f_fn(data, **params))
 
-            if grad_log_f is None:
-                # Compute Jacobian: (S, N, K)
-                jac_fn = jax.jacrev(single_sample_log_f)
-                grad_log_f = jax.vmap(jac_fn)(theta)
+        if grad_log_f is None:
+            # Compute Jacobian: (S, N, K)
+            jac_fn = jax.jacrev(single_sample_log_f)
+            grad_log_f = jax.vmap(jac_fn)(theta)
 
-            if grad_log_f.ndim == 4 and grad_log_f.shape[2] == 1:
-                grad_log_f = jnp.squeeze(grad_log_f, axis=2)
-
-        else:
-             raise ValueError("log_f_fn is required for Variance transformation")
+        if grad_log_f.ndim == 4 and grad_log_f.shape[2] == 1:
+            grad_log_f = jnp.squeeze(grad_log_f, axis=2)
 
         # 3. Assemble Q
         # Q = pi * exp(2*log_f - 2*log_ell) * (grad_log_f - grad_log_ell)
@@ -1326,7 +1322,7 @@ class AdaptiveImportanceSampler:
         initial_step_size: float = 1.0,
         variational: bool = False,
         verbose: bool = False,
-        log_f_fn: Optional[Callable] = None,
+        f_fn: Optional[Callable] = None,
         rhos: jnp.ndarray = None,
         transformations: List[str] = None,
     ):
@@ -1340,8 +1336,8 @@ class AdaptiveImportanceSampler:
             initial_step_size: Initial step size for search
             variational: Whether using variational approximation
             verbose: Verbosity flag
-            log_f_fn: Optional function returning log(f) for Variance transformation.
-                      Signature: log_f_fn(data, **params) -> (S, N)
+            f_fn: Optional function returning f for Variance transformation.
+                  Signature: f_fn(data, **params) -> (S, N)
             rhos: Optional manual grid of step sizes. If None, generated from n_sweeps.
             transformations: Optional list of transformation names to run.
                              Available: 'll', 'kl', 'var', 'pmm1', 'pmm2', 'mm1', 'mm2', 'identity'.
@@ -1440,13 +1436,15 @@ class AdaptiveImportanceSampler:
             "likelihood_descent": LikelihoodDescent(self.likelihood_fn),
             "kl": KLDivergence(self.likelihood_fn),
             "kl_divergence": KLDivergence(self.likelihood_fn),
-            "var": Variance(self.likelihood_fn, log_f_fn=log_f_fn),
-            "variance_based": Variance(self.likelihood_fn, log_f_fn=log_f_fn),
             "pmm1": PMM1(self.likelihood_fn),
             "pmm2": PMM2(self.likelihood_fn),
             "mm1": MM1(self.likelihood_fn),
             "mm2": MM2(self.likelihood_fn),
         }
+
+        if f_fn is not None:
+             all_transforms["var"] = Variance(self.likelihood_fn, f_fn=f_fn)
+             all_transforms["variance_based"] = Variance(self.likelihood_fn, f_fn=f_fn)
 
         # Filter transformations if requested
         if transformations is not None:
