@@ -4,8 +4,8 @@
 # In[1]:
 
 
-get_ipython().run_line_magic('load_ext', 'autoreload')
-get_ipython().run_line_magic('autoreload', '2')
+# get_ipython().run_line_magic('load_ext', 'autoreload')
+# get_ipython().run_line_magic('autoreload', '2')
 
 import jax
 import jax.numpy as jnp
@@ -57,10 +57,10 @@ X_df = df.drop(columns=['y'])
 X_data = X_df.values.astype(np.float32)
 
 # Normalize features
-mean = X_data.mean(axis=0)
-std = X_data.std(axis=0)
-X_data = (X_data - mean) / std
-print('Features normalized (mean=0, std=1)')
+# mean = X_data.mean(axis=0)
+# std = X_data.std(axis=0)
+# X_data = (X_data - mean) / std
+print('Features NOT normalized')
 y_data = y_data.astype(np.float32)
 
 print(f'X shape: {X_data.shape}, y shape: {y_data.shape}')
@@ -99,6 +99,8 @@ print(f'\nUsing zero-inflated model: {use_zero_inflated} ({zero_pct:.1f}% zeros)
 model = NegativeBinomialRegression(
     input_dim=X_data.shape[1],
     zero_inflated=use_zero_inflated,
+    prior_scale_beta=10.0,
+    prior_scale_intercept=10.0,
     dtype=jnp.float32
 )
 
@@ -163,14 +165,9 @@ def pathfinder_initialization(model, data, num_chains=4, num_samples=200, maxite
         print(f'  L-BFGS settings: ftol={ftol}, gtol={gtol} (conservative)')
 
     # Setup parameter flattening
-    # For GLM, create a simple template
     key = jax.random.PRNGKey(0)
-    template = {}
-    template['beta'] = jnp.zeros(model.input_dim, dtype=model.dtype)
-    template['intercept'] = jnp.zeros(1, dtype=model.dtype)
-    template['log_concentration'] = jnp.zeros(1, dtype=model.dtype)
-    if model.zero_inflated:
-        template['zero_logit'] = jnp.zeros(1, dtype=model.dtype)
+    prior_sample = model.prior_distribution.sample(1, seed=key)
+    template = {var: prior_sample[var][0] for var in model.var_list}
 
     flat_template, unflatten_fn = jax.flatten_util.ravel_pytree(template)
     param_dim = flat_template.shape[0]
@@ -229,7 +226,7 @@ def pathfinder_initialization(model, data, num_chains=4, num_samples=200, maxite
 
     return chain_inits
 
-def check_rhat_and_save(model, cache_dir, threshold=1.05):
+def check_rhat(model, threshold=1.05):
     """Check R-hat convergence with strict threshold."""
     import tensorflow_probability.substrates.jax.mcmc as tfmcmc
     print("\nChecking R-hat convergence...")
@@ -253,11 +250,20 @@ def check_rhat_and_save(model, cache_dir, threshold=1.05):
     print(f"\nOverall max R-hat: {max_rhat_overall:.3f}")
 
     if all_good:
-        print(f"✓ EXCELLENT: All R-hat < {threshold}! Saving model to {cache_dir}...")
+        print(f"✓ EXCELLENT: All R-hat < {threshold}!")
+    else:
+        print(f"✗ Convergence not achieved.")
+    return all_good
+
+def check_rhat_and_save(model, cache_dir, threshold=1.05):
+    """Check R-hat convergence and save model."""
+    all_good = check_rhat(model, threshold)
+    if all_good:
+        print(f"Saving model to {cache_dir}...")
         model.save_to_disk(cache_dir)
         return True
     else:
-        print(f"✗ Convergence not achieved. Model NOT saved.")
+        print(f"Model NOT saved.")
         print(f"  Recommendation: Increase num_warmup to 15000-20000")
         return False
 
@@ -317,7 +323,7 @@ else:
         model.fit_mcmc(
             data=data_dict,
             num_samples=2000,
-            num_warmup=12000,
+            num_warmup=15000,
             num_chains=4,
             target_accept_prob=0.95,
             step_size=1e-3,
@@ -357,6 +363,8 @@ print('  - Pathfinder L-BFGS: ftol=1e-6, gtol=1e-9 (conservative)')
 print('  - MCMC: 4 chains × 2000 samples with 10000 warmup')
 print('  - MCMC step size: 1e-4 (conservative, will adapt during warmup)')
 print('='*70)
+
+check_rhat(model)
 
 
 # In[5]:
@@ -499,7 +507,7 @@ ais_sampler = AdaptiveImportanceSampler(likelihood_fn=likelihood_fn)
 
 n_simulations = 100
 n_samples = 1000
-rhos = [ 2**-r for r in range(-2, 11) ]
+rhos = [ 3**-r for r in range(-1, 7) ]
 
 # Split transformations
 base_transform = ['identity']
@@ -545,7 +553,7 @@ for i in tqdm(range(n_simulations), desc="Simulations"):
 
     # 3. Process problematic points
     if len(idx_bad) > 0:
-        batch_size = 16
+        batch_size = 2
         num_batches = int(np.ceil(len(idx_bad) / batch_size))
 
         for b in range(num_batches):
@@ -620,3 +628,15 @@ for col in df_sims.columns:
     s = stats.loc['std', col]
     print(f"{col}: {m:.1f} ± {s:.1f}")
 
+
+# Plot khat values for identity transformation
+plt.figure(figsize=(10, 6))
+plt.scatter(range(len(method_khats['identity'])), method_khats['identity'], c='red', alpha=0.6, label='Identity Khat')
+plt.axhline(y=0.5, color='orange', linestyle='--', label='Threshold 0.5 (Good)')
+plt.axhline(y=0.7, color='black', linestyle='--', label='Threshold 0.7 (Warning)')
+plt.xlabel('Data Point Index')
+plt.ylabel('Pareto k')
+plt.title('Pareto k values for Identity Transformation (Standard IS LOO)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
