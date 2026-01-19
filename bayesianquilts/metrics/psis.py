@@ -151,6 +151,9 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
     if n <= 1:
         raise ValueError("More than one log-weight needed.")
 
+    # Always use float64 for khat computations
+    lw = lw.astype(jnp.float64)
+
     if overwrite_lw:
         # in-place operation (note: JAX arrays are immutable, so this is effectively a copy)
         lw_out = lw
@@ -159,7 +162,7 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
         lw_out = jnp.copy(lw)
 
     # allocate output array for kss
-    kss = jnp.empty(m)
+    kss = jnp.empty(m, dtype=jnp.float64)
 
     # precalculate constants
     cutoff_ind = -int(jnp.ceil(min(0.2 * n, 3 * jnp.sqrt(n / Reff)))) - 1
