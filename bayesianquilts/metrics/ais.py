@@ -41,15 +41,16 @@ class LikelihoodFunction(ABC):
         pass
 
     @abstractmethod
-    def log_likelihood_gradient(self, data: Any, params: Dict[str, Any]) -> jnp.ndarray:
+    def log_likelihood_gradient(self, data: Any, params: Dict[str, Any]) -> Any:
         """Compute gradient of log-likelihood w.r.t. parameters.
 
         Args:
             data: Input data
-            params: Model parameters
+            params: Model parameters (Dict/PyTree)
 
         Returns:
-            Gradient array of shape (n_samples, n_data, n_params)
+            Gradient matching the structure of params, with extra (N,) dimensions.
+            (e.g., if param is (S, ...), grad is (S, N, ...))
         """
         pass
 
@@ -57,7 +58,7 @@ class LikelihoodFunction(ABC):
     @abstractmethod
     def log_likelihood_hessian_diag(
         self, data: Any, params: Dict[str, Any]
-    ) -> jnp.ndarray:
+    ) -> Any:
         """Compute diagonal of Hessian of log-likelihood w.r.t. parameters.
 
         Args:
@@ -65,21 +66,16 @@ class LikelihoodFunction(ABC):
             params: Model parameters
 
         Returns:
-            Hessian diagonal of shape (n_samples, n_data, n_params)
+            Hessian diagonal matching params structure + (N,) dim.
         """
         pass
 
-    @abstractmethod
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """Extract and flatten parameters into a single array.
-
-        Args:
-            params: Parameter dictionary
-
-        Returns:
-            Flattened parameter array of shape (n_samples, n_params)
+        
+        DEPRECATED: Use PyTree operations instead.
         """
-        pass
+        raise NotImplementedError("extract_parameters is deprecated.")
 
 
 class Transformation(ABC):
@@ -250,18 +246,18 @@ class SmallStepTransformation(Transformation):
     @abstractmethod
     def compute_Q(
         self,
-        theta: jnp.ndarray,
+        theta: Any,
         data: Any,
         params: Dict[str, Any],
         current_log_ell: jnp.ndarray,
         **kwargs,
-    ) -> jnp.ndarray:
-        """Compute the vector field Q(theta)."""
+    ) -> Any:
+        """Compute the vector field Q(theta). Returns PyTree matching theta."""
         pass
 
     def compute_divergence_Q(
         self,
-        theta: jnp.ndarray,
+        theta: Any,
         data: Any,
         params: Dict[str, Any],
         current_log_ell: jnp.ndarray,
@@ -270,89 +266,233 @@ class SmallStepTransformation(Transformation):
         """Compute divergence of Q using generic autodiff (Trace of Jacobian)."""
 
         # div(Q) = sum_k dQ_k/dtheta_k
-        # We use jax.jvp looping over k basis vectors.
-        # This allows computing divergence for any compute_Q without
-        # needing analytical derivation, and respects batching (S, N).
-
-        K = theta.shape[-1]
-        divergence = jnp.zeros(theta.shape[:-1], dtype=theta.dtype)  # (S, N)
-
+        # If theta is a PyTree, we flatten it virtually to loop over basis vectors.
+        
+        flat_theta, unravel_fn = jax.flatten_util.ravel_pytree(theta)
+        K = flat_theta.shape[-1]
+        
+        # We need divergence matching (S, N) shape
+        # theta usually (S, N, ...) so flattened it mixes (S, N) with K-dims?
+        # Mmm, jax.flatten_util.ravel_pytree flattens EVERYTHING.
+        # But our theta has batch dims (S, N). We only want to sum over the parameter dims K.
+        # This is tricky with flattening.
+        
+        # Alternative: jax.vmap the divergence calculation over (S, N).
+        # But JAX transformations inside vmap are fine.
+        
         def func(t):
             return self.compute_Q(t, data, params, current_log_ell, **kwargs)
 
-        # Identity matrix for basis vectors
-        eye = jnp.eye(K, dtype=theta.dtype)
+        # We can use jax.linearize or jvp.
+        # To compute divergence trace, we need to probe with basis vectors.
+        # If we treat (S, N) as batch dimensions, we want divergence per batch element.
+        
+        # Let's define a single-sample function if possible, or handle full batch.
+        # If we use the flattened approach on the FULL array, we get a huge K_total.
+        # We only want trace over the "parameter" dimensions.
+        
+        # Strategy:
+        # 1. Define function f_point(theta_point) -> Q_point
+        # 2. Compute divergence of f_point.
+        # 3. Vmap over (S, N).
+        
+        # But internal compute_Q might rely on batch stats? (e.g. variance transform?)
+        # Variance transform uses global stats (mean/var of weights). 
+        # Those are precomputed orpassed in. 
+        # compute_Q usually operates point-wise or batch-wise.
+        
+        # If compute_Q is pointwise-compatible:
+        # We can vmap.
+        
+        # Check current compute_Q implementations. 
+        # LikelihoodDescent: grad(log_likelihood). Pointwise.
+        # KLDivergence: grad(log_pi). Pointwise.
+        # Variance: uses log_f_fn. Pointwise usually.
+        # PMM: Moment matching. uses moments (global).
+        
+        # So we can VMAP the divergence calculation.
+        
+        # To support arbitrary PyTree structures for a single point:
+        # theta_point is a PyTree of shapes (K_i, ...).
+        # We flatten theta_point to (K_total,).
+        
+        def divergence_fn(theta_point):
+            # theta_point is a single sample/data point PyTree
+            flat_t, unravel = jax.flatten_util.ravel_pytree(theta_point)
+            K_point = flat_t.shape[0]
+            
+            def flat_func(ft):
+                t = unravel(ft)
+                q = func(t) # This might expect batch dims?
+                # If func expects (S, N, ...), and we pass ( ... ), it might break if it does batch ops.
+                # But compute_Q implementations generally carry through shapes.
+                # However, `func` defined above captures `data` and `params`.
+                # `params` are usually the full batch.
+                # If we vmap `compute_divergence_Q`, we need to vmap `func` too?
+                
+                # REVISIT: The previous implementation used a loop over K and `jax.jvp` on the full batch `theta`.
+                # This worked because `theta` was (S, N, K) and `eye[k]` was broadcast.
+                # With PyTrees, we can't easily "loop over K" across the whole batch if we flatten everything.
+                
+                # BUT, we can assume the PyTree structure is consistent.
+                # We can iterate over the LEAVES of the PyTree.
+                # For each leaf (S, N, K_leaf):
+                #   Loop k in K_leaf:
+                #     Create basis vector for this leaf component.
+                #     JVP.
+                # Sum results.
+                # This avoids flattening the batch dims (S, N).
+                return jax.flatten_util.ravel_pytree(q)[0]
 
-        for k in range(K):
-            # Basis vector e_k broadcast to (S, N, K)
-            # eye[k] is (K,). We need (S, N, K)
-            v_k = jnp.zeros_like(theta)
-            v_k = v_k + eye[k]  # Broadcasting adds (K,) to (S, N, K) last dim matches
+            # Better approach:
+            # Iterate over leaves. For each leaf, iterate over its size (per-element or per-feature).
+            # Using jax.lax.scan or simple loop if K is small.
+            
+            # Actually, Hutchinson's trace estimator is O(1) but stochastic. Use exact for now.
+            # We want exact trace.
+            
+            return 0.0 # Placeholder
+            
+        # CORRECT IMPLEMENTATION FOR PYTREE DIVERGENCE PRESERVING BATCH (S, N)
+        
+        leaves, treedef = jax.tree_util.tree_flatten(theta)
+        # leaves is list of arrays (S, N, K_i) or similar.
+        
+        divergence = jnp.zeros(leaves[0].shape[:-1], dtype=leaves[0].dtype) # (S, N) assuming consistent
+        
+        # We accumulate divergence by summing dQ_leaf_i / dtheta_leaf_i component-wise.
+        
+        def basis_jvp(accum_div, leaf_idx_and_feature_idx):
+            leaf_idx, feat_idx = leaf_idx_and_feature_idx
+            
+            # Construct tangent PyTree: all zeros except 1 at specific leaf/feature
+            def make_tangent(i, x):
+                # i is current leaf index in loop
+                # x is the leaf array (S, N, K_i)
+                # We want 1.0 at feat_idx in the last dim, broadcast over S, N?
+                # Yes, "basis vector" theta_k is constant direction in parameter space.
+                
+                # CAUTION: The basis vector must be (1, 1, K) broadcastable to (S, N, K)
+                # strictly speaking, d/dtheta_k means moving theta_k by epsilon everywhere?
+                # Yes, typical vector field divergence calculation.
+                
+                is_target = (i == leaf_idx)
+                
+                shape = x.shape
+                # We assume the last dimension is the parameter dimension K_i
+                # If scalar leaf (S, N), treat as K=1?
+                
+                # Robust shape handling:
+                # We want a tangent with same shape as x, with 1s at feat_idx slice.
+                # But wait, we iterate basis vectors of the parameter space.
+                # For (S, N, K), we have K basis vectors.
+                # For basis vector k, tangent is [0, ..., 1, ..., 0] (shape K), broadcast to (S, N, K).
+                
+                t = jnp.zeros_like(x)
+                if is_target:
+                    # Create a mask or update
+                    # We can use .at[..., feat_idx].set(1.0)
+                    t = t.at[..., feat_idx].set(1.0)
+                return t
 
-            # JVP: directional derivative of Q along e_k
-            # primals_out is Q(theta), tangents_out is (nabla Q) . e_k = dQ/dtheta_k (vector)
-            _, tangent_out = jax.jvp(func, (theta,), (v_k,))
+            tangents = [make_tangent(i, L) for i, L in enumerate(leaves)]
+            tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
+            
+            _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
+            # tangent_out is Q_out_tree
+            
+            # We need the k-th component of Q_out corresponding to the input k-th component.
+            # Q_out has same structure as theta.
+            # We extract the corresponding leaf and feature index.
+            
+            q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
+            target_leaf_out = q_out_leaves[leaf_idx]
+            
+            # Extract component
+            d_component = target_leaf_out[..., feat_idx]
+            
+            return accum_div + d_component, None
 
-            # We want dQ_k / dtheta_k which is k-th component of tangent_out
-            divergence = divergence + tangent_out[..., k]
-
+        # Build list of (leaf_idx, feat_idx) to iterate over
+        indices = []
+        for i, L in enumerate(leaves):
+            # L shape (S, N, K_i)
+            K_i = L.shape[-1]
+            for k in range(K_i):
+                indices.append((i, k))
+                
+        # Loop (can use simple python loop as number of params is usually not huge, or scan if many)
+        # Using python loop for simplicity as scan with custom types is verbose.
+        
+        for idx in indices:
+            divergence, _ = basis_jvp(divergence, idx)
+            
         return divergence
 
     def normalize_vector_field(
-        self, Q: jnp.ndarray, theta_std: jnp.ndarray = None
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Normalize the vector field Q.
-
-        Args:
-            Q: Vector field (S, N, K)
-            theta_std: Parameter standard deviations (optional)
-
-        Returns:
-            Q_standardized: Standardized Q
-            Q_norm_max: Max norm scalar (or per-sample)
-        """
+        self, Q: Any, theta_std: Any = None
+    ) -> Tuple[Any, jnp.ndarray]:
+        """Normalize the vector field Q (PyTree)."""
+        
+        # Computes norm(Q) = max_{s} |Q_s| where |Q_s| is max abs over N and K?
+        # Previous logic:
+        # Q_standardized = Q / theta_std
+        # Q_norm = max abs(Q) over (K) keep S,N (dimensions 2..) -> (S, N, 1)
+        # Q_norm_max = max(Q_norm) over S -> (1, N, 1)
+        
+        # With PyTrees:
+        # 1. Standardize component-wise
         if theta_std is not None:
-            # theta_std (K) -> expand to match Q
-            theta_std_expanded = theta_std
-            # Q is usually (S, N, K). theta_std usually (K) or (1, K)
-            # We want (1, 1, K)
-            while theta_std_expanded.ndim < Q.ndim:
-                theta_std_expanded = theta_std_expanded[jnp.newaxis, ...]
-
-            Q_standardized = Q / (theta_std_expanded + 1e-6)
+            Q_standardized = jax.tree_util.tree_map(lambda q, s: q / (s + 1e-6), Q, theta_std)
         else:
             Q_standardized = Q
-
-        # Norm over K dims (typically last dim)
-        # Use range(2, Q.ndim) for (S, N, K1, ...)
-        # Actually Q is usually (S, N, K) rank 3. range(2, 3) -> (2,)
-
-        reduction_axes = tuple(range(2, Q.ndim))
-        if len(reduction_axes) == 0:
-            # Fallback if Q is lower rank? Shouldn't happen given logic.
-            reduction_axes = (-1,)
-
-        Q_norm = jnp.max(
-            jnp.abs(Q_standardized), axis=reduction_axes, keepdims=True
-        )  # (S, N, 1)
-        # Max over samples S only. Resulting shape (1, N, 1)
+            
+        # 2. Compute Norm
+        # We want "infinity norm" over the parameter dimensions (all leaves combined)?
+        # Or max per leaf?
+        # Usually we want the max update size across ALL parameters.
+        
+        def leaf_max(x):
+            # x is (S, N, K...)
+            # We want max over K (all dimensions after N)
+            # If x is (S, N), return abs(x)
+            if x.ndim == 2:
+                return jnp.abs(x)
+            else:
+                # Max over all trailing dimensions
+                # axis=tuple(range(2, x.ndim))
+                # But jnp.max with tuple axis supported? Yes.
+                return jnp.max(jnp.abs(x), axis=tuple(range(2, x.ndim)))
+            
+        # Get max magnitude per leaf per (S, N)
+        grad_mags = jax.tree_util.tree_map(leaf_max, Q_standardized)
+        
+        # Max over all leaves -> (S, N)
+        # Flatten tree to list
+        mags_list = jax.tree_util.tree_leaves(grad_mags)
+        if len(mags_list) > 0:
+            # Stack and max
+            # stack [ (S, N), (S, N) ... ] -> (L, S, N)
+            all_mags = jnp.stack(mags_list, axis=0) 
+            Q_norm = jnp.max(all_mags, axis=0) # (S, N)
+        else:
+            Q_norm = jnp.zeros(())
+            
+        # Q_norm_max over S -> (1, N)
+        # (S, N) -> (1, N)
         Q_norm_max = jnp.max(Q_norm, axis=0, keepdims=True)
-
-        # Force shape to (1, N) for broadcasting with (S, N)
-        if Q_norm_max.ndim >= 2:
-            Q_norm_max = Q_norm_max.reshape(1, -1)
-
+        
         return Q_standardized, Q_norm_max
 
     def __call__(
         self,
         max_iter: int,
         params: Dict[str, Any],
-        theta: jnp.ndarray,
+        theta: Any,
         data: Any,
         log_ell: jnp.ndarray,
         hbar: float = 1.0,
-        theta_std: jnp.ndarray = None,
+        theta_std: Any = None,
         variational: bool = False,
         log_pi: jnp.ndarray = None,
         log_ell_original: jnp.ndarray = None,
@@ -371,18 +511,35 @@ class SmallStepTransformation(Transformation):
             **kwargs,
         )
 
-        # 2. Normalize and determine step size h
+        # 2. Normalize
         Q_standardized, Q_norm_max = self.normalize_vector_field(Q, theta_std)
 
-        # h = rho / norm(Q), where rho is passed as hbar
-        # h should be (1, N) or broadcastable to (S, N)
+        # h = rho / norm(Q)
+        # h: (1, N)
         h = hbar / (Q_norm_max + 1e-8)
 
-        # 3. Step
-        # h is (1, N). Q is (S, N, K).
-        # Need h as (1, N, 1) to multiply Q
-        h_expanded = h[..., jnp.newaxis]
-        theta_new = theta + h_expanded * Q
+        # 3. Step: theta_new = theta + h * Q
+        # h is (1, N).
+        # For scalar params q is (S, N). h * q works.
+        # For vector params q is (S, N, K). h * q needs h expanded.
+        
+        def update_step(t, q):
+            # t and q have same shape
+            if q.ndim == 2:
+                # (S, N)
+                return t + h * q
+            else:
+                # (S, N, K...)
+                # Expand h to match rank
+                # We assume h aligns with N (axis 1)
+                # We need to add axes for K...
+                # (1, N) -> (1, N, 1, 1...)
+                h_exp = h
+                for _ in range(q.ndim - 2):
+                    h_exp = h_exp[..., jnp.newaxis]
+                return t + h_exp * q
+
+        theta_new = jax.tree_util.tree_map(update_step, theta, Q)
 
         # 4. Jacobian Approximation
         div_Q = self.compute_divergence_Q(
@@ -395,9 +552,62 @@ class SmallStepTransformation(Transformation):
             **kwargs,
         )
 
-        # log|J| ~ log|1 + h * div(Q)|
-        # h is (1, N). div_Q is (S, N).
-        # Should broadcast fine: (1, N) * (S, N) -> (S, N)
+        # log|J| ~ log(1 + h * div(Q))
+        # h (1, N), div_Q (S, N)
+        # h * div_Q -> (S, N)
+        term = 1.0 + h * div_Q
+        log_jacobian = jnp.log(jnp.abs(term))
+
+        theta_new_params = theta_new # It IS the params structure now
+        
+        # We need to call compute_importance_weights_helper with new params
+        # But wait, compute_importance_weights_helper expects (params_original, params_transformed)
+        # where params_transformed IS theta_new (since theta is params pytree).
+        
+        eta_weights, psis_weights, khat, log_ell_new = (
+            self.compute_importance_weights_helper(
+                self.likelihood_fn,
+                data,
+                params,                   # Original params
+                theta_new_params,         # Transformed params
+                log_jacobian,
+                variational,
+                log_pi,
+                log_ell_original,
+                surrogate_log_prob_fn
+            )
+        )
+
+        # ... (Metrics calculation is synonymous with Identity/others, maybe shared logic?)
+        
+        # Recalculate predictions
+        predictions = log_ell_new # usually
+        
+        weight_entropy = self.entropy(eta_weights)
+        psis_entropy = self.entropy(psis_weights)
+
+        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
+        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+
+        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
+        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+
+        return {
+            "theta_new": theta_new,
+            "log_jacobian": log_jacobian,
+            "eta_weights": eta_weights,
+            "psis_weights": psis_weights,
+            "khat": khat,
+            "predictions": predictions,
+            "log_ell_new": log_ell_new,
+            "weight_entropy": weight_entropy,
+            "psis_entropy": psis_entropy,
+            "p_loo_eta": p_loo_eta,
+            "p_loo_psis": p_loo_psis,
+            "ll_loo_eta": ll_loo_eta,
+            "ll_loo_psis": ll_loo_psis,
+        }
+
         log_jac = jnp.log(jnp.abs(1.0 + h * div_Q))
 
         if log_jac.ndim > 2:
@@ -546,11 +756,25 @@ class KLDivergence(SmallStepTransformation):
             log_pi_expanded = log_pi_expanded[..., jnp.newaxis]
 
         log_ell_expanded = current_log_ell[..., jnp.newaxis]
-
+        
         # scaling factor: - exp(log_pi - log_ell)
+        # (S, N, 1)
         scaling = -jnp.exp(log_pi_expanded - log_ell_expanded)
-
-        return scaling * grad_ll
+        
+        # Apply scaling to gradient tree
+        # grad_ll leaves are (S, N, ...)
+        # scaling (S, N, 1) should broadcast against (S, N, K) or (S, N, 1)
+        
+        def apply_scale(g):
+            # Safe broadcast check
+            # if g is (S, N), we want (S, N) scaling.
+            # scaling is (S, N, 1). 
+            if g.ndim == 2:
+                return scaling[..., 0] * g
+            else:
+                return scaling * g
+                
+        return jax.tree_util.tree_map(apply_scale, grad_ll)
 
 
 class Variance(SmallStepTransformation):
@@ -666,15 +890,6 @@ class PMM1(SmallStepTransformation):
         # Q = mean_w - mean (Broadcasted to theta shape)
         # We need to reconstruct Q vector from parameter dict diffs
 
-        # Flattened logic:
-        # We have params dict.
-        # We calculate diff for each param.
-        # Then flatten to get Q vector.
-
-        # This requires matching theta's flattened structure.
-        # Ais uses `theta` as flattened (S, N, K).
-        # extract_parameters does that.
-
         # Construct diff dict
         diff_params = {}
         for name, value in params.items():
@@ -690,8 +905,8 @@ class PMM1(SmallStepTransformation):
                     d[jnp.newaxis, :, :], (value.shape[0], 1, 1)
                 )
 
-        # Flatten diff_params to get Q
-        Q = self.likelihood_fn.extract_parameters(diff_params)
+        # Return Q as PyTree
+        Q = diff_params
         return Q
 
 
@@ -717,9 +932,7 @@ class PMM2(SmallStepTransformation):
 
         moments = Transformation.compute_moments(params, weights)
 
-        # We assume theta is flattened order of params iteration
-        # extract_parameters usually iterates keys() or similar.
-        # We need to be careful with ordering.
+        # We assume theta is PyTree (Dict)
         # Ideally we use extract_parameters on a constructed dict.
 
         Q_dict = {}
@@ -746,7 +959,7 @@ class PMM2(SmallStepTransformation):
                 )
                 Q_dict[name] = term1 + term2
 
-        Q = self.likelihood_fn.extract_parameters(Q_dict)
+        Q = Q_dict
         return Q
 
 
@@ -793,7 +1006,7 @@ class MM1(GlobalTransformation):
         # MM1 Jac is 0
         log_jac = jnp.zeros_like(log_w)
         # We need theta_new to return
-        theta_new = self.likelihood_fn.extract_parameters(new_params)
+        theta_new = new_params
 
         eta_weights, psis_weights, khat, log_ell_new = (
             self.compute_importance_weights_helper(
@@ -924,70 +1137,155 @@ class AutoDiffLikelihoodMixin(LikelihoodFunction):
     using JAX automatic differentiation.
     """
 
-    def log_likelihood_gradient(self, data: Any, params: Dict[str, Any]) -> jnp.ndarray:
+    
+    def log_likelihood_gradient(self, data: Any, params: Dict[str, Any]) -> Any:
         """Compute gradient of log-likelihood w.r.t. parameters using autodiff."""
-        flat_params = self.extract_parameters(params)  # (S, K)
+        # params is a PyTree (Dict)
+        
+        # We need a function that maps params -> log_likelihood (N,)
+        # and we want derivatives w.r.t params. 
+        # Output should be PyTree of shapes (S, N, K_i) matching params structure.
 
-        # We need a function that maps (K,) -> (N,)
-        def batch_ll(theta_s):
-            # theta_s: (K,)
-            # Reconstruct params to match the structure the model expects
-            # Most models expect a sample dimension, so we add a singleton one
-            p = self.reconstruct_parameters(theta_s[jnp.newaxis, ...], params)
-            ll = self.log_likelihood(data, p)
-            # Remove the added sample dimension from results (1, N) -> (N,)
-            return jnp.squeeze(ll, axis=0)
+        def batch_ll(p_tree):
+             # p_tree (PyTree) where each leaf is (S, ...)
+             # log_likelihood expects (S, ..) input and returns (S, N)
+             ll = self.log_likelihood(data, p_tree)
+             return ll
 
-        # Jacobian of mapping theta -> [ll_1, ll_2, ... ll_N]
-        # Jacobian shape for one sample: (N, K)
-        jac_fn = jax.jacrev(batch_ll)
+        # If params has shape (S, ...), and LL is (S, N).
+        # We want grad per (S, N). 
+        # jax.grad sums output. jax.jacobian returns huge matrix.
+        
+        # We can map over S, N? Or just S?
+        # params leafs are (S, ...).
+        # We can VMAP over S.
+        
+        def single_sample_ll(p_sample):
+             # p_sample has leaves (...) (no S dim)
+             # Expand trace to satisfy model requirements? 
+             # Model usually handles broadcasting.
+             # But let's assume model can handle single sample input -> (N,) output.
+             # We might need to add singleton dimension if model STRICTLY expects (S,...)
+             
+             # Heuristic: Add singleton dim to leaves
+             p_exp = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), p_sample)
+             ll = self.log_likelihood(data, p_exp) # (1, N)
+             return jnp.squeeze(ll, 0) # (N,)
 
-        # Vmap over samples S
-        # Output: (S, N, K)
-        gradients = jax.vmap(jac_fn)(flat_params)
-
+        # Jacobian of (N,) -> params_structure
+        # jacrev is better for N > K usually? Or N large? 
+        # params size K is smallish?
+        # N is data size (e.g. 1000).
+        # jacobian will be tree of (N, K_i...)
+        
+        jac_fn = jax.jacrev(single_sample_ll)
+        
+        # Vmap over S
+        # params is (S, ...)
+        # We want input to vmap to be the tree of params slicing S dimension.
+        # jax.vmap default in_axes=0 handles PyTrees correctly if all leaves have leading dim S.
+        
+        gradients = jax.vmap(jac_fn)(params)
+        # gradients is PyTree where leaves are (S, N, K_i...)
+        
         return gradients
 
     def log_likelihood_hessian_diag(
         self, data: Any, params: Dict[str, Any]
-    ) -> jnp.ndarray:
+    ) -> Any:
         """Compute diagonal of Hessian of log-likelihood w.r.t. parameters using autodiff."""
+        
+        # params: PyTree (S, ...)
+        # Output: PyTree (S, N, ...) matches params structure
+        
+        # We need diagonal hessian of LL_n w.r.t theta.
+        # d^2 L_n / dtheta^2
+        
+        n_data = jax.tree_util.tree_leaves(data)[0].shape[0]
 
-        flat_params = self.extract_parameters(params)  # (S, K)
+        def single_sample_hess_diag(p_sample):
+             # p_sample: PyTree (...)
+             
+             def point_ll(p, i):
+                 p_exp = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), p)
+                 ll = self.log_likelihood(data, p_exp) # (1, N)
+                 return ll[0, i]
 
-        def batch_ll(theta_s):
-            p = self.reconstruct_parameters(theta_s[jnp.newaxis, ...], params)
-            ll = self.log_likelihood(data, p)
-            return jnp.squeeze(ll, axis=0)  # (N,)
+             def diag_hess_i(i):
+                 # Return PyTree of diagonal hessian elements for data point i
+                 h_tree = jax.hessian(lambda p: point_ll(p, i))(p_sample)
+                 # h_tree is PyTree of PyTrees (Hessian blocks).
+                 # We only want the diagonal blocks? No, we want diagonal elements of the full Hessian matrix.
+                 # Actually, for AIS "Variance" transform, we specifically usually want 1 / (d2L/dtheta2).
+                 # This assumes diagonal approximation is sufficient.
+                 # Diagonal elements of the Hessian matrix.
+                 
+                 # jax.hessian returns a nested structure. If p_sample is a dict with keys A, B
+                 # Hessian is dict of dicts: {{d2/dAdA, d2/dAdB}, {d2/dBdA, d2/dBdB}}
+                 # We only want d2/dAdA diagonal elements, d2/dBdB diagonal elements.
+                 # AND we only want the diagonal of those blocks (d2/dtheta_k^2).
+                 
+                 # So we want distinct manual logic:
+                 # for each leaf, d2L/dleaf^2.
+                 
+                 # This can be computed by `jax.jacfwd(jax.grad(f))`.
+                 # Jacobian of Gradient.
+                 # Gradient is PyTree. Jacobian of PyTree is PyTree of PyTrees.
+                 # We just want the 'diagonal' leaves.
+                 
+                 # A more efficient way to get diagonal of Hessian w.r.t input vector is jvp-of-grad?
+                 # No, that gives vector-Hessian product.
+                 
+                 # If we assume diagonal approximation, we iterate over parameters and compute 2nd deriv.
+                 
+                 return jax.tree_util.tree_map(
+                    lambda x: jnp.diag(x) if x.ndim == 2 else x, # Very rough, incorrect for general PyTree shapes
+                    h_tree
+                 )
+                 
+                 # Let's fallback to diagonal of Gradient-of-Gradient simply ?
+                 # But we can't easily get DIAGONAL of hessian without materializing it unless we loop.
+                 # But Variance transform + PyTree AIS requires us to have `grad_log_pi` and `log_ell_doubleprime`
+                 # as PyTrees matching `theta`.
+                 
+                 pass
 
-        # We want the diagonal of the Hessian for each data point i: d^2 L_i / d theta_j^2
-        # jax.hessian(batch_ll) would give (N, K, K).
-        # We can use jax.vmap over data points and compute diagonal Hessian for each.
+             # Better approach for Diagonal Hessian of PyTree:
+             # Iterate over leaves. For each element in each leaf, compute second derivative.
+             # This is expensive (O(K)).
+             # But allows true diagonal.
+             
+             # Alternatively, use Hutchison trace estimator?
+             # For now, let's implement the O(K) loop using vmap over basis vectors implicitly?
+             # Or just map over the flattened view virtually.
+             
+             flat_p, unravel = jax.flatten_util.ravel_pytree(p_sample)
+             K = flat_p.shape[0]
+             
+             def flat_point_ll(fp, i):
+                 p = unravel(fp)
+                 return point_ll(p, i)
+             
+             # Compute diagonal hessian for flattened params
+             # d^2 L / d theta_k^2
+             
+             def diag_h_flat(i):
+                 return jnp.diag(jax.hessian(lambda fp: flat_point_ll(fp, i))(flat_p))
+             
+             # vmap over data points N
+             h_flat_N = jax.vmap(diag_h_flat)(jnp.arange(n_data)) # (N, K)
+             
+             # Unravel back to PyTree
+             # We need to unravel each (N, ...) row? 
+             # h_flat_N is (N, K). We can't directly unravel (N, K) if unravel expects (K,).
+             # But we can vmap unravel.
+             
+             h_tree_N = jax.vmap(unravel)(h_flat_N)
+             return h_tree_N
 
-        def point_ll(theta_s, i):
-            p = self.reconstruct_parameters(theta_s[jnp.newaxis, ...], params)
-            ll = self.log_likelihood(data, p)
-            return ll[0, i]  # Scalar
-
-        def diag_hess_fn(theta_s):
-            # Returns (N, K)
-            # Use vmap to compute diagonal Hessian for each data point i
-            n_data = jax.tree_util.tree_leaves(data)[0].shape[0]
-
-            def point_diag_hess(i):
-                # Diagonal of Hessian of point_ll w.r.t theta_s
-                # For small K, jax.hessian is okay. For large K, this might be slow.
-                # But AIS is generally used when we can afford some computation.
-                h = jax.hessian(lambda t: point_ll(t, i))(theta_s)
-                return jnp.diag(h)
-
-            return jax.vmap(point_diag_hess)(jnp.arange(n_data))
-
-        # Vmap over samples S
-        # Output: (S, N, K)
-        hessian_diag = jax.vmap(diag_hess_fn)(flat_params)
-
-        return hessian_diag
+        # Output shape: PyTree (S, N, ...)
+        hessians = jax.vmap(single_sample_hess_diag)(params)
+        return hessians
 
 
 class AdaptiveImportanceSampler:
@@ -1054,25 +1352,29 @@ class AdaptiveImportanceSampler:
 
         # Initial computations
         log_ell = self.likelihood_fn.log_likelihood(data, params)  # (S, N)
-        theta = self.likelihood_fn.extract_parameters(params)  # (S, K)
+        
+        # Use params directly as theta (PyTree)
+        theta = params 
 
         # Precompute potentially expensive derivatives once
         log_ell_prime = self.likelihood_fn.log_likelihood_gradient(
             data, params
-        )  # (S, N, K)
-        # Only compute Hessian diagonal if needed (e.g. for Var transform)
-        # But we do it once for efficiency if safe
+        )
+
+        # Hessian diagonal - generally used for Variance transform
         log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(
             data, params
-        )  # (S, N, K)
-
+        )
+        
         # Determine log_pi for transformations
         if variational and self.surrogate_log_prob_fn is not None:
             log_pi = self.surrogate_log_prob_fn(params)
+            
+            # gradient of surrogate log prob w.r.t params
+            # jax.grad returns structure matching params
             grad_log_pi = jax.grad(lambda p: jnp.sum(self.surrogate_log_prob_fn(p)))(
                 params
             )
-            grad_log_pi = self.likelihood_fn.extract_parameters(grad_log_pi)
         else:
             if hasattr(self, "target_log_prob_fn") and self.target_log_prob_fn:
                 log_pi = self.target_log_prob_fn(data, **params)
@@ -1085,26 +1387,46 @@ class AdaptiveImportanceSampler:
                 log_prior = (
                     self.prior_log_prob_fn(params)
                     if self.prior_log_prob_fn
-                    else jnp.zeros(theta.shape[0])
+                    else jnp.zeros(log_ell.shape[0])
                 )
                 log_pi = jnp.sum(log_ell, axis=1) + log_prior
                 grad_log_pi = None
 
         # Ensure log_pi shape
         if log_pi.ndim == 1:
-            log_pi = log_pi  # (S,) usually, but transforms expect broadcasting.
-            # Some transforms expect (S, 1) or similar.
-            # KLDivergence expects log_pi.
-            # Let's ensure it's (S,) or (S,1) consistently.
-            pass
+            log_pi = log_pi  # (S,)
 
         # Standard deviation of parameters (for standardization)
-        theta_std = jnp.std(theta, axis=0)  # (K,)
-        theta_std = jnp.where(theta_std < 1e-6, 1.0, theta_std)
+        # theta is a PyTree (dict). We want std per leaf.
+        # theta shape (S, ...). std over S (axis 0).
+        
+        def compute_std(x):
+            s = jnp.std(x, axis=0) # (...,)
+            return jnp.where(s < 1e-6, 1.0, s)
 
-        theta_expanded = theta[
-            :, jnp.newaxis, :
-        ]  # (S, 1, K) broadcastable to (S, N, K)
+        theta_std = jax.tree_util.tree_map(compute_std, theta)
+
+        # theta_expanded
+        # We need to broadcast theta (S, ...) to (S, 1, ...) for "N" dimension
+        # Transformations expect theta as (S, N, ...) sometimes?
+        # SmallStepTransformation normalizes Q (S, N, K) with theta_std (K).
+        # And updates theta (S, 1, K) + h(1, N, 1)*Q(S, N, K) -> theta_new (S, N, K)
+        
+        # So yes, we should expand theta to have the N dimension.
+        # theta leaves are (S, K_i...) or (S,).
+        # We want (S, 1, K_i...)
+        
+        def expand_dims(x):
+            # x is (S, ...)
+            # We want (S, 1, K...). 
+            # If x is (S,) -> (S, 1, 1)
+            # If x is (S, D) -> (S, 1, D)
+            if x.ndim == 1:
+                return x[:, jnp.newaxis, jnp.newaxis]
+            else:
+                return jnp.expand_dims(x, axis=1)
+            
+        theta_expanded = jax.tree_util.tree_map(expand_dims, theta)
 
         # Define search grid for rho (step size factor)
         if rhos is None:
@@ -1233,9 +1555,11 @@ class AdaptiveImportanceSampler:
             "surrogate_log_prob_fn": self.surrogate_log_prob_fn,
         }
 
-        theta_expanded = theta[
-            :, jnp.newaxis, :
-        ]  # (S, 1, K) broadcastable to (S, N, K)
+        # No need to recompute theta_expanded, it was computed earlier.
+        # Ensure common_kwargs uses the correct theta_expanded if passed explicitly?
+        # Actually SmallStepTransformation takes theta as arg, not from common_kwargs.
+        # common_kwargs has log_ell, etc.
+        pass
 
         # Run sweeps
         for name, transform in transforms.items():
@@ -1294,8 +1618,6 @@ class AdaptiveImportanceSampler:
                 except Exception as e:
                     if verbose:
                         print(f"Failed {name} rho={rho}: {e}")
-                    # import traceback
-                    # traceback.print_exc()
                     continue
 
         results["best"] = best_metrics

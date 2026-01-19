@@ -175,8 +175,9 @@ class NegativeBinomialRegression(BayesianModel):
         elif beta.ndim == 2:
             # Case 2: Standard MCMC/VI (S, n_feat)
             # X (N, D), beta (S, D) -> (S, N)
-            # intercept is (S,) so we need (S, 1) for broadcasting
-            eta = jnp.einsum("nd,sd->sn", X, beta) + intercept[:, jnp.newaxis]
+            # intercept may be (S,) or (S, 1) - squeeze to 1D then expand
+            intercept_1d = jnp.squeeze(intercept) if intercept.ndim > 1 else intercept
+            eta = jnp.einsum("nd,sd->sn", X, beta) + intercept_1d[:, jnp.newaxis]
         elif beta.ndim == 3:
             # Case 3: AIS per-datum parameters (S, N, n_feat)
             # X (N, D), beta (S, N, D) -> (S, N)
@@ -196,7 +197,10 @@ class NegativeBinomialRegression(BayesianModel):
 
         mean = jnp.exp(eta).astype(self.dtype)
 
+        # Handle log_concentration that might be (S,), (S, 1), or (S, N, 1)
         if log_concentration.ndim == 3:
+            concentration = jnp.exp(jnp.squeeze(log_concentration, axis=-1))
+        elif log_concentration.ndim == 2 and log_concentration.shape[-1] == 1:
             concentration = jnp.exp(jnp.squeeze(log_concentration, axis=-1))
         else:
             concentration = jnp.exp(log_concentration)
@@ -214,7 +218,7 @@ class NegativeBinomialRegression(BayesianModel):
         else:
             total_count_exp = total_count
 
-        probs = total_count_exp / (total_count_exp + mean)
+        probs = mean / (total_count_exp + mean)
         probs = jnp.clip(
             probs,
             jnp.array(1e-6, dtype=self.dtype),
@@ -295,10 +299,22 @@ class NegativeBinomialRegression(BayesianModel):
             nb_logprob_zero = nb_dist.log_prob(jnp.zeros_like(y, dtype=self.dtype))
 
             # Broadcast zero_prob if needed (S,) -> (S, 1) or (S, N)
+            # Align zero_prob shape with nb_logprob_zero (Reference Shape)
+            # zero_prob can be (S,), (S, 1), (S, N), (S, N, 1) etc.
+            # nb_logprob_zero is typically (S, N)
+            
+            zero_prob_bc = zero_prob
             if zero_prob.ndim < nb_logprob_zero.ndim:
+                 # Expand, e.g. (S,) -> (S, 1)
                  zero_prob_bc = zero_prob[..., jnp.newaxis]
-            else:
-                 zero_prob_bc = zero_prob
+            elif zero_prob.ndim > nb_logprob_zero.ndim:
+                 # Squeeze, e.g. (S, N, 1) -> (S, N)
+                 zero_prob_bc = jnp.squeeze(zero_prob, axis=-1)
+            
+            # Check if dimensions match now
+            if zero_prob_bc.ndim != nb_logprob_zero.ndim:
+                # Still failing? Try standard broadcast
+                pass
 
             eps = jnp.array(1e-10, dtype=self.dtype)
             log_zero_prob = jnp.log(zero_prob_bc + eps)
@@ -387,20 +403,14 @@ class NegativeBinomialRegressionLikelihood(AutoDiffLikelihoodMixin):
         # The safest fix for the reported issue (4, 2000, 4) is simply to flatten
         # any >2 dim beta to 2 dim, and >1 dim intercept to 1 dim.
         
-        flat_params = params.copy()
+        # UPDATE: AIS PyTree refactor uses (S, N, D) for local parameters.
+        # Flattening breaks this structure.
+        # We trust the model to handle the shapes passed.
         
-        if "beta" in params:
-            b = params["beta"]
-            if b.ndim > 2:
-                flat_params["beta"] = b.reshape(-1, b.shape[-1])
+        # Note: If legacy code passes (C, S, D), it might break if model doesn't support 3 dims.
+        # But we prioritize correctness for (S, N) AIS.
         
-        for k in ["intercept", "log_concentration", "zero_logit"]:
-            if k in params:
-                v = params[k]
-                if v.ndim > 1:
-                    flat_params[k] = v.flatten()
-
-        return self.model.log_likelihood(data, **flat_params)
+        return self.model.log_likelihood(data, **params)
 
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """Extract parameters into flattened array."""
@@ -465,92 +475,430 @@ class NegativeBinomialRegressionLikelihood(AutoDiffLikelihoodMixin):
         falls back to AutoDiffLikelihoodMixin for Zero-Inflated case.
         """
         if self.zero_inflated:
-            return super().log_likelihood_gradient(data, params)
+            # Explicit Gradient for Zero-Inflated Negative Binomial
+            X = jnp.asarray(data["X"], dtype=self.dtype)
+            y = jnp.asarray(data["y"], dtype=self.dtype) # (N,)
+
+            beta = params["beta"]
+            intercept = params["intercept"]
+            log_concentration = params["log_concentration"]
+            zero_logit = params["zero_logit"]
+
+            # Shapes: beta (S, N, D) or (S, 1, D). X (N, D).
+            # others: (S, N, 1) or (S, 1, 1) or (S, N) or (S, 1).
+            
+            # Expand X to (1, N, D)
+            X = jnp.asarray(data["X"], dtype=self.dtype)
+            X_expanded = X[jnp.newaxis, :, :] # (1, N, D)
+
+            # Ensure params have atomic "N" dimension as broadcasting dim (axis -2 or -1 depending on rank)
+            # beta (S, D) -> (S, 1, D)
+            if beta.ndim == 2:
+                beta_in = beta[:, jnp.newaxis, :]
+            else:
+                beta_in = beta # assume (S, N, D) or (S, 1, D)
+
+            # intercept (S,) -> (S, 1)
+            # (S, N) -> (S, N)
+            def expand_scalar(p):
+                 if p.ndim == 1:
+                     return p[:, jnp.newaxis]
+                 return p
+            
+            intercept_in = expand_scalar(intercept)
+            
+            # eta calculation
+            # (S, 1, D) * (1, N, D) -> (S, N, D)
+            # sum(-1) -> (S, N)
+            eta = jnp.sum(beta_in * X_expanded, axis=-1) + intercept_in
+            
+            mu = jnp.exp(eta) # (S, N)
+
+            # log_concentration (S,) -> (S, 1) -> broadcasting to (S, N) happens implicitly?
+            # r = exp(log_conc). r is (S, 1).
+            r = jnp.exp(expand_scalar(log_concentration))
+            
+            # zero_logit
+            z_in = expand_scalar(zero_logit)
+            pi = jax.nn.sigmoid(z_in) # (S, 1)
+
+            
+            # NB probability of 0: p0 = (r / (mu + r))^r
+            # For numerical stability with large r, use log space
+            # log_p0 = r * (log(r) - log(mu + r))
+            log_p0 = r * (jnp.log(r) - jnp.log(mu + r))
+            p0 = jnp.exp(log_p0) # (S, N)
+
+            # Denominator for y=0 case: D = pi + (1 - pi) * p0
+            # D = pi + p0 - pi*p0
+            D = pi + (1.0 - pi) * p0
+
+            # --- Gradients ---
+            
+            # Common terms
+            # NB gradient term for mean: d(log P_NB)/d(eta)
+            # For y > 0: y - (y+r) * mu / (mu+r)
+            # For y = 0: - r * mu / (mu+r)
+            
+            grad_nb_eta_common = - (r * mu) / (mu + r) # This is the y=0 case of standard NB grad
+
+            # 1. Gradient w.r.t. zero_logit
+            # d(pi)/d(z) = pi * (1 - pi)
+            
+            # For y = 0: dL/dz = (1/D) * (1 - p0) * d(pi)/dz
+            # = (1/D) * (1 - p0) * pi * (1 - pi)
+            dl_dz_zero = (1.0 - p0) * pi * (1.0 - pi) / D
+            
+            # For y > 0: dL/dz = -pi (derived from d/dz log(1-pi))
+            dl_dz_nonzero = -pi
+            
+            # Broadcast to (S, N)
+            # dl_dz_nonzero is (S, 1), need (S, N) if y is (N,)
+            dl_dz_nonzero = jnp.broadcast_to(dl_dz_nonzero, mu.shape)
+
+            dl_dzero_logit = jnp.where(y == 0, dl_dz_zero, dl_dz_nonzero)
+
+            # 2. Gradient w.r.t. eta
+            # For y = 0: dL/d(eta) = ((1 - pi)/D) * d(P_NB(0))/d(eta)
+            # d(P_NB(0))/d(eta) = p0 * grad_nb_eta_common
+            # So: ((1 - pi) * p0 / D) * grad_nb_eta_common
+            factor_zero = (1.0 - pi) * p0 / D
+            dl_deta_zero = factor_zero * grad_nb_eta_common
+
+            # For y > 0: Standard NB gradient
+            # y - (y+r) * mu / (mu + r)
+            term_nonzero = (y + r) * mu / (mu + r)
+            dl_deta_nonzero = y - term_nonzero
+
+            dl_deta = jnp.where(y == 0, dl_deta_zero, dl_deta_nonzero)
+
+            # 3. Gradient w.r.t. log_concentration
+            # dL/d(log_r) = dL/dr * r
+            
+            # Standard NB d/dr part (without the r mult)
+            # For y > 0: this is complex digamma terms
+            psi_y_r = jax.lax.digamma(y + r)
+            psi_r = jax.lax.digamma(r)
+            grad_nb_r_nonzero = (psi_y_r - psi_r + jnp.log(r / (mu + r)) 
+                                 + 1.0 - (r + y) / (mu + r))
+            
+            # For y = 0: d(P_NB(0))/dr * (1/P_NB(0)) = log(r/(mu+r)) + mu/(mu+r)
+            # Check: d/dr [ r log(r/(mu+r)) ] = log(...) + r * (1/r - 1/(mu+r)) = log + 1 - r/(mu+r) = log + mu/(mu+r)
+            grad_nb_r_zero = jnp.log(r / (mu + r)) + mu / (mu + r)
+
+            # Combine for full dL/d(log_r)
+            # For y=0: factor_zero * d(P_NB(0))/d(log_r) ??? 
+            # No, dL/d(log_r) = ((1-pi)/D) * d(P_NB(0))/dr * r
+            # = factor_zero * grad_nb_r_zero * r
+            dl_dlog_conc_zero = factor_zero * grad_nb_r_zero * r
+
+            # For y > 0: grad_nb_r_nonzero * r
+            dl_dlog_conc_nonzero = grad_nb_r_nonzero * r
+
+            dl_dlog_conc = jnp.where(y == 0, dl_dlog_conc_zero, dl_dlog_conc_nonzero)
+
+
+            # --- Assemble Gradients ---
+            
+            # dL/dbeta = dl_deta * X
+            dl_dbeta = dl_deta[..., jnp.newaxis] * X[jnp.newaxis, ...] # (S, N, D)
+
+            # dL/dintercept = dl_deta
+            dl_dintercept = dl_deta[..., jnp.newaxis] # (S, N, 1)
+
+            # dL/dlog_conc
+            dl_dlog_conc = dl_dlog_conc[..., jnp.newaxis] # (S, N, 1)
+
+            # dL/dzero_logit
+            dl_dzero_logit = dl_dzero_logit[..., jnp.newaxis] # (S, N, 1)
+
+            return {
+                "beta": dl_dbeta,
+                "intercept": dl_dintercept,
+                "log_concentration": dl_dlog_conc,
+                "zero_logit": dl_dzero_logit
+            }
+
+    def log_likelihood_hessian_diag(
+        self, data: Dict[str, Any], params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Compute diagonal of Hessian of log-likelihood w.r.t. parameters.
+        
+        Uses analytical derivation for beta/intercept (via d^2L/deta^2) to avoid O(D^2) cost.
+        Uses AD for scalar parameters (log_concentration, zero_logit).
+        """
+        X = jnp.asarray(data["X"], dtype=self.dtype)
+        y = jnp.asarray(data["y"], dtype=self.dtype) # (N,)
+        y_expanded = y[jnp.newaxis, :, jnp.newaxis] # (1, N, 1)
+
+        # Cast parameters to model dtype to avoid TFP mismatch
+        beta = params["beta"].astype(self.dtype)
+        intercept = params["intercept"].astype(self.dtype)
+        log_concentration = params["log_concentration"].astype(self.dtype)
+        
+        # --- 1. Compute d^2L / deta^2 analytically ---
+        
+        # Broadcasting setup (similar to gradient)
+        X_expanded = X[jnp.newaxis, :, :] # (1, N, D)
+        
+        if beta.ndim == 2:
+            beta_in = beta[:, jnp.newaxis, :]
+        else:
+            beta_in = beta
+
+        def expand_scalar(p, ndim=2):
+             """Expand scalar parameter to target ndim for broadcasting."""
+             if p.ndim == 1:
+                 if ndim == 2:
+                     return p[:, jnp.newaxis]
+                 elif ndim == 3:
+                     return p[:, jnp.newaxis, jnp.newaxis]
+             elif p.ndim == 2 and ndim == 3:
+                 return p[:, :, jnp.newaxis]
+             return p
+
+        intercept_in = expand_scalar(intercept, ndim=3)
+        eta = jnp.sum(beta_in * X_expanded, axis=-1, keepdims=True) + intercept_in
+        mu = jnp.exp(eta) # (S, N, 1)
+
+        r = jnp.exp(expand_scalar(log_concentration, ndim=3))
+        
+        # Determine d2_l_d_eta2
+        # Common terms
+        p = mu / (mu + r) # prob of success (NB) or mean-related
+        
+        # Non-zero case: d^2L / deta^2 = - (y+r) * p * (1-p)
+        d2_l_d_eta2_nonzero = - (y_expanded + r) * p * (1.0 - p)
+        
+        
+        if self.zero_inflated:
+            zero_logit = params["zero_logit"].astype(self.dtype)
+            z_in = expand_scalar(zero_logit, ndim=3)
+            pi = jax.nn.sigmoid(z_in)
+            
+            log_p0 = r * (jnp.log(r) - jnp.log(mu + r))
+            p0 = jnp.exp(log_p0)
+            
+            D = pi + (1.0 - pi) * p0
+            w_0 = (1.0 - pi) * p0 / D
+            
+            # Zero case: d^2L / deta^2 = - r * p * w_0 * [ (1-p) - r * p * (1-w_0) ]
+            d2_l_d_eta2_zero = - r * p * w_0 * ( (1.0 - p) - r * p * (1.0 - w_0) )
+            
+            d2_l_d_eta2 = jnp.where(y_expanded == 0, d2_l_d_eta2_zero, d2_l_d_eta2_nonzero)
+            
+            # --- 2. AD for scalars (log_concentration, zero_logit) ---
+            # We define a helper that computes point-wise log-likelihood for one observation
+            # and differentiate it twice w.r.t specific params.
+            # This is slow if looped, but they are scalars so VMAP is efficient.
+            
+            # Or better, just implement analytical?
+            # Analytical for log_r and zero_logit is messy. 
+            # Let's use `jax.grad(jax.grad)` but vmapped over (S, N).
+            
+            # We need d^2 L / d (log_r)^2 and d^2 L / d z^2.
+            
+            # Helper to compute ELL for scalar inputs (per point)
+            def scalar_ll(my_y, my_eta, my_log_r, my_z):
+                # Similar to compiled log_likelihood logic but for scalars
+                my_mu = jnp.exp(my_eta)
+                my_r = jnp.exp(my_log_r)
+                
+                my_pi = jax.nn.sigmoid(my_z)
+                
+                # ZINB
+                nb_lp = tfd.NegativeBinomial(total_count=my_r, probs=my_mu/(my_mu+my_r)).log_prob(my_y)
+                # Note: TFP probs is p = mu / (mu+r) ? 
+                # TFP probs argument is "probability of success". 
+                # Mean is total_count * probs / (1-probs).
+                # mu = r * p / (1-p) => mu/r = p/(1-p) => p = (mu/r) / (1 + mu/r) = mu / (mu+r).
+                # Yes.
+                
+                nb_lp_zero = tfd.NegativeBinomial(total_count=my_r, probs=my_mu/(my_mu+my_r)).log_prob(0.)
+                
+                # Manual ZINB mixture
+                eps = 1e-10
+                log_zero = jnp.log(my_pi + eps)
+                log_nonzero_weight = jnp.log(1.0 - my_pi + eps)
+                
+                ll_0 = jnp.logaddexp(log_zero, log_nonzero_weight + nb_lp_zero)
+                ll_nz = log_nonzero_weight + nb_lp
+                
+                return jnp.where(my_y == 0, ll_0, ll_nz)
+
+            # We want d2/d(log_r)2 and d2/d(z)2.
+            # Inputs: y (scalar), eta (scalar), log_r (scalar), z (scalar)
+            
+            d2_logr_fn = jax.grad(jax.grad(scalar_ll, argnums=2), argnums=2)
+            d2_z_fn = jax.grad(jax.grad(scalar_ll, argnums=3), argnums=3)
+            
+            # VMAP application
+            # y (N,), eta (S, N), log_conc (S, 1), z (S, 1)
+            # Broadcast scalars to (S, N)
+            
+            log_c_in = expand_scalar(log_concentration)
+            if log_c_in.shape[1] == 1:
+                log_c_in = jnp.tile(log_c_in, (1, y.shape[0]))
+                
+            z_in_full = expand_scalar(zero_logit)
+            if z_in_full.shape[1] == 1:
+                z_in_full = jnp.tile(z_in_full, (1, y.shape[0]))
+
+            # We need to broadcast y to (S, N)
+            y_in = jnp.tile(y[jnp.newaxis, :], (eta.shape[0], 1))
+            
+            # Squeeze eta from (S, N, 1) to (S, N) for vmap
+            eta_flat = jnp.squeeze(eta, axis=-1)
+            # log_c_in and z_in_full are already (S, N) after tiling
+            log_c_flat = log_c_in
+            z_flat = z_in_full
+            
+            d2_log_concentration = jax.vmap(jax.vmap(d2_logr_fn))(y_in, eta_flat, log_c_flat, z_flat)
+            d2_zero_logit = jax.vmap(jax.vmap(d2_z_fn))(y_in, eta_flat, log_c_flat, z_flat)
+
+        else:
+             # Standard NB
+             d2_l_d_eta2 = d2_l_d_eta2_nonzero
+             
+             # Need d2/d(log_r)2 for standard NB
+             # Reuse helper?
+             def scalar_ll_nb(my_y, my_eta, my_log_r):
+                my_mu = jnp.exp(my_eta)
+                my_r = jnp.exp(my_log_r)
+                # TFP parameterization
+                return tfd.NegativeBinomial(total_count=my_r, probs=my_mu/(my_mu+my_r)).log_prob(my_y)
+                
+             d2_logr_fn = jax.grad(jax.grad(scalar_ll_nb, argnums=2), argnums=2)
+             
+             log_c_in = expand_scalar(log_concentration)
+             if log_c_in.shape[1] == 1:
+                log_c_in = jnp.tile(log_c_in, (1, y.shape[0]))
+             y_in = jnp.tile(y[jnp.newaxis, :], (eta.shape[0], 1))
+             
+             eta_flat = jnp.squeeze(eta, axis=-1)
+             # log_c_in is already (S, N) after tiling
+             log_c_flat = log_c_in
+
+             d2_log_concentration = jax.vmap(jax.vmap(d2_logr_fn))(y_in, eta_flat, log_c_flat)
+             d2_zero_logit = jnp.zeros_like(d2_log_concentration) # Dummy or not returned?
+             
+        
+        # --- Assemble Diagonal Hessian ---
+        
+        # beta: d^2L / d beta_j^2 = (d^2L / d eta^2) * x_j^2
+        # d2_l_d_eta2: (S, N, 1)
+        # X: (N, D) -> X^2: (1, N, D)
+        # Result: (S, N, D)
+        
+        # Expand X to (1, N, D) explicitly
+        X2 = (X**2)[jnp.newaxis, :, :]
+        d2_beta = d2_l_d_eta2 * X2
+        
+        # intercept: d^2L / d intercept^2 = d^2L / d eta^2
+        d2_intercept = d2_l_d_eta2 # (S, N, 1)
+        
+        # log_conc
+        d2_log_conc = d2_log_concentration[..., jnp.newaxis] # (S, N, 1)
+        
+        results = {
+            "beta": d2_beta,
+            "intercept": d2_intercept,
+            "log_concentration": d2_log_conc,
+        }
+        
+        if self.zero_inflated:
+             results["zero_logit"] = d2_zero_logit[..., jnp.newaxis]
+             
+        return results
+
+    def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
+        # Deprecated by AIS refactor, but kept if needed or remove?
+        # The base class raises NotImplementedError. 
+        # But we previously implemented it.
+        # If we remove it, we strictly enforce PyTree AIS.
+        # Let's keep it for now but maybe warn? Or just remove to align with plan.
+        pass
 
         # Explicit Gradient for Negative Binomial
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)
 
-        # Flatten params same as log_likelihood handling
-        flat_params = params.copy()
-        if "beta" in params:
-             b = params["beta"]
-             if b.ndim > 2:
-                 flat_params["beta"] = b.reshape(-1, b.shape[-1])
+        # Access parameters directly to save RAM (avoid dict copy)
+        # We assume params are already in the correct shape/type or references
+        # If reshaping is needed, we do it on the specific array reference 
         
-        for k in ["intercept", "log_concentration"]:
-            if k in params:
-                v = params[k]
-                if v.ndim > 1:
-                    flat_params[k] = v.flatten()
-
-        beta = flat_params["beta"]
-        intercept = flat_params["intercept"]
-        log_concentration = flat_params["log_concentration"]
-
-        # Compute mu and other terms
-        # Expect beta (S, D), intercept (S,), log_conc (S,)
-        # X (N, D)
+        beta = params["beta"]
+        intercept = params["intercept"]
+        log_concentration = params["log_concentration"]
         
-        # mu = exp(X @ beta + intercept)
-        # Using eps for stability
-        eps = 1e-6
+        # Determine shapes
+        # beta: (S, D) or (C, S, D) -> treat multiple batch dims as one effective batch S_eff
+        # We need effective S to broadcast against N
         
-        # Consistent broadcasting
-        # eta: (S, N)
+        orig_beta_shape = beta.shape
+        if beta.ndim > 2:
+            # Flatten batch dimensions effectively for calculation
+            # View, not copy if possible
+            beta = beta.reshape(-1, orig_beta_shape[-1])
+        
+        if intercept.ndim > 1:
+            intercept = intercept.flatten()
+            
+        if log_concentration.ndim > 1:
+            log_concentration = log_concentration.flatten()
+            
+        # Standardize parameter dimensions: (S, D), (S,), (S,)
+        
+        # Compute eta: (S, N)
+        # X: (N, D)
         if beta.ndim == 2:
             eta = jnp.dot(beta, X.T) + intercept[:, jnp.newaxis]
         else:
-             # Should be caught by flattening, but handle (D,) case just in case
-             eta = jnp.dot(X, beta) + intercept
-             # This would be (N,), needs (S, N) broadcast if S=1
-        
+            # (D,) case
+            eta = jnp.dot(X, beta) + intercept
+            
         mu = jnp.exp(eta)
         r = jnp.exp(log_concentration)
+        
+        # Ensure r is (S, 1) for broadcasting against (S, N)
         if r.ndim == 1:
-             r = r[:, jnp.newaxis] # (S, 1)
-
+             r = r[:, jnp.newaxis]
+        elif r.ndim == 0:
+             # scalar case
+             r = r
+             
         # Gradients
-        
         # dL/d(eta) = y - (y+r) * mu / (mu + r)
-        #           = y - (y+r) * p_fail? 
-        #           mu / (mu + r) = 1 - p_success
-        
-        term = (y[jnp.newaxis, :] + r) * mu / (mu + r)
-        dl_deta = y[jnp.newaxis, :] - term  # (S, N)
-        
-        # dL/dbeta = dl_deta @ X
-        # (S, N) @ (N, D) -> (S, D)
-        # Wait, result needs to be (S, N, D) for AIS
-        # AIS expects gradient per data point!
+        # (S, N) broadcasting
+        term = (y + r) * mu / (mu + r)
+        dl_deta = y - term  # (S, N)
         
         # dL_n / dbeta = dl_deta_n * X_n
-        # (S, N, 1) * (1, N, D) -> (S, N, D)
+        # Expand dims for outer product per data point: (S, N, 1) * (1, N, D) -> (S, N, D)
         dl_dbeta = dl_deta[..., jnp.newaxis] * X[jnp.newaxis, ...]
         
-        # dL/dintercept
+        # dL/dintercept = dl_deta (expanded to match rank)
         dl_dintercept = dl_deta[..., jnp.newaxis] # (S, N, 1)
         
         # dL/dr
-        # dL/dr = psi(y+r) - psi(r) + 1 + log(r/(mu+r)) - (r+y)/(mu+r)
-        
-        psi_y_r = jax.lax.digamma(y[jnp.newaxis, :] + r)
+        psi_y_r = jax.lax.digamma(y + r)
         psi_r = jax.lax.digamma(r)
         
         dl_dr = (psi_y_r - psi_r + 1.0 + jnp.log(r / (mu + r)) 
-                 - (r + y[jnp.newaxis, :]) / (mu + r))
+                 - (r + y) / (mu + r))
                  
         # dL/d(log_conc) = dL/dr * r
         dl_dlog_conc = dl_dr * r
         dl_dlog_conc = dl_dlog_conc[..., jnp.newaxis] # (S, N, 1)
-
-        # Concatenate: beta, intercept, log_concentration
-        # output shape: (S, N, K)
         
+        # Concatenate: beta, intercept, log_concentration along last dim
         gradients = jnp.concatenate([dl_dbeta, dl_dintercept, dl_dlog_conc], axis=-1)
         
-        # Flatten sample dimension if it was flattened from chains
-        # extract_parameters produces (S*C, K) so our (S, N, K) is correct assuming S includes chains
+        # If input had extra batch dims, reshape gradients to match
+        # Expected output for AIS is usually (S, N, K)
+        # But if input was (C, S, ...), output might ideally be (C, S, N, K)
+        # Current AIS implementation usually flattens to (S_eff, N, K) anyway.
+        # We return the flattened batch version (S_eff, N, K) consistent with previous behavior.
         
         return gradients
 
