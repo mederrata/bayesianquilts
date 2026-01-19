@@ -152,6 +152,23 @@ class PoissonRegression(BayesianModel):
         rate = jnp.exp(eta)
         return {"prediction": rate}
 
+    def tail_probability_mass(self, data, **params):
+        X = data["X"]
+        y = data["y"]
+        offset = data.get("offset", jnp.zeros_like(y))
+        beta = params["beta"]
+        intercept = params["intercept"]
+
+        has_sample_dim = beta.ndim > 1
+        if has_sample_dim:
+            eta = jnp.einsum("bd,sd->sb", X, beta) + intercept + offset
+        else:
+            eta = jnp.dot(X, beta) + intercept + offset
+
+        rate = jnp.exp(eta)
+        # S(y) = P(Y >= y) = P(Y > y - 1)
+        return tfd.Poisson(rate=rate).survival_function(y - 1)
+
 
 class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
     """Likelihood function for Poisson regression."""
