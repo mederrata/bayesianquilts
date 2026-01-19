@@ -402,6 +402,7 @@ class MICEBayesianLOO(MICELogistic):
         self.variable_types: Dict[int, str] = {}
         self.zero_predictor_results: Dict[int, UnivariateModelResult] = {}
         self.univariate_results: Dict[Tuple[int, int], UnivariateModelResult] = {}
+        self.prediction_graph: Dict[str, List[str]] = {}
         self.n_obs_total: int = 0  # Overall dataset size
 
     def _infer_variable_type(self, values: np.ndarray) -> str:
@@ -873,7 +874,8 @@ class MICEBayesianLOO(MICELogistic):
         fit_zero_predictors: bool = True,
         seed: int = 42,
         save_dir: Optional[Union[str, Path]] = None,
-        n_jobs: int = -1
+        n_jobs: int = -1,
+        n_top_features: int = 50
     ) -> 'MICEBayesianLOO':
         """
         Fit all univariate models for LOO-CV evaluation.
@@ -884,6 +886,7 @@ class MICEBayesianLOO(MICELogistic):
             seed: Random seed
             save_dir: Directory to save incremental results. If None, keeps all in memory.
             n_jobs: Number of parallel jobs. -1 uses all cores.
+            n_top_features: Number of top correlated features to consider as predictors.
 
         Returns:
             self
@@ -942,12 +945,20 @@ class MICEBayesianLOO(MICELogistic):
             self.global_ordinal_values = None
             self.n_global_classes = 0
 
+        # Compute Spearman correlation matrix for feature selection
+        if self.verbose:
+            print("Computing feature correlations...")
+        corr_matrix = X_df.corr(method='spearman').abs().values
+        # Fill self-correlation with -1 to exclude from top selection (though we skip i==j explicitly anyway)
+        np.fill_diagonal(corr_matrix, -1.0)
+        
         if self.verbose:
             print(f"Fitting MICE Bayesian LOO-CV models with Pathfinder")
             print(f"  Variables: {n_variables}")
             print(f"  Observations: {self.n_obs_total}")
             print(f"  Min obs per model: {self.min_obs}")
             print(f"  Parallel jobs: {n_jobs}")
+            print(f"  Top features per target: {n_top_features}")
             if self.n_global_classes > 0:
                 print(f"  Global Ordinal Values: {self.global_ordinal_values} (n={self.n_global_classes})")
 
@@ -989,9 +1000,6 @@ class MICEBayesianLOO(MICELogistic):
         if self.verbose:
             print("\nFitting one-predictor models...")
 
-        model_count = 0
-        total_models = n_variables * (n_variables - 1)
-        
         iterator = range(n_variables)
         if not self.verbose:
             iterator = tqdm(iterator, desc="Target Variables (One-Predictor)")
@@ -999,12 +1007,36 @@ class MICEBayesianLOO(MICELogistic):
         for i in iterator:
             target_name = self.variable_names[i]
             
+            # Identify candidate predictors based on correlation
+            # Get correlations for target i
+            target_corrs = corr_matrix[i, :]
+            # Get indices of top k correlated features
+            # argsort returns indices that sort the array. We take the last n_top_features.
+            # But we must be careful with NaNs in correlation matrix (if data is all NaN or constant)
+            # np.argsort handles NaNs by putting them at the end if kind='quicksort' (default).
+            # But we want highest values.
+            # Let's handle NaNs explicitly just in case.
+            valid_corr_mask = np.isfinite(target_corrs)
+            valid_corr_indices = np.where(valid_corr_mask)[0]
+            
+            if len(valid_corr_indices) == 0:
+                top_features = []
+            else:
+                # Sort indices by correlation value descending
+                sorted_indices = valid_corr_indices[np.argsort(target_corrs[valid_corr_indices])[::-1]]
+                # Filter out self-correlation (should be -1 or 1, but we want to exclude i)
+                sorted_indices = [idx for idx in sorted_indices if idx != i]
+                # Take top N
+                top_features = sorted_indices[:n_top_features]
+            
+            top_features_set = set(top_features)
+
             # Identify valid predictors (filtering step)
             valid_predictors = []
-            for j in range(n_variables):
-                if i == j:
-                    continue
-                
+            
+            # Only iterate over top features to check overlap condition
+            # We must verify min_obs for these candidates
+            for j in top_features:
                 # Check overlap efficiently before scheduling job
                 mask = self._get_overlapping_mask(data, i, j)
                 if np.sum(mask) >= self.min_obs:
@@ -1012,7 +1044,7 @@ class MICEBayesianLOO(MICELogistic):
             
             if not valid_predictors:
                 if self.verbose:
-                    print(f"Skipping {target_name}: No predictors with >= {self.min_obs} obs.")
+                    print(f"Skipping {target_name}: No valid top-{n_top_features} predictors with >= {self.min_obs} obs.")
                 continue
 
             # Parallelize fitting of valid predictors for this target
@@ -1071,6 +1103,16 @@ class MICEBayesianLOO(MICELogistic):
 
                 file_path = save_dir / f"model_target_{i}_{safe_name}.yaml"
                 self._save_yaml(file_path, target_results)
+
+        # Populate prediction graph
+        self.prediction_graph = {}
+        for (target_idx, predictor_idx), result in self.univariate_results.items():
+            if result.converged:
+                target_name = self.variable_names[target_idx]
+                predictor_name = self.variable_names[predictor_idx]
+                if target_name not in self.prediction_graph:
+                    self.prediction_graph[target_name] = []
+                self.prediction_graph[target_name].append(predictor_name)
 
         return self
 
@@ -1235,6 +1277,193 @@ class MICEBayesianLOO(MICELogistic):
             'n_converged_univariate': sum(1 for r in self.univariate_results.values() if r.converged),
         }
 
+    def _predict_single_univariate(
+        self,
+        uni_result: UnivariateModelResult,
+        predictor_value: float,
+        target_var_type: str
+    ) -> float:
+        """
+        Helper to predict a single value using a univariate model.
+        """
+        # Standardize the predictor value
+        X_mean = uni_result.predictor_mean if uni_result.predictor_mean is not None else 0.0
+        X_std = uni_result.predictor_std if uni_result.predictor_std is not None else 1.0
+        x_standardized = (predictor_value - X_mean) / X_std
+
+        # Compute prediction
+        params = uni_result.params
+        beta = np.mean(params['beta'], axis=0)  # Average over posterior samples
+        intercept = np.mean(params['intercept'])
+
+        linear_pred = float(x_standardized * beta[0] + intercept)
+
+        if target_var_type == 'binary':
+            pred = 1.0 / (1.0 + np.exp(-linear_pred))
+        else:
+            pred = linear_pred
+            
+        return float(pred)
+
+    def _find_prediction_path(self, target: str, source: str) -> Optional[List[str]]:
+        """
+        Find a prediction path from target to source using BFS.
+        
+        Returns:
+            List of variable names [target, intermediate_1, ..., source]
+            representing the path of dependencies (target depends on int_1, which depends on source).
+            Returns None if no path exists.
+        """
+        if target == source:
+            return [target]
+        
+        queue = [(target, [target])]
+        visited = {target}
+        
+        while queue:
+            current_node, path = queue.pop(0)
+            
+            # Get predictors for current node
+            predictors = self.prediction_graph.get(current_node, [])
+            
+            for predictor in predictors:
+                if predictor == source:
+                    return path + [source]
+                
+                if predictor not in visited:
+                    visited.add(predictor)
+                    queue.append((predictor, path + [predictor]))
+                    
+        return None
+
+    def predict_chained(
+        self,
+        target: str,
+        source: str,
+        value: float
+    ) -> Optional[float]:
+        """
+        Predict target variable from a distant source variable using a chain of models.
+
+        Args:
+            target: Name of the target variable to predict.
+            source: Name of the source variable used for prediction.
+            value: Value of the source variable.
+
+        Returns:
+            Predicted value of the target variable, or None if no path exists.
+
+        Raises:
+            ValueError: If finding a path fails or models are missing.
+        """
+        if target not in self.variable_names:
+            raise ValueError(f"Target '{target}' not known.")
+        if source not in self.variable_names:
+            raise ValueError(f"Source '{source}' not known.")
+
+        # Find path: [target, v1, v2, ..., source]
+        # target depends on v1, v1 depends on v2, ..., depends on source
+        path = self._find_prediction_path(target, source)
+        
+        if path is None:
+            return None
+
+        if self.verbose:
+            print(f"Prediction path: {' <- '.join(path)}")
+
+        # Traverse path from source to target (reverse order of dependency list)
+        # path is [target, ..., source]
+        # We start with source value, predict v_last, then v_last-1, ..., then target.
+        
+        current_value = value
+        
+        # Iterate backwards from source (last element) to target (first element)
+        # We need pairs: (path[i-1], path[i]) where path[i] predicts path[i-1]
+        # range(len(path) - 1, 0, -1) -> indices of predictors
+        for i in range(len(path) - 1, 0, -1):
+            predictor_name = path[i]
+            target_name = path[i-1]
+            
+            predictor_idx = self.variable_names.index(predictor_name)
+            target_idx = self.variable_names.index(target_name)
+            
+            key = (target_idx, predictor_idx)
+            
+            if key not in self.univariate_results:
+                 raise ValueError(f"Model for {target_name} <- {predictor_name} missing despite being in graph.")
+            
+            uni_result = self.univariate_results[key]
+            target_type = self.variable_types.get(target_idx, 'continuous')
+            
+            # Predict
+            current_value = self._predict_single_univariate(uni_result, current_value, target_type)
+            
+        return current_value
+
+    def estimate_chain_elpd(self, target: str, source: str) -> Optional[float]:
+        """
+        Estimate the LOO ELPD for a chained prediction from source to target.
+
+        Uses Gaussian variance propagation:
+        1. Convert LOO ELPD of each link to an effective noise variance.
+           elpd_mean = elpd / n_obs
+           sigma^2_eff = exp(-2 * elpd_mean) / (2 * pi * e)
+        2. Propagate variance through the chain.
+           Sigma^2_out = beta^2 * Sigma^2_in + sigma^2_eff
+        3. Convert final variance back to ELPD.
+           elpd_chain = n_total * (-0.5 * log(2 * pi * e * Sigma^2_final))
+
+        Args:
+            target: Name of the target variable.
+            source: Name of the source variable.
+
+        Returns:
+            Estimated ELPD for the chain, or None if no path exists.
+        """
+        path = self._find_prediction_path(target, source)
+        if path is None:
+            return None
+
+        # Initial variance of the source variable (observed, so 0 uncertainty relative to itself)
+        current_variance = 0.0
+        
+        # Traverse path from source to target (reverse order)
+        # path is [target, ..., source]
+        for i in range(len(path) - 1, 0, -1):
+            predictor_name = path[i]
+            target_name = path[i-1]
+            
+            predictor_idx = self.variable_names.index(predictor_name)
+            target_idx = self.variable_names.index(target_name)
+            
+            key = (target_idx, predictor_idx)
+            uni_result = self.univariate_results[key]
+            
+            # 1. Effective Noise Variance from ELPD
+            elpd_mean = uni_result.elpd_loo / uni_result.n_obs
+            # sigma^2_eff = 1/(2*pi*e) * exp(-2*elpd_mean)
+            sigma2_eff = np.exp(-2 * elpd_mean) / (2 * np.pi * np.e)
+            
+            # 2. Get coefficient (beta)
+            # Use absolute mean beta as scaling factor approx? Or expectation of beta^2?
+            # Var(aX) = a^2 Var(X). expectation of beta^2 is beta_mean^2 + beta_var.
+            # Let's use beta_mean^2 for first order approx.
+            beta = np.mean(uni_result.params['beta'])
+            
+            # 3. Propagate Variance
+            # Sigma_out = beta^2 * Sigma_in + sigma_noise
+            current_variance = (beta ** 2) * current_variance + sigma2_eff
+            
+        # 4. Convert final variance back to ELPD
+        # elpd_chain = N * (-0.5 * log(2*pi*e * current_variance))
+        if current_variance <= 0:
+            return -np.inf # Should not happen unless ELPD was inf
+            
+        elpd_per_obs = -0.5 * np.log(2 * np.pi * np.e * current_variance)
+        estimated_elpd = elpd_per_obs * self.n_obs_total
+        
+        return float(estimated_elpd)
+
     def predict(
         self,
         items: Dict[str, float],
@@ -1322,22 +1551,7 @@ class MICEBayesianLOO(MICELogistic):
             if not uni_result.converged or uni_result.params is None:
                 continue
 
-            # Standardize the predictor value
-            X_mean = uni_result.predictor_mean if uni_result.predictor_mean is not None else 0.0
-            X_std = uni_result.predictor_std if uni_result.predictor_std is not None else 1.0
-            x_standardized = (predictor_value - X_mean) / X_std
-
-            # Compute prediction
-            params = uni_result.params
-            beta = np.mean(params['beta'], axis=0)  # Average over posterior samples
-            intercept = np.mean(params['intercept'])
-
-            linear_pred = float(x_standardized * beta[0] + intercept)
-
-            if var_type == 'binary':
-                pred = 1.0 / (1.0 + np.exp(-linear_pred))
-            else:
-                pred = linear_pred
+            pred = self._predict_single_univariate(uni_result, predictor_value, var_type)
 
             # SE for the total ELPD (not per obs)
             elpd_se = uni_result.elpd_loo_per_obs_se * uni_result.n_obs
@@ -1443,9 +1657,23 @@ class MICEBayesianLOO(MICELogistic):
                 }
                 for k, v in self.univariate_results.items()
             ],
+
+            'prediction_graph': self.prediction_graph,
         }
 
         with open(path, 'w') as f:
+            # Custom representer for numpy scalars (needed here too)
+            import yaml
+            def repr_float(dumper, data):
+                return dumper.represent_float(float(data))
+            def repr_int(dumper, data):
+                return dumper.represent_int(int(data))
+                
+            yaml.add_representer(np.float32, repr_float)
+            yaml.add_representer(np.float64, repr_float)
+            yaml.add_representer(np.int32, repr_int)
+            yaml.add_representer(np.int64, repr_int)
+            
             yaml.dump(state, f, default_flow_style=False, allow_unicode=True)
 
     @classmethod
@@ -1506,6 +1734,10 @@ class MICEBayesianLOO(MICELogistic):
                 parts = k.split('_')
                 key = (int(parts[0]), int(parts[1]))
                 instance.univariate_results[key] = instance._dict_to_result(v)
+        
+        
+        # Restore prediction graph
+        instance.prediction_graph = state.get('prediction_graph', {})
 
         return instance
 
@@ -1545,6 +1777,8 @@ class MICEBayesianLOO(MICELogistic):
                 }
                 for k, v in self.univariate_results.items()
             ],
+
+            'prediction_graph': self.prediction_graph,
         }
 
     @classmethod
@@ -1600,5 +1834,8 @@ class MICEBayesianLOO(MICELogistic):
                 parts = k.split('_')
                 key = (int(parts[0]), int(parts[1]))
                 instance.univariate_results[key] = instance._dict_to_result(v)
+        
+        # Restore prediction graph
+        instance.prediction_graph = state.get('prediction_graph', {})
 
         return instance

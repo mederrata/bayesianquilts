@@ -53,6 +53,7 @@ class LikelihoodFunction(ABC):
         """
         pass
 
+
     @abstractmethod
     def log_likelihood_hessian_diag(
         self, data: Any, params: Dict[str, Any]
@@ -210,6 +211,11 @@ class Transformation(ABC):
 
         if variational and surrogate_log_prob_fn is not None:
             log_pi_trans = surrogate_log_prob_fn(params_transformed)
+            
+            # Helper for broadcasting if log_pi_trans is (S,) (e.g. Identity)
+            if log_pi_trans.ndim == 1:
+                log_pi_trans = log_pi_trans[:, jnp.newaxis]
+                
             delta_log_pi = log_pi_trans - log_pi_original[:, jnp.newaxis]
             delta_log_pi = delta_log_pi - jnp.max(delta_log_pi, axis=0, keepdims=True)
         else:
@@ -223,6 +229,7 @@ class Transformation(ABC):
             log_eta_weights, axis=0, keepdims=True
         )
 
+        log_eta_weights = log_eta_weights.astype(jnp.float64)
         psis_weights, khat = nppsis.psislw(log_eta_weights)
 
         eta_weights = jnp.exp(log_eta_weights)
@@ -602,8 +609,7 @@ class Variance(SmallStepTransformation):
                 grad_log_f = jnp.squeeze(grad_log_f, axis=2)
 
         else:
-            log_f = jnp.zeros_like(current_log_ell)
-            grad_log_f = jnp.zeros_like(grad_log_ell)
+             raise ValueError("log_f_fn is required for Variance transformation")
 
         # 3. Assemble Q
         # Q = pi * exp(2*log_f - 2*log_ell) * (grad_log_f - grad_log_ell)
@@ -1054,7 +1060,6 @@ class AdaptiveImportanceSampler:
         log_ell_prime = self.likelihood_fn.log_likelihood_gradient(
             data, params
         )  # (S, N, K)
-        log_ell_doubleprime = None
         # Only compute Hessian diagonal if needed (e.g. for Var transform)
         # But we do it once for efficiency if safe
         log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(
@@ -1148,22 +1153,24 @@ class AdaptiveImportanceSampler:
             if verbose:
                 print("Running identity...")
             # Compute identity importance weights (standard PSIS-LOO)
-            # log_jacobian is 0
-            log_jac_identity = jnp.zeros_like(log_ell)
-            eta_weights, psis_weights, khat, log_ell_new = (
-                Transformation.compute_importance_weights_helper(
-                    None,
-                    self.likelihood_fn,
-                    data,
-                    params,
-                    params,
-                    log_jac_identity,
-                    variational,
-                    log_pi,
-                    log_ell,
-                    self.surrogate_log_prob_fn,
-                )
+            # Compute identity importance weights (standard PSIS-LOO)
+            # log_eta = -log_ell
+            log_eta_weights = -log_ell
+            log_eta_weights = log_eta_weights - jnp.max(
+                log_eta_weights, axis=0, keepdims=True
             )
+            log_eta_weights = log_eta_weights.astype(jnp.float64)
+
+            psis_weights, khat = nppsis.psislw(log_eta_weights)
+
+            eta_weights = jnp.exp(log_eta_weights)
+            eta_weights = eta_weights / jnp.sum(eta_weights, axis=0, keepdims=True)
+
+            psis_weights = jnp.exp(psis_weights)
+            psis_weights = psis_weights / jnp.sum(psis_weights, axis=0, keepdims=True)
+
+            log_ell_new = log_ell
+            log_jac_identity = jnp.zeros_like(log_ell)
 
             predictions = log_ell  # Identity has same predictions
 
@@ -1341,7 +1348,7 @@ class SmallStepTransformation(Bijection):
 class LogisticRegressionLikelihood(LikelihoodFunction):
     """Likelihood function for logistic regression."""
 
-    def __init__(self, dtype=jnp.float32):
+    def __init__(self, dtype=jnp.float64):
         self.dtype = dtype
 
     def log_likelihood(
@@ -1358,7 +1365,7 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         if beta.ndim == 3:
             mu = jnp.einsum("df,sdf->sd", X, beta) + intercept
         else:
-            mu = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis]
+            mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
 
         # Sigmoid and log-likelihood
         sigma = jax.nn.sigmoid(mu)
@@ -1378,7 +1385,10 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         beta = params["beta"]
         intercept = params["intercept"]
 
-        mu = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis]
+        if beta.ndim == 3:
+            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept[..., jnp.newaxis]
+        else:
+            mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
         sigma = jax.nn.sigmoid(mu)
 
         # Gradient w.r.t. linear predictor
@@ -1408,7 +1418,10 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         beta = params["beta"]
         intercept = params["intercept"]
 
-        mu = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis]
+        if beta.ndim == 3:
+            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept[..., jnp.newaxis]
+        else:
+            mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
         sigma = jax.nn.sigmoid(mu)
 
         # Hessian diagonal w.r.t. linear predictor
@@ -1427,13 +1440,22 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
 
         return hess_diag
 
+
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
-        """Extract parameters into flattened array."""
         beta = params["beta"]  # (n_samples, n_features)
         intercept = params["intercept"]  # (n_samples,)
 
+        # Ensure we don't have redundant trailing dims of 1
+        if intercept.ndim > 0 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+
+        # Broadcast to matching batch shapes
+        target_shape = jnp.broadcast_shapes(beta.shape[:-1], intercept.shape)
+        beta = jnp.broadcast_to(beta, target_shape + (beta.shape[-1],))
+        intercept = jnp.broadcast_to(intercept, target_shape)
+
         # Concatenate
-        theta = jnp.concatenate([beta, intercept[:, jnp.newaxis]], axis=-1)
+        theta = jnp.concatenate([beta, intercept[..., jnp.newaxis]], axis=-1)
         return theta
 
     def reconstruct_parameters(
@@ -1471,7 +1493,7 @@ class LinearRegressionLikelihood(LikelihoodFunction):
         if beta.ndim == 3:
             mu = jnp.einsum("df,sdf->sd", X, beta) + intercept
         else:
-            mu = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis]
+            mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
 
         sigma = jnp.exp(log_sigma)
         if log_sigma.ndim == 1:
@@ -1481,7 +1503,7 @@ class LinearRegressionLikelihood(LikelihoodFunction):
         residuals = y[jnp.newaxis, :] - mu
         log_lik = (
             -0.5 * jnp.log(2 * jnp.pi)
-            - log_sigma[:, jnp.newaxis]
+            - log_sigma[..., jnp.newaxis]
             - 0.5 * (residuals / sigma) ** 2
         )
 
@@ -1498,8 +1520,19 @@ class LinearRegressionLikelihood(LikelihoodFunction):
         intercept = params["intercept"]
         log_sigma = params.get("log_sigma", jnp.zeros((beta.shape[0],)))
 
-        mu = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis]
-        sigma = jnp.exp(log_sigma)[:, jnp.newaxis]
+        if beta.ndim == 3:
+            mu_lin = jnp.einsum("df,sdf->sd", X, beta)
+        else:
+            mu_lin = jnp.einsum("df,sf->sd", X, beta)
+        
+        # Consistent broadcasting for intercept and sigma
+        if intercept.ndim == 1:
+            intercept = intercept[:, jnp.newaxis]
+        if log_sigma.ndim == 1:
+            log_sigma = log_sigma[:, jnp.newaxis]
+
+        mu = mu_lin + jnp.broadcast_to(intercept, mu_lin.shape)
+        sigma = jnp.exp(jnp.broadcast_to(log_sigma, mu_lin.shape))
         residuals = y[jnp.newaxis, :] - mu
 
         # Gradients
@@ -1523,28 +1556,66 @@ class LinearRegressionLikelihood(LikelihoodFunction):
         intercept = params["intercept"]
         log_sigma = params.get("log_sigma", jnp.zeros((beta.shape[0],)))
 
-        mu = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis]
-        sigma = jnp.exp(log_sigma)[:, jnp.newaxis]
-        residuals = y[jnp.newaxis, :] - mu
+        if beta.ndim == 3:
+            mu_lin = jnp.einsum("df,sdf->sd", X, beta)
+        else:
+            mu_lin = jnp.einsum("df,sf->sd", X, beta)
 
+        # Consistent broadcasting for intercept and sigma
+        if intercept.ndim == 1:
+            intercept = intercept[:, jnp.newaxis]
+        if log_sigma.ndim == 1:
+            log_sigma = log_sigma[:, jnp.newaxis]
+
+        mu = mu_lin + jnp.broadcast_to(intercept, mu_lin.shape)
+        sigma = jnp.exp(jnp.broadcast_to(log_sigma, mu_lin.shape))
+        residuals = y[jnp.newaxis, :] - mu
+        
+        # Ensure sigma is broadcast to (S, N) for division
+        sigma_sq = sigma**2
+        
         # Hessian diagonals
-        hess_diag_beta = jnp.einsum("df,sd->sdf", -(X**2), 1 / sigma**2)
-        hess_diag_intercept = (-1 / sigma**2)[..., jnp.newaxis]
-        hess_diag_log_sigma = (-2 * (residuals / sigma) ** 2)[..., jnp.newaxis]
+        # X**2 is (N, K)
+        # 1/sigma**2 is (S, N)
+        # result (S, N, K)
+        hess_diag_beta = jnp.einsum("df,sd->sdf", -(X**2), 1.0 / sigma_sq)
+        
+        # intercept hessian: -1/sigma**2
+        # (S, N) -> (S, N, 1)
+        hess_diag_intercept = (-1.0 / sigma_sq)[..., jnp.newaxis]
+        
+        # log_sigma hessian: -2 * (residual/sigma)**2
+        hess_diag_log_sigma = (-2.0 * (residuals / sigma) ** 2)[..., jnp.newaxis]
 
         hess_diag = jnp.concatenate(
             [hess_diag_beta, hess_diag_intercept, hess_diag_log_sigma], axis=-1
         )
         return hess_diag
 
+
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """Extract parameters into flattened array."""
         beta = params["beta"]
         intercept = params["intercept"]
-        log_sigma = params.get("log_sigma", jnp.zeros((beta.shape[0],)))
+        log_sigma = params.get("log_sigma", jnp.zeros(beta.shape[:-1]))
+
+        # Ensure we don't have redundant trailing dims of 1
+        if intercept.ndim > 0 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+        if log_sigma.ndim > 0 and log_sigma.shape[-1] == 1:
+            log_sigma = jnp.squeeze(log_sigma, axis=-1)
+
+        # Dynamic broadcasting
+        target_shape = jnp.broadcast_shapes(
+            beta.shape[:-1], intercept.shape, log_sigma.shape
+        )
+        beta = jnp.broadcast_to(beta, target_shape + (beta.shape[-1],))
+        intercept = jnp.broadcast_to(intercept, target_shape)
+        log_sigma = jnp.broadcast_to(log_sigma, target_shape)
+
 
         theta = jnp.concatenate(
-            [beta, intercept[:, jnp.newaxis], log_sigma[:, jnp.newaxis]], axis=-1
+            [beta, intercept[..., jnp.newaxis], log_sigma[..., jnp.newaxis]], axis=-1
         )
         return theta
 
