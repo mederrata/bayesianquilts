@@ -653,8 +653,8 @@ class MICEBayesianLOO(MICELogistic):
             else:
                 shape = ()
             
-            surrogate_params[f'{var_name}_loc'] = jnp.zeros(shape, dtype=self.dtype)
-            surrogate_params[f'{var_name}_log_scale'] = jnp.zeros(shape, dtype=self.dtype) - 1.0  # Start with small scale
+            surrogate_params[f'{var_name}_loc'] = jnp.zeros(shape, dtype=model.dtype)
+            surrogate_params[f'{var_name}_log_scale'] = jnp.zeros(shape, dtype=model.dtype) - 1.0  # Start with small scale
         
         # Define target log prob
         def target_log_prob_fn(data, **params):
