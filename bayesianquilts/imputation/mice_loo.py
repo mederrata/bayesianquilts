@@ -1831,14 +1831,19 @@ class MICEBayesianLOO(MICELogistic):
             sigma2_eff = np.exp(-2 * elpd_mean) / (2 * np.pi * np.e)
             
             # 2. Get coefficient (beta)
-            # Use absolute mean beta as scaling factor approx? Or expectation of beta^2?
-            # Var(aX) = a^2 Var(X). expectation of beta^2 is beta_mean^2 + beta_var.
-            # Let's use beta_mean^2 for first order approx.
-            beta = np.mean(uni_result.params['beta'])
+            if uni_result.beta_mean is not None:
+                beta = uni_result.beta_mean
+            elif uni_result.params is not None and 'beta' in uni_result.params:
+                beta = np.mean(uni_result.params['beta'])
+            else:
+                beta = 0.0
+            
+            if isinstance(beta, (np.ndarray, list)) and len(beta) > 0:
+                beta = beta[0]
             
             # 3. Propagate Variance
             # Sigma_out = beta^2 * Sigma_in + sigma_noise
-            current_variance = (beta ** 2) * current_variance + sigma2_eff
+            current_variance = (float(beta) ** 2) * current_variance + sigma2_eff
             
         # 4. Convert final variance back to ELPD
         # elpd_chain = N * (-0.5 * log(2*pi*e * current_variance))
@@ -1917,6 +1922,16 @@ class MICEBayesianLOO(MICELogistic):
                 if var_type == 'binary':
                     # Logistic: sigmoid(intercept)
                     pred = 1.0 / (1.0 + np.exp(-intercept))
+                elif var_type == 'ordinal' and zero_result.cutpoints_mean is not None:
+                    # Ordinal: Expected value with eta=0 (or intercept)
+                    def sigmoid(x):
+                        return 1.0 / (1.0 + np.exp(-x))
+                    
+                    p_le = sigmoid(zero_result.cutpoints_mean - intercept)
+                    p_le = np.concatenate([[0.0], p_le, [1.0]])
+                    p = np.diff(p_le)
+                    categories = np.arange(len(p))
+                    pred = np.sum(categories * p)
                 else:
                     # Linear: intercept
                     pred = intercept
