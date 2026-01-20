@@ -7,7 +7,7 @@ class GradedResponseLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
     """
     Likelihood function for the Graded Response IRT Model.
     
-    Likelihood is aggregated by person (climber) for person-level LOO-IC.
+    Likelihood is aggregated by person for person-level LOO-IC.
     """
     
     def __init__(self, dtype=jnp.float64):
@@ -18,39 +18,40 @@ class GradedResponseLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
         Compute log-likelihood for the Graded Response Model.
         
         Parameters (params):
-            theta: climber abilities (S, J)
-            alpha: boulder discrimination (S, I)
-            tau: boulder thresholds (S, I, K-1)
+            theta: person abilities (S, J)
+            alpha: item discrimination (S, I)
+            tau: item thresholds (S, I, K-1)
             
         Data (data):
-            climber_idx: indices for each observation (N,)
-            boulder_idx: indices for each observation (N,)
+            person_idx: indices for each observation (N,)
+            item_idx: indices for each observation (N,)
             y: observed responses (0 to K-1) (N,)
-            n_climbers: total number of unique climbers (J)
+            n_people: total number of unique people (J)
             
         Returns:
-            log_lik: logged likelihood aggregated by climber (S, J)
+            log_lik: logged likelihood aggregated by person (S, J)
         """
-        climber_idx = jnp.asarray(data["climber_idx"], dtype=jnp.int32)
-        boulder_idx = jnp.asarray(data["boulder_idx"], dtype=jnp.int32)
+        person_idx = jnp.asarray(data["person_idx"], dtype=jnp.int32)
+        item_idx = jnp.asarray(data["item_idx"], dtype=jnp.int32)
         y = jnp.asarray(data["y"], dtype=jnp.int32)
-        n_climbers = data["n_climbers"]
+        n_people = data["n_people"]
         
         theta = params["theta"]  # (S, J)
-        alpha = params["alpha"]  # (S, I)
-        tau = params["tau"]      # (S, I, K-1)
+        # Allow alpha/tau to be in data (frozen) or params (active)
+        alpha = params.get("alpha", data.get("alpha"))  # (S, I)
+        tau = params.get("tau", data.get("tau"))      # (S, I, K-1)
         
         S = theta.shape[0]
-        N = climber_idx.shape[0]
+        N = person_idx.shape[0]
         K_minus_1 = tau.shape[-1]
         
         # Gather parameters for each observation
         # theta_obs: (S, N)
-        theta_obs = jnp.take_along_axis(theta, climber_idx[None, :], axis=1)
+        theta_obs = jnp.take_along_axis(theta, person_idx[None, :], axis=1)
         # alpha_obs: (S, N)
-        alpha_obs = jnp.take_along_axis(alpha, boulder_idx[None, :], axis=1)
+        alpha_obs = jnp.take_along_axis(alpha, item_idx[None, :], axis=1)
         # tau_obs: (S, N, K-1)
-        tau_obs = jnp.take_along_axis(tau, boulder_idx[None, :, None], axis=1)
+        tau_obs = jnp.take_along_axis(tau, item_idx[None, :, None], axis=1)
         
         # Compute latent score: alpha * (theta - tau)
         # eta: (S, N, K-1)
@@ -87,15 +88,104 @@ class GradedResponseLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
         
         log_lik_obs = jnp.log(jnp.clip(obs_probs, a_min=1e-15)) # (S, N)
         
-        # Aggregate by climber
-        # Use segment_sum to sum over observations for each climber
+        # Aggregate by person
+        # Use segment_sum to sum over observations for each person
         # We need to broadcast across S
-        def sum_by_climber(ll_s):
-            return jax.ops.segment_sum(ll_s, climber_idx, num_segments=n_climbers)
+        def sum_by_person(ll_s):
+            return jax.ops.segment_sum(ll_s, person_idx, num_segments=n_people)
             
-        log_lik_climber = jax.vmap(sum_by_climber)(log_lik_obs) # (S, J)
+        log_lik_person = jax.vmap(sum_by_person)(log_lik_obs) # (S, J)
         
-        return log_lik_climber
+        return log_lik_person
+
+    def log_likelihood_gradient(self, data: Dict[str, Any], params: Dict[str, Any]) -> Any:
+        """
+        Compute gradient of log-likelihood w.r.t. parameters.
+        Overridden to handle 'alpha' and 'tau' potentially being in 'data' (frozen)
+        and to ensure correct slicing over the sample dimension S.
+        """
+        theta = params["theta"]  # (S, J)
+        # alpha/tau might be in data or params. If in data, they are (S, I, ...)
+        alpha = params.get("alpha", data.get("alpha"))
+        tau = params.get("tau", data.get("tau"))
+        
+        # We define a function for a SINGLE sample s that maps theta_s -> LL_s
+        def single_sample_grad(th, al, ta):
+            # th: (J,)
+            # al: (I,)
+            # ta: (I, K-1)
+            
+            def f(t):
+                # t: (J,)
+                # Construct inputs for log_likelihood matching expected (S, ...) shapes
+                # We expand to (1, ...) to simulate S=1
+                p_in = {'theta': t[None, :]}
+                d_in = data.copy()
+                d_in['alpha'] = al[None, :]
+                d_in['tau'] = ta[None, :]
+                
+                # log_likelihood returns (S, N) -> (1, J)
+                ll = self.log_likelihood(d_in, p_in)
+                return ll[0] # (J,)
+            
+            # Compute Jacobian of LL w.r.t theta
+            # Result: (J, J) where (j, k) entry is d L_j / d theta_k
+            # Since L_j only depends on theta_j, this is effectively diagonal.
+            # But standard AIS interface expects the full Jacobian structure (S, N, J).
+            # (S, J, J) in this case.
+            jac = jax.jacrev(f)(th)
+            return {'theta': jac}
+            
+        # Vmap over the sample dimension S to handle all samples in parallel
+        # theta is (S, J), alpha is (S, I), tau is (S, I, K-1)
+        grads = jax.vmap(single_sample_grad)(theta, alpha, tau)
+        
+        return grads
+
+    def log_likelihood_hessian_diag(self, data: Dict[str, Any], params: Dict[str, Any]) -> Any:
+        """
+        Compute diagonal of Hessian of log-likelihood w.r.t. parameters.
+        Overridden to handle 'alpha' and 'tau' being in 'data' (frozen).
+        """
+        theta = params["theta"]  # (S, J)
+        alpha = params.get("alpha", data.get("alpha"))
+        tau = params.get("tau", data.get("tau"))
+        
+        def single_sample_hess_diag(th, al, ta):
+            def f(t):
+                p_in = {'theta': t[None, :]}
+                d_in = data.copy()
+                d_in['alpha'] = al[None, :]
+                d_in['tau'] = ta[None, :]
+                ll = self.log_likelihood(d_in, p_in)
+                return ll[0] # (J,)
+
+            # We want diagonal of Hessian.
+            # L = sum(LL_j). But LL_j only depends on theta_j.
+            # So Hessian is diagonal.
+            # We can compute full Hessian and take diagonal (since J is small, = batch_size).
+            
+            # Note: f(t) returns (J,) vector of likelihoods.
+            # We want Hessian of SCALAR sum(LL) w.r.t. theta?
+            # Or Hessian of LL vector?
+            # ais.py log_likelihood_hessian_diag expects "Hessian diagonal matching params ... + (N,) dim"?
+            # No, looking at ais.py implementations:
+            # "hess_diag_mu = -sigma * (1-sigma)" (S, N)
+            # It returns the diagonal elements of the Hessian matrix of the log likelihood w.r.t parameters.
+            # Usually for independent data, Cross terms are zero.
+            # For theta_j, d^2 L / d theta_j^2 is the j-th diagonal element.
+            
+            # So we sum f(t) to get scalar L, then hessian.
+            def scalar_f(t):
+                return jnp.sum(f(t))
+                
+            hess = jax.hessian(scalar_f)(th) # (J, J)
+            return {'theta': jnp.diag(hess)} # (J,)
+
+        hess_diags = jax.vmap(single_sample_hess_diag)(theta, alpha, tau)
+        return hess_diags
+
+
 
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """
