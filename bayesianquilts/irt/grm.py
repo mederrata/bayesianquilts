@@ -115,29 +115,26 @@ class GradedResponseLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
             # al: (I,)
             # ta: (I, K-1)
             
-            def f(t):
-                # t: (J,)
-                # Construct inputs for log_likelihood matching expected (S, ...) shapes
-                # We expand to (1, ...) to simulate S=1
+            def scalar_ll_func(t, a, tau_val):
+                # Construct inputs for log_likelihood
                 p_in = {'theta': t[None, :]}
-                d_in = data.copy()
-                d_in['alpha'] = al[None, :]
-                d_in['tau'] = ta[None, :]
+                # Pass alpha/tau in params so they are used
+                p_in['alpha'] = a[None, :]
+                p_in['tau'] = tau_val[None, :]
+                
+                # Data should not contain alpha/tau if we want to be sure, 
+                # but params takes precedence anyway.
+                # Use data from closure
                 
                 # log_likelihood returns (S, N) -> (1, J)
-                ll = self.log_likelihood(d_in, p_in)
-                return ll[0] # (J,)
+                ll = self.log_likelihood(data, p_in)
+                return jnp.sum(ll) # Sum over people to get scalar target
             
-            # Compute Jacobian of LL w.r.t theta
-            # Result: (J, J) where (j, k) entry is d L_j / d theta_k
-            # Since L_j only depends on theta_j, this is effectively diagonal.
-            # But standard AIS interface expects the full Jacobian structure (S, N, J).
-            # (S, J, J) in this case.
-            jac = jax.jacrev(f)(th)
-            return {'theta': jac}
+            # Compute gradients of scalar target sum(LL)
+            grads = jax.grad(scalar_ll_func, argnums=(0, 1, 2))(th, al, ta)
+            return {'theta': grads[0], 'alpha': grads[1], 'tau': grads[2]}
             
-        # Vmap over the sample dimension S to handle all samples in parallel
-        # theta is (S, J), alpha is (S, I), tau is (S, I, K-1)
+        # Vmap over the sample dimension S
         grads = jax.vmap(single_sample_grad)(theta, alpha, tau)
         
         return grads
