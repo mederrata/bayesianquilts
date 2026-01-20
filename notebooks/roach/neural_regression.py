@@ -506,6 +506,18 @@ for col in df_sims.columns:
     s = stats.loc['std', col]
     print(f"{col}: {m:.1f} ± {s:.1f}")
 
+# Plot khat values for identity transformation
+plt.figure(figsize=(10, 6))
+plt.scatter(range(len(method_khats['identity'])), method_khats['identity'], c='red', alpha=0.6, label='Identity Khat')
+plt.axhline(y=0.5, color='orange', linestyle='--', label='Threshold 0.5 (Good)')
+plt.axhline(y=0.7, color='black', linestyle='--', label='Threshold 0.7 (Warning)')
+plt.xlabel('Data Point Index')
+plt.ylabel('Pareto k')
+plt.title('Pareto k values for Identity Transformation (Standard IS LOO)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
 
 # In[ ]:
 

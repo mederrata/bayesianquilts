@@ -144,6 +144,9 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
     if n <= 1:
         raise ValueError("More than one log-weight needed.")
 
+    # Always use float64 for khat computations
+    lw = lw.astype(np.float64)
+
     if overwrite_lw and lw.flags.f_contiguous:
         # in-place operation
         lw_out = lw
@@ -152,7 +155,7 @@ def psislw(lw, Reff=1.0, overwrite_lw=False):
         lw_out = np.copy(lw, order='F')
 
     # allocate output array for kss
-    kss = np.empty(m)
+    kss = np.empty(m, dtype=np.float64)
 
     # precalculate constants
     cutoff_ind = - int(np.ceil(min(0.2 * n, 3 * np.sqrt(n / Reff)))) - 1

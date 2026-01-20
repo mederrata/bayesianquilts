@@ -7,15 +7,41 @@ from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 
 
 class PoissonRegression(BayesianModel):
-    def __init__(self, input_dim, dtype=jnp.float32, **kwargs):
+    def __init__(
+        self,
+        input_dim,
+        dtype=jnp.float64,
+        prior_scale_beta=10.0,
+        prior_scale_intercept=10.0,
+        **kwargs,
+    ):
         super().__init__(dtype=dtype, **kwargs)
         self.input_dim = input_dim
+        self.prior_scale_beta = prior_scale_beta
+        self.prior_scale_intercept = prior_scale_intercept
         self.var_list = ["beta", "intercept"]
         self.create_distributions()
 
     def create_distributions(self):
         # Surrogate: Mean-field Normal
-        pass  # Using generator
+        self.prior_distribution = tfd.JointDistributionNamed(
+            {
+                "beta": tfd.Independent(
+                    tfd.Normal(
+                        jnp.zeros(self.input_dim, dtype=self.dtype),
+                        jnp.array(self.prior_scale_beta, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=1,
+                ),
+                "intercept": tfd.Independent(
+                    tfd.Normal(
+                        jnp.zeros(1, dtype=self.dtype),
+                        jnp.array(self.prior_scale_intercept, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=1,
+                ),
+            }
+        )
 
     def surrogate_parameter_initializer(self, key=None, **kwargs):
         if key is None:
@@ -64,6 +90,7 @@ class PoissonRegression(BayesianModel):
     def unormalized_log_prob(self, data, prior_weight=1.0, **params):
         X = data["X"]
         y = data["y"]
+        offset = data.get("offset", jnp.zeros_like(y))
 
         beta = params["beta"]
         intercept = params["intercept"]
@@ -71,19 +98,14 @@ class PoissonRegression(BayesianModel):
         has_sample_dim = beta.ndim > 1
 
         # Priors
-        if has_sample_dim:
-            p_beta = jnp.sum(tfd.Normal(0.0, 10.0).log_prob(beta), axis=-1)
-            p_int = jnp.sum(tfd.Normal(0.0, 10.0).log_prob(intercept), axis=-1)
-            log_prior = p_beta + p_int
+        log_prior = self.prior_distribution.log_prob(params)
 
+        if has_sample_dim:
             # Likelihood
             # X: (B, D), beta: (S, D) -> (S, B)
-            eta = jnp.einsum("bd,sd->sb", X, beta) + intercept
+            eta = jnp.einsum("bd,sd->sb", X, beta) + intercept + offset
         else:
-            log_prior = jnp.sum(tfd.Normal(0.0, 10.0).log_prob(beta)) + jnp.sum(
-                tfd.Normal(0.0, 10.0).log_prob(intercept)
-            )
-            eta = jnp.dot(X, beta) + intercept
+            eta = jnp.dot(X, beta) + intercept + offset
 
         rate = jnp.exp(eta)
 
@@ -99,15 +121,16 @@ class PoissonRegression(BayesianModel):
     def log_likelihood(self, data, **params):
         X = data["X"]
         y = data["y"]
+        offset = data.get("offset", jnp.zeros_like(y))
         beta = params["beta"]
         intercept = params["intercept"]
 
         has_sample_dim = beta.ndim > 1
 
         if has_sample_dim:
-            eta = jnp.einsum("bd,sd->sb", X, beta) + intercept
+            eta = jnp.einsum("bd,sd->sb", X, beta) + intercept + offset
         else:
-            eta = jnp.dot(X, beta) + intercept
+            eta = jnp.dot(X, beta) + intercept + offset
 
         rate = jnp.exp(eta)
         # Returns (S, B) or (B,)
@@ -115,14 +138,16 @@ class PoissonRegression(BayesianModel):
 
     def predictive_distribution(self, data, **params):
         X = data["X"]
+        y = data["y"]
+        offset = data.get("offset", jnp.zeros_like(y))
         beta = params["beta"]
         intercept = params["intercept"]
 
         has_sample_dim = beta.ndim > 1
         if has_sample_dim:
-            eta = jnp.einsum("bd,sd->sb", X, beta) + intercept
+            eta = jnp.einsum("bd,sd->sb", X, beta) + intercept + offset
         else:
-            eta = jnp.dot(X, beta) + intercept
+            eta = jnp.dot(X, beta) + intercept + offset
 
         rate = jnp.exp(eta)
         return {"prediction": rate}
@@ -131,7 +156,7 @@ class PoissonRegression(BayesianModel):
 class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
     """Likelihood function for Poisson regression."""
 
-    def __init__(self, dtype=jnp.float32):
+    def __init__(self, dtype=jnp.float64):
         self.dtype = dtype
 
     def log_likelihood(
@@ -140,14 +165,19 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
         """Compute log-likelihood for Poisson regression."""
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)  # counts
-        y = jnp.squeeze(y)
+        y = jnp.atleast_1d(jnp.squeeze(y))
+        offset = data.get("offset", jnp.zeros_like(y))
 
         beta = params["beta"]
         intercept = params["intercept"]
-
+        
         # Handle accumulated dimensions from chained transformations
-        # Both beta and intercept can accumulate dimensions, so we need to handle both
+        # Both beta and intercept can accumulate dimensions
+        
 
+        
+        # Proceed with existing logic (simplified)
+        
         # Squeeze beta down to at most 3D (S, N, F) or 2D (S, F)
         while beta.ndim > 3:
             beta = jnp.squeeze(
@@ -155,18 +185,10 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
                 axis=tuple(i for i in range(1, beta.ndim - 1) if beta.shape[i] == 1),
             )
             if beta.ndim > 3:
-                # If still 4D+ and no singleton dims, take diagonal or first slice
-                # For (S, N, N, F), we want (S, N, F) by taking diagonal
-                if beta.ndim == 4 and beta.shape[1] == beta.shape[2]:
-                    # Take diagonal: beta[s, n, n, f] -> beta[s, n, f]
-                    beta = jnp.einsum("snnf->snf", beta)
-                else:
-                    # Fallback: just take first slice along axis 1
-                    beta = beta[:, 0, ...]
+                # Fallback: just take first slice
+                beta = beta[:, 0, ...]
 
-        # Squeeze intercept to match beta's dimensionality
-        # If beta is 3D (S, N, F), intercept should be (S, N) or (S,)
-        # If beta is 2D (S, F), intercept should be (S,)
+        # Squeeze intercept
         while intercept.ndim > 2:
             intercept = jnp.squeeze(
                 intercept,
@@ -175,38 +197,39 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
                 ),
             )
             if intercept.ndim > 2:
-                if intercept.ndim == 3 and intercept.shape[1] == intercept.shape[2]:
-                    # Take diagonal for (S, N, N) -> (S, N)
-                    intercept = jnp.einsum("snn->sn", intercept)
-                else:
-                    intercept = intercept[:, 0, ...]
+                intercept = intercept[:, 0, ...]
 
         # Final squeeze to remove any trailing singleton dimensions
         intercept = jnp.squeeze(intercept)
         if intercept.ndim == 0:
             intercept = jnp.atleast_1d(intercept)
 
-        # Now beta should be 2D or 3D, and intercept should match appropriately
+        # Now beta should be 2D or 3D
         if beta.ndim == 2:
             # Shape (S, F), intercept should be (S,)
-            log_rate = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis]
+            # Check broadcasting for intercept
+            if intercept.ndim == 1 and intercept.shape[0] != beta.shape[0]:
+                 # Try to broadcast intercept to beta
+                 intercept = jnp.broadcast_to(intercept, (beta.shape[0],))
+            
+            log_rate = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis] + offset
         elif beta.ndim == 3:
-            # Shape (S, N, F), intercept could be (S,) or (S, N)
+            # Shape (S, N, F)
+            # Ensure N matches X
+            if beta.shape[1] != X.shape[0]:
+                 # Could be mismatch
+                 pass
+
             if intercept.ndim == 1:
-                # Broadcast (S,) to match (S, N) output from einsum
-                log_rate = jnp.einsum("df,sdf->sd", X, beta) + intercept[:, jnp.newaxis]
+                log_rate = jnp.einsum("df,sdf->sd", X, beta) + intercept[:, jnp.newaxis] + offset
             else:
-                # intercept is already (S, N)
-                log_rate = jnp.einsum("df,sdf->sd", X, beta) + intercept
+                log_rate = jnp.einsum("df,sdf->sd", X, beta) + intercept + offset
         else:
             raise ValueError(
-                f"beta shape {beta.shape} not supported in log_likelihood after squeezing"
+                f"beta shape {beta.shape} not supported in log_likelihood"
             )
 
         rate = jnp.exp(log_rate)
-
-        # Poisson log-likelihood: y * log(rate) - rate
-        # We omit log(y!)
         log_lik = y[jnp.newaxis, :] * log_rate - rate
 
         return log_lik
@@ -215,7 +238,21 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
         """Extract parameters into flattened array."""
         beta = params["beta"]
         intercept = params["intercept"]
-        intercept = jnp.squeeze(intercept)
+        
+        # Ensure we don't have redundant trailing dims of 1 for intercept
+        if intercept.ndim > 0 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+
+        # Broadcast to matching batch shapes if needed
+        try:
+            target_shape = jnp.broadcast_shapes(beta.shape[:-1], intercept.shape)
+            beta = jnp.broadcast_to(beta, target_shape + (beta.shape[-1],))
+            intercept = jnp.broadcast_to(intercept, target_shape)
+        except ValueError:
+            # Fallback if shapes don't broadcast straightforwardly (e.g. mismatch)
+            # This shouldn't happen with correct usage but for safety
+            pass
+
         theta = jnp.concatenate([beta, intercept[..., jnp.newaxis]], axis=-1)
         return theta
 
@@ -226,4 +263,5 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
         n_features = template["beta"].shape[-1]
         beta = flat_params[..., :n_features]
         intercept = flat_params[..., n_features]
-        return {"beta": beta, "intercept": intercept[..., jnp.newaxis]}
+        # intercept needs to be compatible with beta output, usually (...,)
+        return {"beta": beta, "intercept": intercept}
