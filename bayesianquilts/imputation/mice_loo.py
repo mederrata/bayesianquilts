@@ -889,10 +889,9 @@ class MICEBayesianLOO(MICELogistic):
             )
 
         # Run inference (Pathfinder or ADVI)
-        if self.inference_method == 'advi':
-            params, elbo, converged = self._run_advi(model, data_dict, scale_factor=scale_factor, seed=seed)
-        else:
-            params, elbo, converged = self._run_pathfinder(model, data_dict, scale_factor=scale_factor, seed=seed)
+        params, elbo, converged, _ = self._run_inference_with_fallback(
+            model, data_dict, scale_factor=scale_factor, seed=seed, current_dtype=self.dtype
+        )
 
         if not converged or params is None:
             return UnivariateModelResult(
@@ -1064,10 +1063,9 @@ class MICEBayesianLOO(MICELogistic):
             )
 
         # Run inference (Pathfinder or ADVI)
-        if self.inference_method == 'advi':
-            params, elbo, converged = self._run_advi(model, data_dict, scale_factor=scale_factor, seed=seed)
-        else:
-            params, elbo, converged = self._run_pathfinder(model, data_dict, scale_factor=scale_factor, seed=seed)
+        params, elbo, converged, _ = self._run_inference_with_fallback(
+            model, data_dict, scale_factor=scale_factor, seed=seed, current_dtype=self.dtype
+        )
 
         if not converged or params is None:
             return UnivariateModelResult(
