@@ -16,87 +16,158 @@ class GradedResponseLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
     def log_likelihood(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
         """
         Compute log-likelihood for the Graded Response Model.
-        
+
         Parameters (params):
-            theta: person abilities (S, J)
-            alpha: item discrimination (S, I)
-            tau: item thresholds (S, I, K-1)
-            
+            theta: person abilities (S, J) or (S, N_loo, J) for transformed params
+            alpha: item discrimination (S, I) or (S, N_loo, I) for transformed params
+            tau: item thresholds (S, I, K-1) or (S, N_loo, I, K-1) for transformed params
+
         Data (data):
-            person_idx: indices for each observation (N,)
-            item_idx: indices for each observation (N,)
-            y: observed responses (0 to K-1) (N,)
+            person_idx: indices for each observation (N_obs,)
+            item_idx: indices for each observation (N_obs,)
+            y: observed responses (0 to K-1) (N_obs,)
             n_people: total number of unique people (J)
-            
+
         Returns:
-            log_lik: logged likelihood aggregated by person (S, J)
+            log_lik: logged likelihood aggregated by person
+                     (S, J) for original params or (S, N_loo, J) for transformed params
         """
         person_idx = jnp.asarray(data["person_idx"], dtype=jnp.int32)
         item_idx = jnp.asarray(data["item_idx"], dtype=jnp.int32)
         y = jnp.asarray(data["y"], dtype=jnp.int32)
         n_people = data["n_people"]
-        
-        theta = params["theta"]  # (S, J)
+
+        theta = jnp.asarray(params["theta"], dtype=self.dtype)
         # Allow alpha/tau to be in data (frozen) or params (active)
-        alpha = params.get("alpha", data.get("alpha"))  # (S, I)
-        tau = params.get("tau", data.get("tau"))      # (S, I, K-1)
-        
+        alpha = jnp.asarray(params.get("alpha", data.get("alpha")), dtype=self.dtype)
+        tau = jnp.asarray(params.get("tau", data.get("tau")), dtype=self.dtype)
+
+        # Check if we have transformed params with extra N_loo dimension
+        # Original: theta (S, J), alpha (S, I), tau (S, I, K-1)
+        # Transformed: theta (S, N_loo, J), alpha (S, N_loo, I), tau (S, N_loo, I, K-1)
+        has_loo_dim = theta.ndim == 3
+
+        if has_loo_dim:
+            # Transformed params: compute likelihood for each LOO case
+            return self._log_likelihood_transformed(
+                theta, alpha, tau, person_idx, item_idx, y, n_people
+            )
+        else:
+            # Original params: standard computation
+            return self._log_likelihood_standard(
+                theta, alpha, tau, person_idx, item_idx, y, n_people
+            )
+
+    def _log_likelihood_standard(self, theta, alpha, tau, person_idx, item_idx, y, n_people):
+        """Compute log-likelihood for standard (non-transformed) params."""
         S = theta.shape[0]
-        N = person_idx.shape[0]
+        N_obs = person_idx.shape[0]
         K_minus_1 = tau.shape[-1]
-        
+
         # Gather parameters for each observation
-        # theta_obs: (S, N)
+        # theta_obs: (S, N_obs)
         theta_obs = jnp.take_along_axis(theta, person_idx[None, :], axis=1)
-        # alpha_obs: (S, N)
+        # alpha_obs: (S, N_obs)
         alpha_obs = jnp.take_along_axis(alpha, item_idx[None, :], axis=1)
-        # tau_obs: (S, N, K-1)
+        # tau_obs: (S, N_obs, K-1)
         tau_obs = jnp.take_along_axis(tau, item_idx[None, :, None], axis=1)
-        
+
         # Compute latent score: alpha * (theta - tau)
-        # eta: (S, N, K-1)
+        # eta: (S, N_obs, K-1)
         eta = alpha_obs[:, :, None] * (theta_obs[:, :, None] - tau_obs)
-        
+
         # Cumulative probabilities P(Y >= k) = sigmoid(eta)
-        # cum_probs: (S, N, K-1)
         cum_probs = jax.nn.sigmoid(eta)
-        
-        # Category probabilities P(Y = k)
-        # For k=0: 1 - P(Y >= 1)
-        # For 0 < k < K-1: P(Y >= k) - P(Y >= k+1)
-        # For k=K-1: P(Y >= K-1)
-        
-        # Pad cum_probs with 1 and 0 to simplify calculation
-        # Shape: (S, N, K+1) where K = (K-1) + 1
+
+        # Pad cum_probs with 0 and 1 to get P(Y < k) for k in 0..K
         probs_le = jnp.concatenate([
-            jnp.zeros((S, N, 1), dtype=self.dtype),
-            1.0 - cum_probs, # P(Y < k)
-            jnp.ones((S, N, 1), dtype=self.dtype)
+            jnp.zeros((S, N_obs, 1), dtype=self.dtype),
+            1.0 - cum_probs,
+            jnp.ones((S, N_obs, 1), dtype=self.dtype)
         ], axis=-1)
-        
-        # This is P(Y < k) where k ranges from 0 to K
+
         # P(Y = k) = P(Y < k+1) - P(Y < k)
-        # P(Y = 0) = P(Y < 1) - P(Y < 0) = (1 - P(Y >= 1)) - 0 = 1 - P(Y >= 1). OK.
-        # P(Y = K-1) = P(Y < K) - P(Y < K-1) = 1 - (1 - P(Y >= K-1)) = P(Y >= K-1). OK.
-        
-        all_probs = jnp.diff(probs_le, axis=-1) # (S, N, K)
-        
-        # Select the probability for the observed y
-        # y is (N,) with values in 0..K-1
+        all_probs = jnp.diff(probs_le, axis=-1)
+
+        # Select probability for observed y
         obs_probs = jnp.take_along_axis(all_probs, y[None, :, None], axis=2)
-        obs_probs = jnp.squeeze(obs_probs, axis=2) # (S, N)
-        
-        log_lik_obs = jnp.log(jnp.clip(obs_probs, a_min=1e-15)) # (S, N)
-        
+        obs_probs = jnp.squeeze(obs_probs, axis=2)
+
+        log_lik_obs = jnp.log(jnp.clip(obs_probs, a_min=1e-15))
+
         # Aggregate by person
-        # Use segment_sum to sum over observations for each person
-        # We need to broadcast across S
         def sum_by_person(ll_s):
             return jax.ops.segment_sum(ll_s, person_idx, num_segments=n_people)
-            
-        log_lik_person = jax.vmap(sum_by_person)(log_lik_obs) # (S, J)
-        
+
+        log_lik_person = jax.vmap(sum_by_person)(log_lik_obs)
+
         return log_lik_person
+
+    def _log_likelihood_transformed(self, theta, alpha, tau, person_idx, item_idx, y, n_people):
+        """
+        Compute log-likelihood for transformed params with LOO dimension.
+
+        For person-level LOO, when params have shape (S, N_loo, ...), we only need
+        the likelihood of person n when using the transformation for LOO case n.
+        This returns the diagonal: log_lik[s, n] = likelihood of person n under
+        transformed params for leaving out person n.
+
+        theta: (S, N_loo, J)
+        alpha: (S, N_loo, I)
+        tau: (S, N_loo, I, K-1)
+
+        Returns: (S, N_loo) - log likelihood for each LOO case (diagonal extraction)
+        """
+        S, N_loo, J = theta.shape
+        I = alpha.shape[2]
+        K_minus_1 = tau.shape[-1]
+        N_obs = person_idx.shape[0]
+
+        def compute_for_loo_case(theta_s_n, alpha_s_n, tau_s_n, loo_idx):
+            """Compute likelihood of person loo_idx under params for leaving them out."""
+            # theta_s_n: (J,), alpha_s_n: (I,), tau_s_n: (I, K-1)
+            # loo_idx: scalar - which person we're leaving out / computing for
+
+            # Gather for observations
+            theta_obs = theta_s_n[person_idx]  # (N_obs,)
+            alpha_obs = alpha_s_n[item_idx]    # (N_obs,)
+            tau_obs = tau_s_n[item_idx]        # (N_obs, K-1)
+
+            # eta: (N_obs, K-1)
+            eta = alpha_obs[:, None] * (theta_obs[:, None] - tau_obs)
+
+            cum_probs = jax.nn.sigmoid(eta)
+
+            probs_le = jnp.concatenate([
+                jnp.zeros((N_obs, 1), dtype=self.dtype),
+                1.0 - cum_probs,
+                jnp.ones((N_obs, 1), dtype=self.dtype)
+            ], axis=-1)
+
+            all_probs = jnp.diff(probs_le, axis=-1)
+
+            obs_probs = all_probs[jnp.arange(N_obs), y]
+            log_lik_obs = jnp.log(jnp.clip(obs_probs, a_min=1e-15))
+
+            # Aggregate by person
+            log_lik_person = jax.ops.segment_sum(log_lik_obs, person_idx, num_segments=n_people)
+
+            # Return only the likelihood for the LOO case person
+            return log_lik_person[loo_idx]  # Scalar
+
+        # For each LOO case n, compute likelihood of person n
+        loo_indices = jnp.arange(N_loo)
+
+        def compute_all_loo_for_sample(theta_s, alpha_s, tau_s):
+            """Compute for all LOO cases within a sample."""
+            # theta_s: (N_loo, J), alpha_s: (N_loo, I), tau_s: (N_loo, I, K-1)
+            return jax.vmap(compute_for_loo_case)(theta_s, alpha_s, tau_s, loo_indices)
+
+        # Vmap over samples
+        result = jax.vmap(compute_all_loo_for_sample)(theta, alpha, tau)
+        # result: (S, N_loo)
+
+        return result
 
     def log_likelihood_gradient(self, data: Dict[str, Any], params: Dict[str, Any]) -> Any:
         """
@@ -159,43 +230,67 @@ class GradedResponseLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
 
     def log_likelihood_hessian_diag(self, data: Dict[str, Any], params: Dict[str, Any]) -> Any:
         """
-        Compute diagonal of Hessian of log-likelihood w.r.t. parameters.
-        Overridden to handle 'alpha' and 'tau' being in 'data' (frozen).
+        Compute per-person diagonal of Hessian of log-likelihood w.r.t. parameters.
+
+        For LOO-CV, we need the Hessian diagonal for each person's log-likelihood separately.
+
+        Returns:
+            Dict with:
+                'theta': (S, J, J) - Hessian diagonal of LL_n w.r.t. theta
+                'alpha': (S, J, I) - Hessian diagonal of LL_n w.r.t. alpha
+                'tau': (S, J, I, K-1) - Hessian diagonal of LL_n w.r.t. tau
         """
         theta = params["theta"]  # (S, J)
         alpha = params.get("alpha", data.get("alpha"))
         tau = params.get("tau", data.get("tau"))
-        
-        def single_sample_hess_diag(th, al, ta):
-            def f(t):
-                p_in = {'theta': t[None, :]}
-                d_in = data.copy()
-                d_in['alpha'] = al[None, :]
-                d_in['tau'] = ta[None, :]
-                ll = self.log_likelihood(d_in, p_in)
-                return ll[0] # (J,)
 
-            # We want diagonal of Hessian.
-            # L = sum(LL_j). But LL_j only depends on theta_j.
-            # So Hessian is diagonal.
-            # We can compute full Hessian and take diagonal (since J is small, = batch_size).
-            
-            # Note: f(t) returns (J,) vector of likelihoods.
-            # We want Hessian of SCALAR sum(LL) w.r.t. theta?
-            # Or Hessian of LL vector?
-            # ais.py log_likelihood_hessian_diag expects "Hessian diagonal matching params ... + (N,) dim"?
-            # No, looking at ais.py implementations:
-            # "hess_diag_mu = -sigma * (1-sigma)" (S, N)
-            # It returns the diagonal elements of the Hessian matrix of the log likelihood w.r.t parameters.
-            # Usually for independent data, Cross terms are zero.
-            # For theta_j, d^2 L / d theta_j^2 is the j-th diagonal element.
-            
-            # So we sum f(t) to get scalar L, then hessian.
-            def scalar_f(t):
-                return jnp.sum(f(t))
-                
-            hess = jax.hessian(scalar_f)(th) # (J, J)
-            return {'theta': jnp.diag(hess)} # (J,)
+        n_people = data["n_people"]
+        S = theta.shape[0]
+        J = theta.shape[1]
+        I = alpha.shape[1]
+        K_minus_1 = tau.shape[2]
+
+        def single_sample_hess_diag(th, al, ta):
+            # th: (J,), al: (I,), ta: (I, K-1)
+
+            def person_ll_theta(t, person_idx):
+                p_in = {'theta': t[None, :], 'alpha': al[None, :], 'tau': ta[None, :]}
+                ll = self.log_likelihood(data, p_in)
+                return ll[0, person_idx]
+
+            def person_ll_alpha(a, person_idx):
+                p_in = {'theta': th[None, :], 'alpha': a[None, :], 'tau': ta[None, :]}
+                ll = self.log_likelihood(data, p_in)
+                return ll[0, person_idx]
+
+            def person_ll_tau(t_val, person_idx):
+                p_in = {'theta': th[None, :], 'alpha': al[None, :], 'tau': t_val[None, :]}
+                ll = self.log_likelihood(data, p_in)
+                return ll[0, person_idx]
+
+            def hess_diag_for_person(person_idx):
+                # Hessian diagonal for each parameter
+                hess_theta = jax.hessian(person_ll_theta)(th, person_idx)
+                hess_alpha = jax.hessian(person_ll_alpha)(al, person_idx)
+                hess_tau = jax.hessian(person_ll_tau)(ta, person_idx)
+
+                # Extract diagonals
+                theta_diag = jnp.diag(hess_theta)  # (J,)
+                alpha_diag = jnp.diag(hess_alpha)  # (I,)
+                # For tau, flatten, get diag, reshape
+                tau_flat_hess = hess_tau.reshape(I * K_minus_1, I * K_minus_1)
+                tau_diag = jnp.diag(tau_flat_hess).reshape(I, K_minus_1)
+
+                return theta_diag, alpha_diag, tau_diag
+
+            # Vectorize over persons
+            all_hess = jax.vmap(hess_diag_for_person)(jnp.arange(n_people))
+
+            return {
+                'theta': all_hess[0],  # (J, J)
+                'alpha': all_hess[1],  # (J, I)
+                'tau': all_hess[2]     # (J, I, K-1)
+            }
 
         hess_diags = jax.vmap(single_sample_hess_diag)(theta, alpha, tau)
         return hess_diags
