@@ -1642,14 +1642,21 @@ class MICEBayesianLOO(MICELogistic):
         X_std = uni_result.predictor_std if uni_result.predictor_std is not None else 1.0
         x_standardized = (predictor_value - X_mean) / X_std
 
-        if uni_result.beta_mean is not None and uni_result.intercept_mean is not None:
+        if uni_result.beta_mean is not None:
              # Use stored point estimates
              beta = uni_result.beta_mean
-             intercept = uni_result.intercept_mean
+             intercept = uni_result.intercept_mean if uni_result.intercept_mean is not None else 0.0
+             cutpoints = uni_result.cutpoints_mean
         elif uni_result.params is not None:
              # Fallback to computing from params if available (legacy support)
-             beta = np.mean(uni_result.params['beta'], axis=0)
-             intercept = np.mean(uni_result.params['intercept'])
+             beta = np.mean(uni_result.params.get('beta', 0.0), axis=0)
+             intercept = np.mean(uni_result.params.get('intercept', 0.0))
+             cutpoints = None
+             if 'cutpoints_raw' in uni_result.params:
+                  # Need the model to transform
+                  # Since model isn't here, this is tricky. 
+                  # But we shouldn't hit this often now that we store cutpoints_mean.
+                  pass
         else:
              raise ValueError("No parameters available for prediction")
 
@@ -1658,12 +1665,29 @@ class MICEBayesianLOO(MICELogistic):
         else:
              beta_val = beta
              
-        linear_pred = float(x_standardized * beta_val + intercept)
+        eta = float(x_standardized * beta_val + intercept)
 
         if target_var_type == 'binary':
-            pred = 1.0 / (1.0 + np.exp(-linear_pred))
+            pred = 1.0 / (1.0 + np.exp(-eta))
+        elif target_var_type == 'ordinal' and cutpoints is not None:
+            # Ordinal prediction: Expected value
+            # Probabilities for each category
+            # P(Y <= k) = sigmoid(c_k - eta)
+            # P(Y = k) = P(Y <= k) - P(Y <= k-1)
+            def sigmoid(x):
+                return 1.0 / (1.0 + np.exp(-x))
+            
+            p_le = sigmoid(cutpoints - eta)
+            # Add boundary conditions
+            p_le = np.concatenate([[0.0], p_le, [1.0]])
+            p = np.diff(p_le)
+            
+            # Expected value: sum(k * p_k)
+            categories = np.arange(len(p))
+            pred = np.sum(categories * p)
         else:
-            pred = linear_pred
+            # Continuous or ordinal without cutpoints (fallback)
+            pred = eta
             
         return float(pred)
 
