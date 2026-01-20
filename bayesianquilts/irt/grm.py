@@ -100,43 +100,61 @@ class GradedResponseLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
 
     def log_likelihood_gradient(self, data: Dict[str, Any], params: Dict[str, Any]) -> Any:
         """
-        Compute gradient of log-likelihood w.r.t. parameters.
-        Overridden to handle 'alpha' and 'tau' potentially being in 'data' (frozen)
-        and to ensure correct slicing over the sample dimension S.
+        Compute per-person gradient of log-likelihood w.r.t. parameters.
+
+        For LOO-CV, we need the gradient of each person's log-likelihood separately.
+        This returns gradients with shape (S, N, K) where N is the number of persons
+        and K is the parameter dimension.
+
+        Returns:
+            Dict with:
+                'theta': (S, J, J) - gradient of LL_n w.r.t. theta (mostly diagonal)
+                'alpha': (S, J, I) - gradient of LL_n w.r.t. alpha
+                'tau': (S, J, I, K-1) - gradient of LL_n w.r.t. tau
         """
         theta = params["theta"]  # (S, J)
-        # alpha/tau might be in data or params. If in data, they are (S, I, ...)
         alpha = params.get("alpha", data.get("alpha"))
         tau = params.get("tau", data.get("tau"))
-        
-        # We define a function for a SINGLE sample s that maps theta_s -> LL_s
-        def single_sample_grad(th, al, ta):
-            # th: (J,)
-            # al: (I,)
-            # ta: (I, K-1)
-            
-            def scalar_ll_func(t, a, tau_val):
-                # Construct inputs for log_likelihood
-                p_in = {'theta': t[None, :]}
-                # Pass alpha/tau in params so they are used
-                p_in['alpha'] = a[None, :]
-                p_in['tau'] = tau_val[None, :]
-                
-                # Data should not contain alpha/tau if we want to be sure, 
-                # but params takes precedence anyway.
-                # Use data from closure
-                
-                # log_likelihood returns (S, N) -> (1, J)
-                ll = self.log_likelihood(data, p_in)
-                return jnp.sum(ll) # Sum over people to get scalar target
-            
-            # Compute gradients of scalar target sum(LL)
-            grads = jax.grad(scalar_ll_func, argnums=(0, 1, 2))(th, al, ta)
-            return {'theta': grads[0], 'alpha': grads[1], 'tau': grads[2]}
-            
-        # Vmap over the sample dimension S
-        grads = jax.vmap(single_sample_grad)(theta, alpha, tau)
-        
+
+        n_people = data["n_people"]
+        S = theta.shape[0]
+        J = theta.shape[1]
+        I = alpha.shape[1]
+        K_minus_1 = tau.shape[2]
+
+        # Compute gradient of each person's LL separately
+        def single_sample_grads(th, al, ta):
+            # th: (J,), al: (I,), ta: (I, K-1)
+
+            def person_ll(t, a, tau_val, person_idx):
+                # Compute LL for a single person
+                p_in = {'theta': t[None, :], 'alpha': a[None, :], 'tau': tau_val[None, :]}
+                ll = self.log_likelihood(data, p_in)  # (1, J)
+                return ll[0, person_idx]  # Scalar: LL for this person
+
+            def grad_for_person(person_idx):
+                # Gradient of person_idx's LL w.r.t. all params
+                grads = jax.grad(person_ll, argnums=(0, 1, 2))(th, al, ta, person_idx)
+                return grads  # (theta_grad (J,), alpha_grad (I,), tau_grad (I, K-1))
+
+            # Vectorize over all persons
+            all_grads = jax.vmap(grad_for_person)(jnp.arange(n_people))
+            # all_grads[0]: (J, J) - theta grads for each person
+            # all_grads[1]: (J, I) - alpha grads for each person
+            # all_grads[2]: (J, I, K-1) - tau grads for each person
+
+            return {
+                'theta': all_grads[0],  # (J, J)
+                'alpha': all_grads[1],  # (J, I)
+                'tau': all_grads[2]     # (J, I, K-1)
+            }
+
+        # Vmap over sample dimension S
+        grads = jax.vmap(single_sample_grads)(theta, alpha, tau)
+        # grads['theta']: (S, J, J)
+        # grads['alpha']: (S, J, I)
+        # grads['tau']: (S, J, I, K-1)
+
         return grads
 
     def log_likelihood_hessian_diag(self, data: Dict[str, Any], params: Dict[str, Any]) -> Any:
