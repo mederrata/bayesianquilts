@@ -21,8 +21,7 @@ import numpy as np
 import pandas as pd
 import jax
 import jax.numpy as jnp
-from jax.config import config
-config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", True)
 import jax.flatten_util
 import yaml
 from pathlib import Path
