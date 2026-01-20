@@ -1913,7 +1913,7 @@ class MICEBayesianLOO(MICELogistic):
                 # Use stored intercept_mean if available
                 if zero_result.intercept_mean is not None:
                      intercept = zero_result.intercept_mean
-                elif zero_result.params is not None:
+                elif zero_result.params is not None and 'intercept' in zero_result.params:
                      intercept = np.mean(zero_result.params['intercept'])
                 else:
                      # Should not happen if converged
