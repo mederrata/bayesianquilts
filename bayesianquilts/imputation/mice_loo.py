@@ -51,6 +51,10 @@ class UnivariateModelResult:
     # Standardization parameters for prediction
     predictor_mean: Optional[float] = None
     predictor_std: Optional[float] = None
+    # Point estimates for memory-efficient prediction
+    beta_mean: Optional[Union[float, np.ndarray]] = None
+    intercept_mean: Optional[float] = None
+    cutpoints_mean: Optional[np.ndarray] = None
 
 
 class SimpleLinearRegression:
@@ -118,10 +122,10 @@ class SimpleLinearRegression:
 
         return log_lik
 
-    def unormalized_log_prob(self, data: Dict[str, Any], **params) -> jnp.ndarray:
+    def unormalized_log_prob(self, data: Dict[str, Any], scale_factor: float = 1.0, **params) -> jnp.ndarray:
         """Compute unnormalized log probability (log joint)."""
         log_lik = self.log_likelihood(data, params)
-        total_log_lik = jnp.sum(log_lik, axis=-1)
+        total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
 
         prior = self.create_prior()
         log_prior = prior.log_prob(params)
@@ -184,10 +188,10 @@ class SimpleLogisticRegression:
 
         return log_lik
 
-    def unormalized_log_prob(self, data: Dict[str, Any], **params) -> jnp.ndarray:
+    def unormalized_log_prob(self, data: Dict[str, Any], scale_factor: float = 1.0, **params) -> jnp.ndarray:
         """Compute unnormalized log probability (log joint)."""
         log_lik = self.log_likelihood(data, params)
-        total_log_lik = jnp.sum(log_lik, axis=-1)
+        total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
 
         prior = self.create_prior()
         log_prior = prior.log_prob(params)
@@ -329,8 +333,14 @@ class SimpleOrdinalLogisticRegression:
         log_prob = dist.log_prob(y[None, :]) # (S, N)
         return log_prob
 
-    def unormalized_log_prob(self, data: Dict[str, Any], **params) -> jnp.ndarray:
-        """Compute unnormalized log probability (log joint)."""
+    def unormalized_log_prob(self, data: Dict[str, Any], scale_factor: float = 1.0, **params) -> jnp.ndarray:
+        """Compute unnormalized log probability (log joint).
+        
+        Args:
+            data: Dictionary with 'X' and 'y'
+            scale_factor: Factor to scale log-likelihood (for batch inference)
+            **params: Model parameters
+        """
         # Note: We define prior on cutpoints_raw (gaussian).
         # We do NOT include the Jacobian of the transform in the prior term 
         # because the prior is explicitly on the raw parameter space.
@@ -338,7 +348,7 @@ class SimpleOrdinalLogisticRegression:
         # This is fine and standard for VI.
         
         log_lik = self.log_likelihood(data, params)
-        total_log_lik = jnp.sum(log_lik, axis=-1)
+        total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
 
         prior = self.create_prior()
         log_prior = prior.log_prob(params)
@@ -373,6 +383,8 @@ class MICEBayesianLOO(MICELogistic):
         pathfinder_num_samples: int = 200,
         pathfinder_maxiter: int = 100,
         min_obs: int = 5,
+        batch_size: Optional[int] = None,
+        inference_method: str = 'pathfinder',
         verbose: bool = True
     ):
         """
@@ -387,6 +399,10 @@ class MICEBayesianLOO(MICELogistic):
             pathfinder_num_samples: Number of samples for Pathfinder
             pathfinder_maxiter: Maximum iterations for Pathfinder
             min_obs: Minimum observations required to fit a model
+            batch_size: Maximum observations per model fit (None = use all data).
+                       For large datasets, use 512-1024 for memory efficiency.
+            inference_method: 'pathfinder' or 'advi'. Pathfinder is faster but ADVI
+                             may be more robust for difficult posteriors.
             verbose: Print progress information
         """
         super().__init__(n_imputations, max_iter, random_state, n_predictors=1)
@@ -395,6 +411,8 @@ class MICEBayesianLOO(MICELogistic):
         self.pathfinder_num_samples = pathfinder_num_samples
         self.pathfinder_maxiter = pathfinder_maxiter
         self.min_obs = min_obs
+        self.batch_size = batch_size
+        self.inference_method = inference_method
         self.verbose = verbose
         self.dtype = jnp.float32
 
@@ -429,12 +447,273 @@ class MICEBayesianLOO(MICELogistic):
         mask2 = self._get_observed_mask(data, idx2)
         return mask1 & mask2
 
+    def _check_for_nan(self, params: Optional[Dict[str, jnp.ndarray]], elbo: float) -> bool:
+        """Check if parameters or ELBO contain NaN values."""
+        if params is None:
+            return False
+        
+        # Check ELBO
+        if np.isnan(elbo) or np.isinf(elbo):
+            return True
+        
+        # Check all parameters
+        for key, value in params.items():
+            if np.any(np.isnan(value)) or np.any(np.isinf(value)):
+                return True
+        
+        return False
+
+    def _run_inference_with_fallback(
+        self,
+        model,
+        data_dict: Dict[str, Any],
+        scale_factor: float,
+        seed: int,
+        current_dtype: jnp.dtype
+    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool, jnp.dtype]:
+        """
+        Run inference with automatic fallback to float64 if NaN detected.
+        
+        Returns:
+            Tuple of (params, elbo, converged, dtype_used)
+        """
+        # Try with current dtype
+        if self.inference_method == 'advi':
+            params, elbo, converged = self._run_advi(model, data_dict, scale_factor=scale_factor, seed=seed)
+        else:
+            params, elbo, converged = self._run_pathfinder(model, data_dict, scale_factor=scale_factor, seed=seed)
+        
+        # Check for NaN
+        if converged and self._check_for_nan(params, elbo):
+            if current_dtype == jnp.float32:
+                if self.verbose:
+                    print(f"    NaN detected with float32, retrying with float64...")
+                
+                # Recreate model with float64
+                old_dtype = model.dtype
+                model.dtype = jnp.float64
+                
+                # Convert data to float64
+                data_dict_f64 = {
+                    'X': data_dict['X'].astype(np.float64),
+                    'y': data_dict['y'].astype(np.float64)
+                }
+                
+                # Retry inference
+                if self.inference_method == 'advi':
+                    params, elbo, converged = self._run_advi(model, data_dict_f64, scale_factor=scale_factor, seed=seed)
+                else:
+                    params, elbo, converged = self._run_pathfinder(model, data_dict_f64, scale_factor=scale_factor, seed=seed)
+                
+                # Restore original dtype
+                model.dtype = old_dtype
+                
+                return params, elbo, converged, jnp.float64
+            else:
+                # Already using float64 and still getting NaN
+                return None, float('-inf'), False, current_dtype
+        
+        return params, elbo, converged, current_dtype
+
     def _run_pathfinder(
         self,
         model,
         data: Dict[str, Any],
+        scale_factor: float = 1.0,
         seed: int = 42
     ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool]:
+        """
+        Run Pathfinder variational inference.
+
+        Args:
+            model: Model instance with unormalized_log_prob method
+            data: Data dictionary
+            scale_factor: Factor to scale log-likelihood (for batch inference)
+            seed: Random seed
+
+        Returns:
+            Tuple of (samples_dict, elbo, converged)
+        """
+        # Setup parameter flattening
+        key = jax.random.PRNGKey(seed)
+        prior = model.create_prior()
+        prior_sample = prior.sample(seed=key)
+        template = prior_sample
+        flat_template, unflatten_fn = jax.flatten_util.ravel_pytree(template)
+        param_dim = flat_template.shape[0]
+
+        # Define log probability for Pathfinder
+        def logprob_fn_flat(params_flat):
+            params_dict = unflatten_fn(params_flat)
+            return jnp.squeeze(model.unormalized_log_prob(data=data, scale_factor=scale_factor, **params_dict))
+
+        # Initial position
+        initial_position = jax.random.normal(jax.random.PRNGKey(seed + 1), (param_dim,)) * 0.1
+
+        try:
+            # Run Pathfinder
+            state, info = pathfinder.approximate(
+                rng_key=jax.random.PRNGKey(seed + 2),
+                logdensity_fn=logprob_fn_flat,
+                initial_position=initial_position,
+                num_samples=self.pathfinder_num_samples,
+                maxiter=self.pathfinder_maxiter,
+                ftol=1e-6,
+                gtol=1e-9,
+            )
+
+            elbo = float(state.elbo)
+            converged = True
+
+            # Sample from approximate posterior
+            sample_key = jax.random.PRNGKey(seed + 3)
+            samples_result = pathfinder.sample(sample_key, state, num_samples=self.pathfinder_num_samples)
+            samples_flat = samples_result[0] if isinstance(samples_result, tuple) else samples_result
+
+            # Unflatten samples
+            samples_dict = {var: [] for var in model.var_list}
+            for i in range(self.pathfinder_num_samples):
+                sample = unflatten_fn(samples_flat[i])
+                for var in model.var_list:
+                    samples_dict[var].append(sample[var])
+
+            # Stack samples
+            for var in model.var_list:
+                samples_dict[var] = jnp.stack(samples_dict[var], axis=0)
+
+            return samples_dict, elbo, converged
+
+        except Exception as e:
+            # Always print errors for debugging purposes
+            print(f"    Pathfinder failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, float('-inf'), False
+
+    def _run_advi(
+        self,
+        model,
+        data: Dict[str, Any],
+        scale_factor: float = 1.0,
+        seed: int = 42
+    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool]:
+        """
+        Run minibatch ADVI inference.
+
+        Args:
+            model: Model instance with unormalized_log_prob method
+            data: Data dictionary
+            scale_factor: Factor to scale log-likelihood (for batch inference)
+            seed: Random seed
+
+        Returns:
+            Tuple of (samples_dict, elbo, converged)
+        """
+        from bayesianquilts.vi.minibatch import minibatch_mc_variational_loss
+        import optax
+        
+        # Setup parameter flattening
+        key = jax.random.PRNGKey(seed)
+        prior = model.create_prior()
+        prior_sample = prior.sample(seed=key)
+        
+        # Create mean-field surrogate
+        # Use same structure as prior but with trainable loc and scale
+        def create_surrogate(params):
+            """Create mean-field normal surrogate."""
+            surrogate_dists = {}
+            for var_name in model.var_list:
+                # Get shape from prior sample
+                param_val = prior_sample[var_name]
+                if isinstance(param_val, jnp.ndarray):
+                    shape = param_val.shape
+                else:
+                    shape = ()
+                
+                loc = params[f'{var_name}_loc']
+                log_scale = params[f'{var_name}_log_scale']
+                
+                if shape:
+                    surrogate_dists[var_name] = tfd.Independent(
+                        tfd.Normal(loc=loc, scale=jnp.exp(log_scale)),
+                        reinterpreted_batch_ndims=len(shape)
+                    )
+                else:
+                    surrogate_dists[var_name] = tfd.Normal(loc=loc, scale=jnp.exp(log_scale))
+            
+            return tfd.JointDistributionNamed(surrogate_dists)
+        
+        # Initialize surrogate parameters
+        surrogate_params = {}
+        for var_name in model.var_list:
+            param_val = prior_sample[var_name]
+            if isinstance(param_val, jnp.ndarray):
+                shape = param_val.shape
+            else:
+                shape = ()
+            
+            surrogate_params[f'{var_name}_loc'] = jnp.zeros(shape, dtype=self.dtype)
+            surrogate_params[f'{var_name}_log_scale'] = jnp.zeros(shape, dtype=self.dtype) - 1.0  # Start with small scale
+        
+        # Define target log prob
+        def target_log_prob_fn(data, **params):
+            # Extract actual model params from surrogate params
+            model_params = {var: params[var] for var in model.var_list if var in params}
+            return model.unormalized_log_prob(data=data, scale_factor=scale_factor, **model_params)
+        
+        # Optimization loop
+        optimizer = optax.adam(learning_rate=5e-3)
+        opt_state = optimizer.init(surrogate_params)
+        
+        best_loss = float('inf')
+        patience_counter = 0
+        max_patience = 20
+        
+        for step in range(self.pathfinder_maxiter):
+            # Compute loss
+            def loss_fn(params):
+                surrogate = create_surrogate(params)
+                return minibatch_mc_variational_loss(
+                    target_log_prob_fn=target_log_prob_fn,
+                    surrogate_posterior=surrogate,
+                    dataset_size=1,  # Already scaled by scale_factor
+                    batch_size=1,
+                    data=data,
+                    sample_size=10,
+                    seed=seed + step
+                )
+            
+            loss, grads = jax.value_and_grad(loss_fn)(surrogate_params)
+            
+            # Update
+            updates, opt_state = optimizer.update(grads, opt_state)
+            surrogate_params = optax.apply_updates(surrogate_params, updates)
+            
+            # Check convergence
+            if loss < best_loss:
+                best_loss = float(loss)
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if patience_counter >= max_patience:
+                break
+        
+        # Sample from final surrogate
+        try:
+            final_surrogate = create_surrogate(surrogate_params)
+            samples = final_surrogate.sample(self.pathfinder_num_samples, seed=jax.random.PRNGKey(seed + 1000))
+            
+            # Convert to dict format
+            samples_dict = {}
+            for var in model.var_list:
+                samples_dict[var] = samples[var]
+            
+            return samples_dict, -best_loss, True
+            
+        except Exception as e:
+            print(f"    ADVI sampling failed: {e}")
+            return None, float('-inf'), False
         """
         Run Pathfinder variational inference.
 
@@ -557,9 +836,20 @@ class MICEBayesianLOO(MICELogistic):
             var_type = self._infer_variable_type(y)
             self.variable_types[target_idx] = var_type
 
+        # Batch subsampling for large datasets
+        scale_factor = 1.0
+        if self.batch_size is not None and n_obs > self.batch_size:
+            # Randomly subsample
+            rng = np.random.RandomState(seed)
+            subsample_idx = rng.choice(n_obs, size=self.batch_size, replace=False)
+            y_batch = y[subsample_idx]
+            scale_factor = n_obs / self.batch_size
+        else:
+            y_batch = y
+
         # For zero-predictor model, use X of zeros
-        X = np.zeros((n_obs, 1), dtype=np.float32)
-        data_dict = {'X': X, 'y': y.astype(np.float32)}
+        X = np.zeros((len(y_batch), 1), dtype=np.float32)
+        data_dict = {'X': X, 'y': y_batch.astype(np.float32)}
 
         if var_type == 'binary':
             model = SimpleLogisticRegression(
@@ -575,14 +865,12 @@ class MICEBayesianLOO(MICELogistic):
                 n_classes = self.n_global_classes
             else:
                 # Fallback to local unique values
-                unique_vals = np.unique(y)
+                unique_vals = np.unique(y_batch)
                 n_classes = len(unique_vals)
             
-            # Map y to 0..K-1 based on the CHOSEN unique values (global or local)
+            # Map y_batch to 0..K-1 based on the CHOSEN unique values (global or local)
             val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
-            # Note: if y contains values NOT in global_ordinal_values, this will raise KeyError.
-            # This shouldn't happen if global was computed from all data.
-            y_mapped = np.array([val_map[val] for val in y], dtype=np.float32)
+            y_mapped = np.array([val_map[val] for val in y_batch], dtype=np.float32)
             
             data_dict['y'] = y_mapped 
             
@@ -600,8 +888,10 @@ class MICEBayesianLOO(MICELogistic):
                 dtype=self.dtype
             )
 
-        # Run Pathfinder
-        params, elbo, converged = self._run_pathfinder(model, data_dict, seed=seed)
+        # Run inference (Pathfinder or ADVI)
+        params, elbo, converged, _ = self._run_inference_with_fallback(
+            model, data_dict, scale_factor=scale_factor, seed=seed, current_dtype=self.dtype
+        )
 
         if not converged or params is None:
             return UnivariateModelResult(
@@ -619,6 +909,23 @@ class MICEBayesianLOO(MICELogistic):
         # Compute LOO-ELPD
         elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
 
+        if params is not None:
+            # Compute point estimates before discarding params
+            # Standardize on numpy arrays to avoid JAX device memory hold
+            beta_mean = np.array(np.mean(params['beta'], axis=0))
+            intercept_mean = float(np.mean(params['intercept']))
+            
+            # For ordinal, cutpoints
+            cutpoints_mean = None
+            if 'cutpoints_raw' in params:
+                 # Check if we need to transform? 
+                 # Usually consistent estimates are enough. 
+                 # But let's just save raw means for now or transformed if possible.
+                 pass
+        else:
+            beta_mean = None
+            intercept_mean = None
+
         return UnivariateModelResult(
             n_obs=n_obs,
             elpd_loo=elpd_loo,
@@ -629,7 +936,9 @@ class MICEBayesianLOO(MICELogistic):
             predictor_idx=None,
             target_idx=target_idx,
             converged=converged,
-            params=params
+            params=None, # Drop large posterior samples to save memory
+            beta_mean=beta_mean,
+            intercept_mean=intercept_mean
         )
 
     def _fit_univariate(
@@ -671,24 +980,33 @@ class MICEBayesianLOO(MICELogistic):
         if predictor_var_type is None:
             predictor_var_type = self._infer_variable_type(data[mask, predictor_idx])
             self.variable_types[predictor_idx] = predictor_var_type
+
+        # Batch subsampling for large datasets
+        scale_factor = 1.0
+        if self.batch_size is not None and n_obs > self.batch_size:
+            # Randomly subsample
+            rng = np.random.RandomState(seed)
+            subsample_idx = rng.choice(n_obs, size=self.batch_size, replace=False)
+            X_raw_batch = X_raw[subsample_idx]
+            y_batch = y[subsample_idx]
+            scale_factor = n_obs / self.batch_size
+        else:
+            X_raw_batch = X_raw
+            y_batch = y
             
         # Prepare X based on predictor type
         if predictor_var_type == 'ordinal':
             if getattr(self, 'global_ordinal_values', None) is not None:
                 # Use global max for consistency across all models
-                # valid even if this specific predictor subset doesn't see the max value
                 g_max = int(np.max(self.global_ordinal_values))
                 max_val = g_max
             else:
                 # Fallback to local max
-                x_vals = X_raw.flatten()
+                x_vals = X_raw_batch.flatten()
                 max_val = int(np.max(x_vals))
             
             # Use ordinal one-hot encoding
-            # ordinal_one_hot_encode expects (N, M) matrix of integers
-            # We pass X_raw cast to int.
-            # Note: ordinal_one_hot_encode imports from .mice
-            X = ordinal_one_hot_encode(X_raw.astype(int), max_val)
+            X = ordinal_one_hot_encode(X_raw_batch.astype(int), max_val)
             X = X.astype(np.float32)
             
             # Don't standardize one-hot encoded variables
@@ -699,7 +1017,7 @@ class MICEBayesianLOO(MICELogistic):
             
         else:
             # Continuous/Standard handling
-            X = X_raw
+            X = X_raw_batch
             X_mean = float(np.mean(X))
             X_std = float(np.std(X))
             if X_std > 1e-6:
@@ -708,7 +1026,7 @@ class MICEBayesianLOO(MICELogistic):
                 X_std = 1.0  # Avoid division by zero
             n_predictors = 1
 
-        data_dict = {'X': X, 'y': y}
+        data_dict = {'X': X, 'y': y_batch}
 
         # Create model
         if target_var_type == 'binary':
@@ -723,11 +1041,11 @@ class MICEBayesianLOO(MICELogistic):
                 unique_vals = self.global_ordinal_values
                 n_classes = self.n_global_classes
             else:
-                unique_vals = np.unique(y)
+                unique_vals = np.unique(y_batch)
                 n_classes = len(unique_vals)
             
             val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
-            y_mapped = np.array([val_map[val] for val in y], dtype=np.float32)
+            y_mapped = np.array([val_map[val] for val in y_batch], dtype=np.float32)
             data_dict['y'] = y_mapped
             
             model = SimpleOrdinalLogisticRegression(
@@ -744,8 +1062,10 @@ class MICEBayesianLOO(MICELogistic):
                 dtype=self.dtype
             )
 
-        # Run Pathfinder
-        params, elbo, converged = self._run_pathfinder(model, data_dict, seed=seed)
+        # Run inference (Pathfinder or ADVI)
+        params, elbo, converged, _ = self._run_inference_with_fallback(
+            model, data_dict, scale_factor=scale_factor, seed=seed, current_dtype=self.dtype
+        )
 
         if not converged or params is None:
             return UnivariateModelResult(
@@ -765,6 +1085,14 @@ class MICEBayesianLOO(MICELogistic):
         # Compute LOO-ELPD
         elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
 
+        if params is not None:
+             # Compute point estimates
+             beta_mean = np.array(np.mean(params['beta'], axis=0))
+             intercept_mean = float(np.mean(params['intercept']))
+        else:
+             beta_mean = None
+             intercept_mean = None
+
         return UnivariateModelResult(
             n_obs=n_obs,
             elpd_loo=elpd_loo,
@@ -775,9 +1103,11 @@ class MICEBayesianLOO(MICELogistic):
             predictor_idx=predictor_idx,
             target_idx=target_idx,
             converged=converged,
-            params=params,
+            params=None, # Drop large posterior samples
             predictor_mean=X_mean,
-            predictor_std=X_std
+            predictor_std=X_std,
+            beta_mean=beta_mean,
+            intercept_mean=intercept_mean
         )
         """
         Run Pathfinder variational inference.
@@ -1000,12 +1330,19 @@ class MICEBayesianLOO(MICELogistic):
         if self.verbose:
             print("\nFitting one-predictor models...")
 
-        iterator = range(n_variables)
         if not self.verbose:
-            iterator = tqdm(iterator, desc="Target Variables (One-Predictor)")
+            pbar = tqdm(range(n_variables), desc="Target Variables (One-Predictor)")
+            iterator = pbar
+        else:
+            pbar = None
+            iterator = range(n_variables)
 
         for i in iterator:
             target_name = self.variable_names[i]
+            if pbar is not None:
+                # Truncate if too long
+                disp_name = target_name[:20] + "..." if len(target_name) > 20 else target_name
+                pbar.set_description(f"Target: {disp_name}")
             
             # Identify candidate predictors based on correlation
             # Get correlations for target i
@@ -1291,12 +1628,23 @@ class MICEBayesianLOO(MICELogistic):
         X_std = uni_result.predictor_std if uni_result.predictor_std is not None else 1.0
         x_standardized = (predictor_value - X_mean) / X_std
 
-        # Compute prediction
-        params = uni_result.params
-        beta = np.mean(params['beta'], axis=0)  # Average over posterior samples
-        intercept = np.mean(params['intercept'])
+        if uni_result.beta_mean is not None and uni_result.intercept_mean is not None:
+             # Use stored point estimates
+             beta = uni_result.beta_mean
+             intercept = uni_result.intercept_mean
+        elif uni_result.params is not None:
+             # Fallback to computing from params if available (legacy support)
+             beta = np.mean(uni_result.params['beta'], axis=0)
+             intercept = np.mean(uni_result.params['intercept'])
+        else:
+             raise ValueError("No parameters available for prediction")
 
-        linear_pred = float(x_standardized * beta[0] + intercept)
+        if isinstance(beta, (np.ndarray, list)):
+             beta_val = beta[0]
+        else:
+             beta_val = beta
+             
+        linear_pred = float(x_standardized * beta_val + intercept)
 
         if target_var_type == 'binary':
             pred = 1.0 / (1.0 + np.exp(-linear_pred))
@@ -1517,11 +1865,16 @@ class MICEBayesianLOO(MICELogistic):
         # 1. Zero-predictor model (always available if converged)
         if target_idx in self.zero_predictor_results:
             zero_result = self.zero_predictor_results[target_idx]
-            if zero_result.converged and zero_result.params is not None:
+            if zero_result.converged:
                 # Compute prediction from zero-predictor model
-                # For zero-predictor, X is zeros, so prediction is just intercept
-                params = zero_result.params
-                intercept = np.mean(params['intercept'])
+                # Use stored intercept_mean if available
+                if zero_result.intercept_mean is not None:
+                     intercept = zero_result.intercept_mean
+                elif zero_result.params is not None:
+                     intercept = np.mean(zero_result.params['intercept'])
+                else:
+                     # Should not happen if converged
+                     intercept = 0.0 
 
                 if var_type == 'binary':
                     # Logistic: sigmoid(intercept)
@@ -1548,7 +1901,7 @@ class MICEBayesianLOO(MICELogistic):
                 continue
 
             uni_result = self.univariate_results[key]
-            if not uni_result.converged or uni_result.params is None:
+            if not uni_result.converged:
                 continue
 
             pred = self._predict_single_univariate(uni_result, predictor_value, var_type)

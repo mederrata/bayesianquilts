@@ -14,7 +14,7 @@ def ordinal_one_hot_encode(data_matrix, max_val):
         Encoded matrix of shape (N, M * max_val)
     """
     N, M = data_matrix.shape
-    encoded = np.zeros((N, M * max_val), dtype=int)
+    encoded = np.zeros((N, M * max_val), dtype=np.int8)
     
     for v in range(1, max_val + 1):
         # Mask where value >= v
@@ -24,7 +24,37 @@ def ordinal_one_hot_encode(data_matrix, max_val):
             encoded[:, target_col] = mask[:, col_idx].astype(int)
             
     return encoded
-
+    
+class LightweightLogisticModel:
+    """Minimal storage for logistic regression parameters."""
+    def __init__(self, sklearn_model):
+        self.coef_ = sklearn_model.coef_.copy()
+        self.intercept_ = sklearn_model.intercept_.copy()
+        self.classes_ = sklearn_model.classes_.copy()
+        
+    def predict_proba(self, X):
+        # Implementation of logistic probability prediction
+        # z = X @ coef.T + intercept
+        z = np.dot(X, self.coef_.T) + self.intercept_
+        
+        # Softmax
+        # For binary/multinomial
+        if z.shape[1] == 1:
+            # Binary case (sklearn coef is (1, n_features))
+            # Output proba is (N, 2)
+            # sigmoid
+            p1 = 1.0 / (1.0 + np.exp(-z))
+            p0 = 1.0 - p1
+            return np.hstack([p0, p1])
+        else:
+            # Multinomial
+            # Stable softmax
+            z_max = np.max(z, axis=1, keepdims=True)
+            exp_z = np.exp(z - z_max)
+            sum_exp = np.sum(exp_z, axis=1, keepdims=True)
+            return exp_z / sum_exp
+            return exp_z / sum_exp
+            
 class MICELogistic:
     """
     Multiple Imputation by Chained Equations (MICE) using Ordinal Logistic Regression.
@@ -49,8 +79,10 @@ class MICELogistic:
         Returns:
             tuple:
                 - imputed_data (np.ndarray): One complete sample variable of imputed data.
-                - missing_probs (dict): Dictionary mapping (row_idx, col_idx) tuples to 
-                  Probabilit Mass Functions {outcome_val: prob}.
+            tuple:
+                - imputed_data (np.ndarray): One complete sample variable of imputed data.
+                - missing_probs (np.ndarray): Array of shape (N, M, max_val+1) containing 
+                  PMFs for missing values. Entry [n, m, v] is P(X_nm = v).
         """
         X = X_df.values
         N, M = X.shape
@@ -82,8 +114,9 @@ class MICELogistic:
                 
         X_filled = X_filled.astype(int)
         
-        # Store PMFs for missing values: (row, col) -> {val: prob}
-        final_pmfs = {} 
+        # Store PMFs for missing values: (N, M, max_val+1)
+        # Using float32 to save memory
+        final_pmfs = np.zeros((N, M, max_val + 1), dtype=np.float32)
         self.fitted_models_ = {} # col_idx -> {model, predictors, classes, etc}
         
         # 2. MICE Loop
@@ -121,8 +154,10 @@ class MICELogistic:
                     imputed_values = np.full(len(mis_idx), only_val)
                     
                     if iteration == self.max_iter - 1:
-                         for i_local, idx_global in enumerate(mis_idx):
-                             final_pmfs[(idx_global, j)] = {int(only_val): 1.0}
+                         # Deterministic (prob 1.0)
+                         # We can broadcast assignment if mis_idx is large?
+                         # final_pmfs[mis_idx, j, int(only_val)] = 1.0
+                         final_pmfs[mis_idx, j, int(only_val)] = 1.0
                              
                          # Store "trivial" model
                          self.fitted_models_[j] = {
@@ -139,7 +174,6 @@ class MICELogistic:
                 # Train Model
                 try:
                     model = LogisticRegression(
-                        multi_class='multinomial', 
                         solver='lbfgs', 
                         max_iter=200, 
                         C=1.0,
@@ -163,13 +197,23 @@ class MICELogistic:
                     
                     # If this is the last iteration, save probs and model
                     if iteration == self.max_iter - 1:
-                        for i_local, idx_global in enumerate(mis_idx):
-                            pmf = {int(c): float(p) for c, p in zip(classes, probs[i_local])}
-                            final_pmfs[(idx_global, j)] = pmf
+                        # Vectorized assignment of PMFs
+                        # classes are the column indices in the last dimension
+                        # probs is (len(mis_idx), len(classes))
+                        
+                        # We need to map class values to indices in final_pmfs (last dim)
+                        # classes might not be 0..K contiguous if some levels missing?
+                        # But max_val implies 0..max_val range.
+                        # Assuming classes are integers fitting in max_val.
+                        
+                        for k, class_val in enumerate(classes):
+                            # Assign column k of probs to ...
+                            idx_cls = int(class_val)
+                            final_pmfs[mis_idx, j, idx_cls] = probs[:, k].astype(np.float32)
                         
                         self.fitted_models_[j] = {
                             'type': 'logistic',
-                            'model': model,
+                            'model': LightweightLogisticModel(model),
                             'predictor_indices': predictor_indices,
                             'max_val': max_val
                         }
@@ -203,33 +247,18 @@ class MICELogistic:
         # Initialization
         X_filled = X.copy()
         
-        # Determine global max for encoding from the training metadata or current data
-        # Ideally we stored max_val or similar. 
-        # In fit_transform we stored max_val in fitted_models_ entries.
-        # Let's verify consistent max_val across models or pick the max.
+        # Determine global max for encoding
         max_val = 0
         for info in self.fitted_models_.values():
             if 'max_val' in info:
                 max_val = max(max_val, info['max_val'])
         
         if max_val == 0:
-            # Fallback if not stored or constant models only
             valid_vals = X[~missing_mask]
             max_val = int(valid_vals.max()) if len(valid_vals) > 0 else 1
 
-        # Initial fill
-        for j in range(M):
-            col_data = X[:, j]
-            mis_indices = np.where(np.isnan(col_data))[0]
-            if len(mis_indices) > 0:
-                # Fill with random valid value (e.g. 0) or mean/mode if we had it.
-                # Random integer 0..max_val is a safe bet for init
-                X_filled[mis_indices, j] = self.rng.randint(0, max_val + 1, size=len(mis_indices))
-        
-        X_filled = X_filled.astype(int)
-        
-        # Gibbs Sampling Loop
-        final_pmfs = {}
+        # Use float32 array for output
+        final_pmfs = np.zeros((N, M, max_val + 1), dtype=np.float32)
         
         for iteration in range(n_burnin):
             visit_order = np.arange(M)
@@ -250,9 +279,9 @@ class MICELogistic:
                 if info['type'] == 'constant':
                     val = info['value']
                     X_filled[mis_idx, j] = val
+                    X_filled[mis_idx, j] = val
                     if iteration == n_burnin - 1:
-                        for idx_global in mis_idx:
-                            final_pmfs[(idx_global, j)] = {int(val): 1.0}
+                        final_pmfs[mis_idx, j, int(val)] = 1.0
                     continue
                 
                 # Logistic prediction
@@ -276,9 +305,9 @@ class MICELogistic:
                     X_filled[mis_idx, j] = imputed_values
                     
                     if iteration == n_burnin - 1:
-                        for i_local, idx_global in enumerate(mis_idx):
-                            pmf = {int(c): float(p) for c, p in zip(classes, probs[i_local])}
-                            final_pmfs[(idx_global, j)] = pmf
+                        for k, class_val in enumerate(classes):
+                             idx_cls = int(class_val)
+                             final_pmfs[mis_idx, j, idx_cls] = probs[:, k].astype(np.float32)
                             
                 except Exception:
                     continue
