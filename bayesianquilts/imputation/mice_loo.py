@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 import jax
 import jax.numpy as jnp
+from jax.config import config
+config.update("jax_enable_x64", True)
 import jax.flatten_util
 import yaml
 from pathlib import Path
@@ -665,14 +667,10 @@ class MICEBayesianLOO(MICELogistic):
         optimizer = optax.adam(learning_rate=5e-3)
         opt_state = optimizer.init(surrogate_params)
         
-        best_loss = float('inf')
-        patience_counter = 0
-        max_patience = 20
-        
-        for step in range(self.pathfinder_maxiter):
-            # Compute loss
-            def loss_fn(params):
-                surrogate = create_surrogate(params)
+        @jax.jit
+        def update_step(params, opt_state, seed):
+            def loss_fn(p):
+                surrogate = create_surrogate(p)
                 return minibatch_mc_variational_loss(
                     target_log_prob_fn=target_log_prob_fn,
                     surrogate_posterior=surrogate,
@@ -680,14 +678,19 @@ class MICEBayesianLOO(MICELogistic):
                     batch_size=1,
                     data=data,
                     sample_size=10,
-                    seed=seed + step
+                    seed=seed
                 )
-            
-            loss, grads = jax.value_and_grad(loss_fn)(surrogate_params)
-            
-            # Update
+            loss, grads = jax.value_and_grad(loss_fn)(params)
             updates, opt_state = optimizer.update(grads, opt_state)
-            surrogate_params = optax.apply_updates(surrogate_params, updates)
+            new_params = optax.apply_updates(params, updates)
+            return new_params, opt_state, loss
+
+        best_loss = float('inf')
+        patience_counter = 0
+        max_patience = 20
+        
+        for step in range(self.pathfinder_maxiter):
+            surrogate_params, opt_state, loss = update_step(surrogate_params, opt_state, seed + step)
             
             # Check convergence
             if loss < best_loss:
@@ -912,19 +915,20 @@ class MICEBayesianLOO(MICELogistic):
         if params is not None:
             # Compute point estimates before discarding params
             # Standardize on numpy arrays to avoid JAX device memory hold
-            beta_mean = np.array(np.mean(params['beta'], axis=0))
-            intercept_mean = float(np.mean(params['intercept']))
+            beta_mean = np.array(np.mean(params.get('beta', 0.0), axis=0)) if 'beta' in params else None
+            intercept_mean = float(np.mean(params['intercept'])) if 'intercept' in params else None
             
             # For ordinal, cutpoints
             cutpoints_mean = None
             if 'cutpoints_raw' in params:
-                 # Check if we need to transform? 
-                 # Usually consistent estimates are enough. 
-                 # But let's just save raw means for now or transformed if possible.
-                 pass
+                 # Transform raw cutpoints to ordered ones and then average
+                 # Vmap the transform over samples
+                 transformed_cutpoints = jax.vmap(model._transform_cutpoints)(params['cutpoints_raw'])
+                 cutpoints_mean = np.array(np.mean(transformed_cutpoints, axis=0))
         else:
             beta_mean = None
             intercept_mean = None
+            cutpoints_mean = None
 
         return UnivariateModelResult(
             n_obs=n_obs,
@@ -938,7 +942,8 @@ class MICEBayesianLOO(MICELogistic):
             converged=converged,
             params=None, # Drop large posterior samples to save memory
             beta_mean=beta_mean,
-            intercept_mean=intercept_mean
+            intercept_mean=intercept_mean,
+            cutpoints_mean=cutpoints_mean
         )
 
     def _fit_univariate(
@@ -1086,12 +1091,20 @@ class MICEBayesianLOO(MICELogistic):
         elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
 
         if params is not None:
-             # Compute point estimates
-             beta_mean = np.array(np.mean(params['beta'], axis=0))
-             intercept_mean = float(np.mean(params['intercept']))
+             # Compute point estimates before discarding params
+             beta_mean = np.array(np.mean(params.get('beta', 0.0), axis=0)) if 'beta' in params else None
+             intercept_mean = float(np.mean(params['intercept'])) if 'intercept' in params else None
+            
+             # For ordinal, cutpoints
+             cutpoints_mean = None
+             if 'cutpoints_raw' in params:
+                  # Transform raw cutpoints to ordered ones and then average
+                  transformed_cutpoints = jax.vmap(model._transform_cutpoints)(params['cutpoints_raw'])
+                  cutpoints_mean = np.array(np.mean(transformed_cutpoints, axis=0))
         else:
              beta_mean = None
              intercept_mean = None
+             cutpoints_mean = None
 
         return UnivariateModelResult(
             n_obs=n_obs,
@@ -1107,7 +1120,8 @@ class MICEBayesianLOO(MICELogistic):
             predictor_mean=X_mean,
             predictor_std=X_std,
             beta_mean=beta_mean,
-            intercept_mean=intercept_mean
+            intercept_mean=intercept_mean,
+            cutpoints_mean=cutpoints_mean
         )
         """
         Run Pathfinder variational inference.
