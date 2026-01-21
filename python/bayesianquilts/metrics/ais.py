@@ -102,67 +102,48 @@ class Transformation(ABC):
         """Compute weighted and unweighted moments for parameters.
 
         Args:
-            params: Dictionary of parameters (shape: S x ...)
-            weights: Importance weights (shape: S x N)
+            params: Dictionary of parameters where each value has shape (S, ...).
+                    S is the sample dimension. Additional dimensions are parameter-specific.
+            weights: Importance weights with shape (S, N) where N is the data dimension.
 
         Returns:
-            Dictionary containing means and variances
+            Dictionary mapping parameter names to dicts with keys:
+                - mean: Unweighted mean over S, shape (...)
+                - mean_w: Weighted mean, shape (N, ...)
+                - var: Unweighted variance over S, shape (...)
+                - var_w: Weighted variance, shape (N, ...)
         """
         moments = {}
+
         # Normalize weights along sample dimension (axis 0)
-        # weights is S x N
-        # We want weights sum to 1 for each n
         w_sum = jnp.sum(weights, axis=0, keepdims=True)
-        w_norm = weights / (w_sum + 1e-10)
+        w_norm = weights / (w_sum + 1e-10)  # (S, N)
 
         for name, value in params.items():
-            # value shape: S x ... (e.g., S x K or S)
-            # weights shape: S x N
+            # value shape: (S, ...) where ... can be empty, (K,), (K, L), etc.
+            # weights shape: (S, N)
 
-            # Weighted mean
-            # Need to broadcast weights to match value dimensions
-            # If value is S x K, we want result N x K
-            # If value is S, we want result N
+            # Unweighted statistics (reduce over S)
+            mean = jnp.mean(value, axis=0)  # (...)
+            var = jnp.mean((value - mean) ** 2, axis=0)  # (...)
 
-            if value.ndim == 1:  # Shape S
-                # Broadcast value to S x N
-                v_expanded = value[:, jnp.newaxis]  # S x 1
+            # For weighted statistics, we need to broadcast:
+            # - value from (S, ...) to (S, 1, ...) so N dimension can be inserted
+            # - weights from (S, N) to (S, N, 1, 1, ...) to match value's trailing dims
 
-                # Weighted mean: sum(w * v, axis=0) -> N
-                mean_w = jnp.sum(w_norm * v_expanded, axis=0)
-                mean = jnp.mean(value, axis=0)  # Scalar
+            # Insert N dimension into value at position 1
+            v_expanded = jnp.expand_dims(value, axis=1)  # (S, 1, ...)
 
-                # Expand mean for variance calc: N
-                mean_expanded_w = mean_w
+            # Expand weights to match v_expanded's rank
+            w_expanded = w_norm
+            for _ in range(v_expanded.ndim - w_expanded.ndim):
+                w_expanded = jnp.expand_dims(w_expanded, axis=-1)  # (S, N, 1, 1, ...)
 
-                # Weighted variance
-                var_w = jnp.sum(w_norm * (v_expanded - mean_expanded_w) ** 2, axis=0)
-                # Unweighted variance
-                var = jnp.mean((value - mean) ** 2, axis=0)
+            # Weighted mean: sum over S -> (N, ...)
+            mean_w = jnp.sum(w_expanded * v_expanded, axis=0)
 
-            else:  # Shape S x K or S x P1...
-                # Broadcast weights to matches value dimensions
-                # value: (S, P...) -> v_expanded (S, 1, P...)
-                v_expanded = value[:, jnp.newaxis, ...]
-
-                # w_norm: (S, N) -> w_expanded (S, N, 1...) to match v_expanded rank
-                w_expanded = w_norm
-                while w_expanded.ndim < v_expanded.ndim:
-                    w_expanded = w_expanded[..., jnp.newaxis]
-
-                # Weighted mean: sum(w * v, axis=0) -> N x P...
-                mean_w = jnp.sum(w_expanded * v_expanded, axis=0)
-                mean = jnp.mean(value, axis=0)  # P...
-
-                # Weighted variance: sum(w * (v - mean)^2, axis=0) -> N x P...
-                # Note: mean_w is (N, P...), v_expanded is (S, 1, P...)
-                # Broadcasting (S, 1, P...) with (N, P...) -> (S, N, P...)
-                # Need to be careful. v_expanded is (S, 1, P...), mean_w is (N, P...)
-                # (S, 1, P) - (N, P) -> (S, N, P) check
-                var_w = jnp.sum(w_expanded * (v_expanded - mean_w) ** 2, axis=0)
-
-                # Unweighted variance
-                var = jnp.mean((value - mean) ** 2, axis=0)
+            # Weighted variance: sum over S -> (N, ...)
+            var_w = jnp.sum(w_expanded * (v_expanded - mean_w) ** 2, axis=0)
 
             moments[name] = {"mean": mean, "mean_w": mean_w, "var": var, "var_w": var_w}
 
@@ -189,19 +170,20 @@ class Transformation(ABC):
 
         if variational and surrogate_log_prob_fn is not None:
             log_pi_trans = surrogate_log_prob_fn(params_transformed)
-            
-            # Helper for broadcasting if log_pi_trans is (S,) (e.g. Identity)
+
+            # Broadcast if log_pi_trans is (S,)
             if log_pi_trans.ndim == 1:
                 log_pi_trans = log_pi_trans[:, jnp.newaxis]
-                
+
             delta_log_pi = log_pi_trans - log_pi_original[:, jnp.newaxis]
-            delta_log_pi = delta_log_pi - jnp.max(delta_log_pi, axis=0, keepdims=True)
         else:
             if log_ell_original is not None:
                 delta_log_pi = log_ell_original - log_ell_new
             else:
                 delta_log_pi = jnp.zeros_like(log_ell_new)
 
+        # Combine all log terms first, then apply max-subtract for numerical stability
+        # This ensures the combined effect of Jacobian and likelihood delta doesn't overflow
         log_eta_weights = delta_log_pi + log_jacobian
         log_eta_weights = log_eta_weights - jnp.max(
             log_eta_weights, axis=0, keepdims=True
@@ -345,57 +327,34 @@ class SmallStepTransformation(Transformation):
     def normalize_vector_field(
         self, Q: Any, theta_std: Any = None
     ) -> Tuple[Any, jnp.ndarray]:
-        """Normalize the vector field Q (PyTree)."""
-        
-        # Computes norm(Q) = max_{s} |Q_s| where |Q_s| is max abs over N and K?
-        # Previous logic:
-        # Q_standardized = Q / theta_std
-        # Q_norm = max abs(Q) over (K) keep S,N (dimensions 2..) -> (S, N, 1)
-        # Q_norm_max = max(Q_norm) over S -> (1, N, 1)
-        
-        # With PyTrees:
-        # 1. Standardize component-wise
+        """Normalize the vector field Q (PyTree).
+
+        Args:
+            Q: Vector field as PyTree with leaves of shape (S, N, ...) or (S, N)
+            theta_std: Optional standardization PyTree matching Q structure
+
+        Returns:
+            Tuple of (Q_standardized, Q_norm_max) where Q_norm_max has shape (1, N).
+        """
+        # Standardize component-wise
         if theta_std is not None:
-            Q_standardized = jax.tree_util.tree_map(lambda q, s: q / (s + 1e-6), Q, theta_std)
+            Q = jax.tree_util.tree_map(lambda q, s: q / (s + 1e-6), Q, theta_std)
+
+        # Compute max absolute value across all leaves, keeping (S, N) shape
+        def leaf_abs_max(leaf):
+            if leaf.ndim > 2:
+                return jnp.max(jnp.abs(leaf), axis=tuple(range(2, leaf.ndim)))
+            return jnp.abs(leaf)
+
+        mags = jax.tree_util.tree_leaves(jax.tree_util.tree_map(leaf_abs_max, Q))
+
+        if mags:
+            Q_norm = jnp.max(jnp.stack(mags, axis=0), axis=0)  # (S, N)
+            Q_norm_max = jnp.max(Q_norm, axis=0, keepdims=True)  # (1, N)
         else:
-            Q_standardized = Q
-            
-        # 2. Compute Norm
-        # We want "infinity norm" over the parameter dimensions (all leaves combined)?
-        # Or max per leaf?
-        # Usually we want the max update size across ALL parameters.
-        
-        def leaf_max(x):
-            # x is (S, N, K...)
-            # We want max over K (all dimensions after N)
-            # If x is (S, N), return abs(x)
-            if x.ndim == 2:
-                return jnp.abs(x)
-            else:
-                # Max over all trailing dimensions
-                # axis=tuple(range(2, x.ndim))
-                # But jnp.max with tuple axis supported? Yes.
-                return jnp.max(jnp.abs(x), axis=tuple(range(2, x.ndim)))
-            
-        # Get max magnitude per leaf per (S, N)
-        grad_mags = jax.tree_util.tree_map(leaf_max, Q_standardized)
-        
-        # Max over all leaves -> (S, N)
-        # Flatten tree to list
-        mags_list = jax.tree_util.tree_leaves(grad_mags)
-        if len(mags_list) > 0:
-            # Stack and max
-            # stack [ (S, N), (S, N) ... ] -> (L, S, N)
-            all_mags = jnp.stack(mags_list, axis=0) 
-            Q_norm = jnp.max(all_mags, axis=0) # (S, N)
-        else:
-            Q_norm = jnp.zeros(())
-            
-        # Q_norm_max over S -> (1, N)
-        # (S, N) -> (1, N)
-        Q_norm_max = jnp.max(Q_norm, axis=0, keepdims=True)
-        
-        return Q_standardized, Q_norm_max
+            Q_norm_max = jnp.zeros((1, 1))
+
+        return Q, Q_norm_max
 
     def __call__(
         self,
@@ -491,10 +450,7 @@ class SmallStepTransformation(Transformation):
             )
         )
 
-        # ... (Metrics calculation is synonymous with Identity/others, maybe shared logic?)
-        
-        # Recalculate predictions
-        predictions = log_ell_new # usually
+        predictions = log_ell_new
         
         weight_entropy = self.entropy(eta_weights)
         psis_entropy = self.entropy(psis_weights)
@@ -628,31 +584,35 @@ class Variance(SmallStepTransformation):
 
     def compute_Q(
         self,
-        theta: jnp.ndarray,
+        theta: Any,
         data: Any,
         params: Dict[str, Any],
         current_log_ell: jnp.ndarray,
         log_pi: jnp.ndarray = None,
         **kwargs,
-    ) -> jnp.ndarray:
+    ) -> Any:
+        """Compute variance-based vector field Q as PyTree.
 
+        Args:
+            theta: Current parameters as PyTree
+            data: Input data
+            params: Original model parameters
+            current_log_ell: Current log-likelihood (S, N)
+            log_pi: Log posterior/surrogate probability (S,)
+
+        Returns:
+            Q as PyTree matching theta structure
+        """
         if log_pi is None:
             raise ValueError("log_pi required")
 
-        # 1. Compute gradients of log_ell (grad_log_ell)
+        # 1. Compute gradients of log_ell
         if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
             grad_log_ell = kwargs["log_ell_prime"]
         else:
             grad_log_ell = self.likelihood_fn.log_likelihood_gradient(data, params)
 
         # 2. Compute log_f and grad_log_f
-        # Helper for single sample
-        def single_sample_log_f(t):
-            # Shape adjustment for reconstruct which expects (S,...)
-            p = self.likelihood_fn.reconstruct_parameters(t[jnp.newaxis, :], params)
-            val = jnp.log(self.f_fn(data, **p))
-            return jnp.squeeze(val, axis=0)  # (N,)
-
         log_f = kwargs.get("log_f", None)
         grad_log_f = kwargs.get("grad_log_f", None)
 
@@ -660,40 +620,42 @@ class Variance(SmallStepTransformation):
             log_f = jnp.log(self.f_fn(data, **params))
 
         if grad_log_f is None:
-            # Compute Jacobian: (S, N, K)
-            jac_fn = jax.jacrev(single_sample_log_f)
-            grad_log_f = jax.vmap(jac_fn)(theta)
+            # Compute gradient of log_f w.r.t. params using autodiff
+            def log_f_sum(p):
+                return jnp.sum(jnp.log(self.f_fn(data, **p)))
 
-        if grad_log_f.ndim == 4 and grad_log_f.shape[2] == 1:
-            grad_log_f = jnp.squeeze(grad_log_f, axis=2)
+            grad_log_f = jax.grad(log_f_sum)(params)
+            # grad_log_f is PyTree with leaves of shape (...) matching params
+            # We need to expand it to (S, N, ...) for broadcasting
 
-        # 3. Assemble Q
-        # Q = pi * exp(2*log_f - 2*log_ell) * (grad_log_f - grad_log_ell)
-
-        log_pi_expanded = log_pi
-        if log_pi_expanded.ndim == 1:
-            log_pi_expanded = log_pi_expanded[:, jnp.newaxis]  # (S, 1)
-
-        # log_pi (S, 1) to (S, N) broadcast
-        log_pi_broadcasted = log_pi_expanded
-        if log_pi_broadcasted.ndim == 2 and log_pi_broadcasted.shape[1] == 1:
-            log_pi_broadcasted = jnp.tile(
-                log_pi_broadcasted, (1, current_log_ell.shape[1])
-            )
-
-        # log_weights = log_pi + 2*log_f - 2*log_ell
-        log_weights = log_pi_broadcasted + 2.0 * log_f - 2.0 * current_log_ell
-
+        # 3. Compute weights
+        log_pi_expanded = log_pi[:, jnp.newaxis] if log_pi.ndim == 1 else log_pi
+        log_weights = log_pi_expanded + 2.0 * log_f - 2.0 * current_log_ell
         weights = jnp.exp(log_weights)  # (S, N)
 
-        # Expand weights for gradient mult: (S, N, 1)
-        weights_expanded = weights[..., jnp.newaxis]
+        # 4. Assemble Q = weights * (grad_log_f - grad_log_ell)
+        def compute_q_leaf(g_f, g_ell):
+            # g_ell is (S, N, ...) from likelihood gradient
+            # g_f might be (...) from autodiff grad - need to broadcast
+            if g_f.ndim < g_ell.ndim:
+                # Expand g_f to match g_ell shape
+                g_f_expanded = g_f
+                for _ in range(g_ell.ndim - g_f.ndim):
+                    g_f_expanded = jnp.expand_dims(g_f_expanded, axis=0)
+                g_f_expanded = jnp.broadcast_to(g_f_expanded, g_ell.shape)
+            else:
+                g_f_expanded = g_f
 
-        # diff_grad: (S, N, K)
-        diff_grad = grad_log_f - grad_log_ell
+            diff = g_f_expanded - g_ell
 
-        Q = weights_expanded * diff_grad
+            # Expand weights for broadcasting: (S, N) -> (S, N, 1, 1, ...)
+            w = weights
+            for _ in range(diff.ndim - 2):
+                w = w[..., jnp.newaxis]
 
+            return w * diff
+
+        Q = jax.tree_util.tree_map(compute_q_leaf, grad_log_f, grad_log_ell)
         return Q
 
 
@@ -1035,57 +997,10 @@ class AutoDiffLikelihoodMixin(LikelihoodFunction):
              
              def point_ll(p, i):
                  p_exp = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), p)
-                 ll = self.log_likelihood(data, p_exp) # (1, N)
+                 ll = self.log_likelihood(data, p_exp)  # (1, N)
                  return ll[0, i]
 
-             def diag_hess_i(i):
-                 # Return PyTree of diagonal hessian elements for data point i
-                 h_tree = jax.hessian(lambda p: point_ll(p, i))(p_sample)
-                 # h_tree is PyTree of PyTrees (Hessian blocks).
-                 # We only want the diagonal blocks? No, we want diagonal elements of the full Hessian matrix.
-                 # Actually, for AIS "Variance" transform, we specifically usually want 1 / (d2L/dtheta2).
-                 # This assumes diagonal approximation is sufficient.
-                 # Diagonal elements of the Hessian matrix.
-                 
-                 # jax.hessian returns a nested structure. If p_sample is a dict with keys A, B
-                 # Hessian is dict of dicts: {{d2/dAdA, d2/dAdB}, {d2/dBdA, d2/dBdB}}
-                 # We only want d2/dAdA diagonal elements, d2/dBdB diagonal elements.
-                 # AND we only want the diagonal of those blocks (d2/dtheta_k^2).
-                 
-                 # So we want distinct manual logic:
-                 # for each leaf, d2L/dleaf^2.
-                 
-                 # This can be computed by `jax.jacfwd(jax.grad(f))`.
-                 # Jacobian of Gradient.
-                 # Gradient is PyTree. Jacobian of PyTree is PyTree of PyTrees.
-                 # We just want the 'diagonal' leaves.
-                 
-                 # A more efficient way to get diagonal of Hessian w.r.t input vector is jvp-of-grad?
-                 # No, that gives vector-Hessian product.
-                 
-                 # If we assume diagonal approximation, we iterate over parameters and compute 2nd deriv.
-                 
-                 return jax.tree_util.tree_map(
-                    lambda x: jnp.diag(x) if x.ndim == 2 else x, # Very rough, incorrect for general PyTree shapes
-                    h_tree
-                 )
-                 
-                 # Let's fallback to diagonal of Gradient-of-Gradient simply ?
-                 # But we can't easily get DIAGONAL of hessian without materializing it unless we loop.
-                 # But Variance transform + PyTree AIS requires us to have `grad_log_pi` and `log_ell_doubleprime`
-                 # as PyTrees matching `theta`.
-                 
-                 pass
-
-             # Better approach for Diagonal Hessian of PyTree:
-             # Iterate over leaves. For each element in each leaf, compute second derivative.
-             # This is expensive (O(K)).
-             # But allows true diagonal.
-             
-             # Alternatively, use Hutchison trace estimator?
-             # For now, let's implement the O(K) loop using vmap over basis vectors implicitly?
-             # Or just map over the flattened view virtually.
-             
+             # Compute diagonal Hessian via flattened parameters (O(K) complexity)
              flat_p, unravel = jax.flatten_util.ravel_pytree(p_sample)
              K = flat_p.shape[0]
              
@@ -1244,9 +1159,7 @@ class AdaptiveImportanceSampler:
                 log_pi = jnp.sum(log_ell, axis=1) + log_prior
                 grad_log_pi = None
 
-        # Ensure log_pi shape
-        if log_pi.ndim == 1:
-            log_pi = log_pi  # (S,)
+        # log_pi should be (S,) at this point
 
         # Standard deviation of parameters (for standardization)
         # theta is a PyTree (dict). We want std per leaf.
@@ -1328,7 +1241,6 @@ class AdaptiveImportanceSampler:
         if transformations is None or "identity" in transformations:
             if verbose:
                 print("Running identity...")
-            # Compute identity importance weights (standard PSIS-LOO)
             # Compute identity importance weights (standard PSIS-LOO)
             # log_eta = -log_ell
             log_eta_weights = -log_ell
