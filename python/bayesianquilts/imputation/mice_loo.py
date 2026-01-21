@@ -2327,15 +2327,21 @@ class MICEBayesianLOO(MICELogistic):
         
         return df.head(k)
 
-    def get_all_predictors_loo(self, metric: str = 'elpd_loo') -> Dict[str, Dict[str, float]]:
+    def get_all_predictors_loo(
+        self, 
+        metric: str = 'elpd_loo',
+        k: Optional[int] = None
+    ) -> Dict[str, Dict[str, float]]:
         """
         Get LOO values for all predictors for all targets.
         
         Args:
             metric: Metric to use ('elpd_loo' or 'elpd_loo_per_obs').
+            k: If provided, only return top k predictors for each target.
             
         Returns:
             Dict mapping target_name -> {predictor_name: metric_value}
+            The inner dictionary is sorted by metric value (descending).
         """
         summary = {}
         
@@ -2357,8 +2363,17 @@ class MICEBayesianLOO(MICELogistic):
                  raise ValueError(f"Invalid metric: {metric}")
                  
             # Store
-            if target_name not in summary:
-                summary[target_name] = {}
             summary[target_name][predictor_name] = float(val)
+
+        # Sort and limit
+        for target in summary:
+            # Sort by value descending
+            sorted_predictors = dict(sorted(summary[target].items(), key=lambda item: item[1], reverse=True))
+            
+            # Limit to k if requested
+            if k is not None:
+                sorted_predictors = dict(list(sorted_predictors.items())[:k])
+                
+            summary[target] = sorted_predictors
 
         return summary
