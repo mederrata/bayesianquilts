@@ -762,9 +762,6 @@ class PMM2(SmallStepTransformation):
 
         moments = Transformation.compute_moments(params, weights)
 
-        # We assume theta is PyTree (Dict)
-        # Ideally we use extract_parameters on a constructed dict.
-
         Q_dict = {}
 
         for name, value in params.items():
@@ -917,7 +914,7 @@ class MM2(GlobalTransformation):
                     jnp.log(ratio), axis=tuple(range(1, ratio.ndim))
                 )[jnp.newaxis, :]
 
-        theta_new = self.likelihood_fn.extract_parameters(new_params)
+        theta_new = new_params
 
         eta_weights, psis_weights, khat, log_ell_new = (
             self.compute_importance_weights_helper(
