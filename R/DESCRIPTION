@@ -1,6 +1,6 @@
 Package: bayesianquilts
 Title: Bayesian Quilts
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: person("Joshua", "Chang", email = "josh@mederrata.com", role = c("aut", "cre"))
 Description: R port of the bayesianquilts library for interpretable Bayesian machine learning.
 License: MIT
