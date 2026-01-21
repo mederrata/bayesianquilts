@@ -1,27 +1,26 @@
 Package: bayesianquilts
-Title: Bayesian Quilts
+Title: Adaptive Importance Sampling for Bayesian Cross-Validation
 Version: 0.2.0
 Authors@R: person("Joshua", "Chang", email = "josh@mederrata.com", role = c("aut", "cre"))
 Description: R port of the bayesianquilts library for interpretable Bayesian machine learning.
-License: MIT
+    Provides Adaptive Importance Sampling (AIS) methods for efficient Leave-One-Out (LOO)
+    cross-validation, with support for brms models and custom likelihood functions.
+License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
 Imports:
     R6,
-    matrixStats,
-    loo
+    loo (>= 2.0.0),
+    stats
+Suggests:
+    brms,
+    testthat (>= 3.0.0)
 RoxygenNote: 7.2.3
-
-Package: bayesianquilts
-Title: Bayesian Quilts
-Version: 0.1.0
-Authors@R: person("Joshua", "Chang", email = "josh@mederrata.com", role = c("aut", "cre"))
-Description: R port of the bayesianquilts library for interpretable Bayesian machine learning.
-License: MIT
-Encoding: UTF-8
-LazyData: true
-Imports:
-    R6,
-    matrixStats,
-    loo
-RoxygenNote: 7.2.3
+Collate:
+    'utils.R'
+    'psis.R'
+    'ais_classes.R'
+    'transformations.R'
+    'likelihoods.R'
+    'ais.R'
+    'brms_utils.R'

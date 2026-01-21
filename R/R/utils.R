@@ -2,6 +2,7 @@
 #'
 #' @param x Numeric vector or matrix
 #' @return Numeric value or vector
+#' @export
 logSumExp <- function(x) {
   if (is.matrix(x)) {
     # Column-wise logSumExp
@@ -17,6 +18,7 @@ logSumExp <- function(x) {
 #'
 #' @param weights Numeric vector or matrix of weights
 #' @return Entropy value
+#' @export
 entropy <- function(weights) {
   # Avoid log(0)
   weights <- weights + 1e-12
@@ -33,6 +35,7 @@ entropy <- function(weights) {
 #' @param x List or atomic object
 #' @param ... Additional arguments to f
 #' @return Transformed list or object
+#' @export
 tree_map <- function(f, x, ...) {
   if (is.list(x) && !is.data.frame(x)) {
     lapply(x, function(child) tree_map(f, child, ...))
