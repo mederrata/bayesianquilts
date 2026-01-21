@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable, Tuple, Optional, List
-from bayesianquilts.metrics import nppsis
+from bayesianquilts.metrics import psis
 
 
 class LikelihoodFunction(ABC):
@@ -226,7 +226,7 @@ class Transformation(ABC):
         )
 
         log_eta_weights = log_eta_weights.astype(jnp.float64)
-        psis_weights, khat = nppsis.psislw(log_eta_weights)
+        psis_weights, khat = psis.psislw(log_eta_weights)
 
         eta_weights = jnp.exp(log_eta_weights)
         eta_weights = eta_weights / jnp.sum(eta_weights, axis=0, keepdims=True)
@@ -1392,7 +1392,7 @@ class AdaptiveImportanceSampler:
             )
             log_eta_weights = log_eta_weights.astype(jnp.float64)
 
-            psis_weights, khat = nppsis.psislw(log_eta_weights)
+            psis_weights, khat = psis.psislw(log_eta_weights)
 
             eta_weights = jnp.exp(log_eta_weights)
             eta_weights = eta_weights / jnp.sum(eta_weights, axis=0, keepdims=True)
