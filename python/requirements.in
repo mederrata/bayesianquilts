@@ -16,3 +16,5 @@ orbax-checkpoint
 grain
 arviz
 notebook
+blackjax
+cmdstanpy
