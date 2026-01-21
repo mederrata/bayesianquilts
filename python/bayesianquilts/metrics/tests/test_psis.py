@@ -13,6 +13,9 @@ import jax.numpy as jnp
 import numpy as np
 from bayesianquilts.metrics import psis
 
+# Enable 64-bit precision for tests
+jax.config.update("jax_enable_x64", True)
+
 
 class TestSumlogs:
     """Tests for the sumlogs function (numerically stable log-sum-exp)."""
