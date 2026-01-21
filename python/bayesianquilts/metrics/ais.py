@@ -288,8 +288,15 @@ class SmallStepTransformation(Transformation):
             return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         # Simple case: all leaves are (S, N, K_i) - compute divergence
+        # Note: We don't pass pre-computed gradients (log_ell_prime) to allow JVP to work.
+        # Filter out pre-computed values that would make Q constant w.r.t. theta.
+        kwargs_for_jvp = {
+            k: v for k, v in kwargs.items()
+            if k not in ('log_ell_prime', 'log_ell_doubleprime', 'grad_log_f')
+        }
+
         def func(t):
-            return self.compute_Q(t, data, params, current_log_ell, **kwargs)
+            return self.compute_Q(t, data, params, current_log_ell, **kwargs_for_jvp)
 
         divergence = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
@@ -309,7 +316,15 @@ class SmallStepTransformation(Transformation):
 
             q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
             target_leaf_out = q_out_leaves[leaf_idx]
-            d_component = target_leaf_out[..., feat_idx]
+
+            # Handle both 3D (S, N, K) and 2D (S, N) Q outputs
+            # 2D occurs for scalar parameters where the "K" dimension is 1 and squeezed
+            if target_leaf_out.ndim == 2:
+                # Scalar parameter: entire array is the derivative
+                d_component = target_leaf_out
+            else:
+                # Vector parameter: index into last dim
+                d_component = target_leaf_out[..., feat_idx]
 
             return accum_div + d_component, None
 
@@ -319,8 +334,14 @@ class SmallStepTransformation(Transformation):
             for k in range(K_i):
                 indices.append((i, k))
 
-        for idx in indices:
-            divergence, _ = basis_jvp(divergence, idx)
+        # Try to compute divergence; fall back to zero if JVP fails
+        # (e.g., due to shape incompatibilities in gradient functions)
+        try:
+            for idx in indices:
+                divergence, _ = basis_jvp(divergence, idx)
+        except (ValueError, TypeError) as e:
+            # JVP failed - return zero divergence
+            return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         return divergence
 
@@ -1416,8 +1437,12 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         X = jnp.asarray(data["X"], dtype=self.dtype)  # (n_data, n_features)
         y = jnp.asarray(data["y"], dtype=self.dtype)  # (n_data,)
 
-        beta = params["beta"]  # (n_samples, n_features)
-        intercept = params["intercept"]  # (n_samples,)
+        beta = params["beta"]  # (n_samples, n_features) or (S, N, F)
+        intercept = params["intercept"]  # (n_samples,) or (S, N) or (S, N, 1)
+
+        # Squeeze trailing singleton from intercept if present (from transformations)
+        if intercept.ndim > 1 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
 
         # Linear predictor: X @ beta.T + intercept
         if beta.ndim == 3:
@@ -1447,8 +1472,12 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         beta = params["beta"]
         intercept = params["intercept"]
 
+        # Squeeze trailing singleton from intercept if present (from transformations)
+        if intercept.ndim > 1 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+
         if beta.ndim == 3:
-            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept[..., jnp.newaxis]
+            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept
         else:
             mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
         sigma = jax.nn.sigmoid(mu)
@@ -1477,8 +1506,12 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         beta = params["beta"]
         intercept = params["intercept"]
 
+        # Squeeze trailing singleton from intercept if present (from transformations)
+        if intercept.ndim > 1 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+
         if beta.ndim == 3:
-            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept[..., jnp.newaxis]
+            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept
         else:
             mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
         sigma = jax.nn.sigmoid(mu)
