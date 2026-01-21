@@ -519,83 +519,6 @@ class SmallStepTransformation(Transformation):
             "ll_loo_psis": ll_loo_psis,
         }
 
-        log_jac = jnp.log(jnp.abs(1.0 + h * div_Q))
-
-        if log_jac.ndim > 2:
-            log_jac = jnp.squeeze(log_jac)
-
-        # Reconstruct params to compute weights
-        params_new = {}
-        # theta_new is (S, N, K)
-        # We need to reconstruct.
-        # This part is model specific... extracting K back to dict structure.
-        # For now assuming we can loop over N efficiently or vmap?
-
-        # Reconstruct logic copied/adapted:
-        # NOTE: This reconstruction loop is slow in Python.
-        # But we must do it to get params_new for log_likelihood call.
-
-        # Optimization: if we can, avoid full reconstruction or do it vectorized.
-        # But `reconstruct_parameters` is abstract.
-        # Let's assume we do it per N for now as in legacy.
-
-        # Pre-calc shapes
-        S, N = log_ell.shape
-
-        for i in range(N):
-            p_i = self.likelihood_fn.reconstruct_parameters(theta_new[:, i, :], params)
-            if i == 0:
-                for k, v in p_i.items():
-                    # v is (S, ...) -> (S, 1, ...)
-                    params_new[k] = v[:, jnp.newaxis, ...]
-            else:
-                for k, v in p_i.items():
-                    params_new[k] = jnp.concatenate(
-                        [params_new[k], v[:, jnp.newaxis, ...]], axis=1
-                    )
-
-        # Compute weights
-        eta_weights, psis_weights, khat, log_ell_new = (
-            self.compute_importance_weights_helper(
-                self.likelihood_fn,
-                data,
-                params,
-                params_new,
-                log_jac,
-                variational,
-                log_pi,
-                log_ell_original,
-                surrogate_log_prob_fn,
-            )
-        )
-
-        predictions = self.likelihood_fn.log_likelihood(data, params_new)
-
-        weight_entropy = self.entropy(eta_weights)
-        psis_entropy = self.entropy(psis_weights)
-
-        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
-        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
-
-        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
-        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
-
-        return {
-            "theta_new": theta_new,
-            "log_jacobian": log_jac,
-            "eta_weights": eta_weights,
-            "psis_weights": psis_weights,
-            "khat": khat,
-            "predictions": predictions,
-            "log_ell_new": log_ell_new,
-            "weight_entropy": weight_entropy,
-            "psis_entropy": psis_entropy,
-            "p_loo_eta": p_loo_eta,
-            "p_loo_psis": p_loo_psis,
-            "ll_loo_eta": ll_loo_eta,
-            "ll_loo_psis": ll_loo_psis,
-        }
-
 
 class LikelihoodDescent(SmallStepTransformation):
     """Likelihood Descent transformation (Gradient Ascent on Likelihood)."""
@@ -1533,44 +1456,6 @@ class AdaptiveImportanceSampler:
         return results
 
     # Legacy methods have been removed in favor of Transformation subclasses.
-
-
-# Legacy classes for backward compatibility
-class AdaptiveIsSampler(ABC):
-    def __init__(self):
-        return
-
-
-class Bijection(ABC):
-    @abstractmethod
-    def call(self, data, **params):
-        return
-
-    @abstractmethod
-    def inverse(self):
-        return
-
-    @abstractmethod
-    def forward_grad(self):
-        return
-
-    def __init__(self):
-        return
-
-
-class AutoDiffBijection(Bijection):
-    def __init__(self, model, hbar=1.0):
-        self.model = model
-        self.hbar = hbar
-        return
-
-    def call(self, data, params):
-        return self.model.adaptive_is_loo(data, params, self.hbar)
-
-
-class SmallStepTransformation(Bijection):
-    def call(self):
-        return
 
 
 # Example implementations for common likelihood functions
