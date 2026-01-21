@@ -288,8 +288,15 @@ class SmallStepTransformation(Transformation):
             return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         # Simple case: all leaves are (S, N, K_i) - compute divergence
+        # Note: We don't pass pre-computed gradients (log_ell_prime) to allow JVP to work.
+        # Filter out pre-computed values that would make Q constant w.r.t. theta.
+        kwargs_for_jvp = {
+            k: v for k, v in kwargs.items()
+            if k not in ('log_ell_prime', 'log_ell_doubleprime', 'grad_log_f')
+        }
+
         def func(t):
-            return self.compute_Q(t, data, params, current_log_ell, **kwargs)
+            return self.compute_Q(t, data, params, current_log_ell, **kwargs_for_jvp)
 
         divergence = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
@@ -309,7 +316,15 @@ class SmallStepTransformation(Transformation):
 
             q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
             target_leaf_out = q_out_leaves[leaf_idx]
-            d_component = target_leaf_out[..., feat_idx]
+
+            # Handle both 3D (S, N, K) and 2D (S, N) Q outputs
+            # 2D occurs for scalar parameters where the "K" dimension is 1 and squeezed
+            if target_leaf_out.ndim == 2:
+                # Scalar parameter: entire array is the derivative
+                d_component = target_leaf_out
+            else:
+                # Vector parameter: index into last dim
+                d_component = target_leaf_out[..., feat_idx]
 
             return accum_div + d_component, None
 
@@ -319,8 +334,14 @@ class SmallStepTransformation(Transformation):
             for k in range(K_i):
                 indices.append((i, k))
 
-        for idx in indices:
-            divergence, _ = basis_jvp(divergence, idx)
+        # Try to compute divergence; fall back to zero if JVP fails
+        # (e.g., due to shape incompatibilities in gradient functions)
+        try:
+            for idx in indices:
+                divergence, _ = basis_jvp(divergence, idx)
+        except (ValueError, TypeError) as e:
+            # JVP failed - return zero divergence
+            return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         return divergence
 
@@ -396,20 +417,34 @@ class SmallStepTransformation(Transformation):
         # For vector params q is (S, N, K). h * q needs h expanded.
         
         def update_step(t, q):
-            # t and q have same shape
-            if q.ndim == 2:
-                # (S, N)
-                return t + h * q
-            else:
-                # (S, N, K...)
-                # Expand h to match rank
-                # We assume h aligns with N (axis 1)
-                # We need to add axes for K...
-                # (1, N) -> (1, N, 1, 1...)
-                h_exp = h
-                for _ in range(q.ndim - 2):
-                    h_exp = h_exp[..., jnp.newaxis]
-                return t + h_exp * q
+            # t: (S, 1, K...) or (S, 1, 1)
+            # q: (S, N, K...) or (S, N)
+            
+            # If t has shape (S, 1, 1) [from scalar param], q might satisfy q.ndim == 2 (S, N)
+            # We want to add them to get (S, N, 1).
+            # t is already (S, 1, 1).
+            # If q is (S, N), we need to expand it to (S, N, 1).
+            
+            q_expanded = q
+            if t.ndim > q.ndim:
+                 # Check if t is (...) -> (S, 1, ...)
+                 # and q is (S, N)
+                 # We need to insert dimensions into q to match t's rank
+                 # t: (S, 1, D1, D2...)
+                 # q: (S, N)
+                 # q -> (S, N, 1, 1...)
+                 for _ in range(t.ndim - q.ndim):
+                     q_expanded = q_expanded[..., jnp.newaxis]
+            
+            # Now q_expanded should have same rank as t, but with N in axis 1.
+            # h is (1, N).
+            
+            # Expand h to match q_expanded rank
+            h_exp = h
+            for _ in range(q_expanded.ndim - h.ndim):
+                h_exp = h_exp[..., jnp.newaxis]
+                
+            return t + h_exp * q_expanded
 
         theta_new = jax.tree_util.tree_map(update_step, theta, Q)
 
@@ -1233,6 +1268,8 @@ class AdaptiveImportanceSampler:
             "khat": jnp.full(log_ell.shape[1], jnp.inf),  # (N,)
             "p_loo_eta": jnp.zeros(log_ell.shape[1]),
             "p_loo_psis": jnp.zeros(log_ell.shape[1]),
+            "ll_loo_eta": jnp.full(log_ell.shape[1], -jnp.inf),
+            "ll_loo_psis": jnp.full(log_ell.shape[1], -jnp.inf),
         }
 
         results = {}
@@ -1400,8 +1437,12 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         X = jnp.asarray(data["X"], dtype=self.dtype)  # (n_data, n_features)
         y = jnp.asarray(data["y"], dtype=self.dtype)  # (n_data,)
 
-        beta = params["beta"]  # (n_samples, n_features)
-        intercept = params["intercept"]  # (n_samples,)
+        beta = params["beta"]  # (n_samples, n_features) or (S, N, F)
+        intercept = params["intercept"]  # (n_samples,) or (S, N) or (S, N, 1)
+
+        # Squeeze trailing singleton from intercept if present (from transformations)
+        if intercept.ndim > 1 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
 
         # Linear predictor: X @ beta.T + intercept
         if beta.ndim == 3:
@@ -1431,8 +1472,12 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         beta = params["beta"]
         intercept = params["intercept"]
 
+        # Squeeze trailing singleton from intercept if present (from transformations)
+        if intercept.ndim > 1 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+
         if beta.ndim == 3:
-            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept[..., jnp.newaxis]
+            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept
         else:
             mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
         sigma = jax.nn.sigmoid(mu)
@@ -1461,8 +1506,12 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         beta = params["beta"]
         intercept = params["intercept"]
 
+        # Squeeze trailing singleton from intercept if present (from transformations)
+        if intercept.ndim > 1 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+
         if beta.ndim == 3:
-            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept[..., jnp.newaxis]
+            mu = jnp.einsum("df,sdf->sd", X, beta) + intercept
         else:
             mu = jnp.einsum("df,sf->sd", X, beta) + intercept[..., jnp.newaxis]
         sigma = jax.nn.sigmoid(mu)

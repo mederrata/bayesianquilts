@@ -197,24 +197,31 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
         
         # Squeeze beta down to at most 3D (S, N, F) or 2D (S, F)
         while beta.ndim > 3:
+            orig = beta.shape
             beta = jnp.squeeze(
                 beta,
                 axis=tuple(i for i in range(1, beta.ndim - 1) if beta.shape[i] == 1),
             )
-            if beta.ndim > 3:
-                # Fallback: just take first slice
-                beta = beta[:, 0, ...]
+            # print(f"DEBUG: Squeezed beta {orig} -> {beta.shape}")
+            if beta.ndim > 3 and beta.shape == orig:
+                # Fallback only if squeeze did nothing but we still have too many dims
+                # This explicitly handles stubborn dimensions, but we must be careful not to kill N.
+                # If we have (S, N, 1, F), squeeze should remove axis 2.
+                # If we have (S, N, K, F) and K>1, this is weird.
+                break
 
         # Squeeze intercept
         while intercept.ndim > 2:
+            orig = intercept.shape
             intercept = jnp.squeeze(
                 intercept,
                 axis=tuple(
                     i for i in range(1, intercept.ndim - 1) if intercept.shape[i] == 1
                 ),
             )
-            if intercept.ndim > 2:
-                intercept = intercept[:, 0, ...]
+            # print(f"DEBUG: Squeezed intercept {orig} -> {intercept.shape}")
+            if intercept.ndim > 2 and intercept.shape == orig:
+               break
 
         # Final squeeze to remove any trailing singleton dimensions
         intercept = jnp.squeeze(intercept)
@@ -232,7 +239,7 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
             log_rate = jnp.einsum("df,sf->sd", X, beta) + intercept[:, jnp.newaxis] + offset
         elif beta.ndim == 3:
             # Shape (S, N, F)
-            # Ensure N matches X
+             # Ensure N matches X
             if beta.shape[1] != X.shape[0]:
                  # Could be mismatch
                  pass

@@ -17,11 +17,11 @@ def patch_spec_class(cls):
         
         # Checking if property works.
         setattr(cls, '_structure_with_callables', None)
-        print(f"Patched {cls.__name__} with _structure_with_callables=None")
+        # print(f"Patched {cls.__name__} with _structure_with_callables=None")
 
 try:
     patch_spec_class(jdn._JointDistributionNamedSpec)
     patch_spec_class(jdab._JointDistributionNamedAutoBatchedSpec)
-    print("TFP Specs patched successfully.")
+    # print("TFP Specs patched successfully.")
 except Exception as e:
     print(f"Failed to patch TFP specs: {e}")
