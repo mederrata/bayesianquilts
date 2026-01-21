@@ -1,0 +1,229 @@
+# bayesianquilts - CPU Version
+# Multi-language Docker image with Python and R support
+#
+# Build: docker build -f Dockerfile.cpu -t bayesianquilts:cpu .
+# Run:   docker run -it --rm bayesianquilts:cpu
+
+FROM python:3.11-bookworm
+
+LABEL maintainer="Mederrata Research LLC <info@mederrata.com>"
+LABEL description="bayesianquilts - Interpretable Bayesian ML (CPU)"
+LABEL version="0.2.0"
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install system dependencies and R
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build essentials
+    build-essential \
+    gfortran \
+    cmake \
+    pkg-config \
+    # R and dependencies
+    r-base \
+    r-base-dev \
+    # R package dependencies
+    libcurl4-openssl-dev \
+    libssl-dev \
+    libxml2-dev \
+    libfontconfig1-dev \
+    libharfbuzz-dev \
+    libfribidi-dev \
+    libfreetype6-dev \
+    libpng-dev \
+    libtiff5-dev \
+    libjpeg-dev \
+    # Useful utilities
+    git \
+    wget \
+    curl \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up working directory
+WORKDIR /app
+
+# Copy the entire repository
+COPY . /app/
+
+# ============================================
+# Python Setup
+# ============================================
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install JAX for CPU
+RUN pip install --no-cache-dir "jax[cpu]"
+
+# Install core Python dependencies
+RUN pip install --no-cache-dir \
+    numpy \
+    scipy \
+    pandas \
+    polars \
+    pyarrow \
+    matplotlib \
+    seaborn \
+    plotly \
+    scikit-learn \
+    xgboost \
+    lightgbm \
+    arviz \
+    tqdm \
+    dill \
+    natsort
+
+# Install Jupyter ecosystem
+RUN pip install --no-cache-dir \
+    jupyter \
+    jupyterlab \
+    notebook \
+    ipywidgets \
+    nbformat \
+    nbconvert \
+    jupyterlab-git
+
+# Install additional ML/stats libraries
+RUN pip install --no-cache-dir \
+    statsmodels \
+    patsy \
+    lifelines \
+    imbalanced-learn \
+    category_encoders \
+    hyperopt \
+    optuna
+
+# Install cmdstanpy and compile CmdStan
+RUN pip install --no-cache-dir cmdstanpy \
+    && python -m cmdstanpy.install_cmdstan --cores $(nproc)
+
+# Install data processing utilities
+RUN pip install --no-cache-dir \
+    openpyxl \
+    xlsxwriter \
+    fastparquet \
+    h5py \
+    sqlalchemy \
+    requests \
+    aiohttp
+
+# Install additional visualization
+RUN pip install --no-cache-dir \
+    altair \
+    bokeh
+
+# Install JAX ecosystem
+RUN pip install --no-cache-dir \
+    flax \
+    optax \
+    orbax-checkpoint \
+    chex \
+    "tfp-nightly[jax]"
+
+# Install bayesianquilts Python package
+RUN pip install --no-cache-dir -e /app/python/
+
+# ============================================
+# R Setup
+# ============================================
+
+# Install tidyverse and core R packages (this takes a while)
+RUN R -e "install.packages(c( \
+    'tidyverse', \
+    'ggplot2', \
+    'dplyr', \
+    'tidyr', \
+    'readr', \
+    'purrr', \
+    'tibble', \
+    'stringr', \
+    'forcats', \
+    'lubridate' \
+    ), repos='https://cloud.r-project.org/', Ncpus=parallel::detectCores())"
+
+# Install data manipulation and IO packages
+RUN R -e "install.packages(c( \
+    'data.table', \
+    'arrow', \
+    'jsonlite', \
+    'yaml', \
+    'readxl', \
+    'writexl', \
+    'haven', \
+    'DBI', \
+    'RSQLite' \
+    ), repos='https://cloud.r-project.org/', Ncpus=parallel::detectCores())"
+
+# Install statistics and ML packages
+RUN R -e "install.packages(c( \
+    'R6', \
+    'loo', \
+    'caret', \
+    'glmnet', \
+    'randomForest', \
+    'xgboost', \
+    'e1071', \
+    'MASS', \
+    'Matrix', \
+    'mvtnorm', \
+    'MCMCpack' \
+    ), repos='https://cloud.r-project.org/', Ncpus=parallel::detectCores())"
+
+# Install visualization packages
+RUN R -e "install.packages(c( \
+    'plotly', \
+    'ggrepel', \
+    'gridExtra', \
+    'cowplot', \
+    'viridis', \
+    'scales', \
+    'patchwork' \
+    ), repos='https://cloud.r-project.org/', Ncpus=parallel::detectCores())"
+
+# Install Bayesian packages
+RUN R -e "install.packages(c( \
+    'brms', \
+    'rstan', \
+    'StanHeaders', \
+    'rstanarm', \
+    'bayesplot', \
+    'posterior', \
+    'cmdstanr' \
+    ), repos=c('https://mc-stan.org/r-packages/', 'https://cloud.r-project.org/'), Ncpus=parallel::detectCores())" || true
+
+# Install development and utility packages
+RUN R -e "install.packages(c( \
+    'devtools', \
+    'testthat', \
+    'roxygen2', \
+    'knitr', \
+    'rmarkdown', \
+    'markdown', \
+    'httr', \
+    'curl' \
+    ), repos='https://cloud.r-project.org/', Ncpus=parallel::detectCores())"
+
+# Install bayesianquilts R package
+RUN R -e "devtools::install('/app/R', dependencies=FALSE)"
+
+# ============================================
+# Verification
+# ============================================
+
+# Verify Python installation
+RUN python -c "import bayesianquilts; print(f'Python bayesianquilts installed successfully')"
+RUN python -c "import jax; print(f'JAX version: {jax.__version__}'); print(f'JAX devices: {jax.devices()}')"
+
+# Verify R installation
+RUN R -e "library(bayesianquilts); cat('R bayesianquilts installed successfully\n')"
+
+# Expose Jupyter port
+EXPOSE 8888
+
+# Set default command (can be overridden)
+# To run Jupyter: docker run -p 8888:8888 bayesianquilts:cpu jupyter lab --ip=0.0.0.0 --allow-root --no-browser
+CMD ["python"]
