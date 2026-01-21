@@ -396,20 +396,34 @@ class SmallStepTransformation(Transformation):
         # For vector params q is (S, N, K). h * q needs h expanded.
         
         def update_step(t, q):
-            # t and q have same shape
-            if q.ndim == 2:
-                # (S, N)
-                return t + h * q
-            else:
-                # (S, N, K...)
-                # Expand h to match rank
-                # We assume h aligns with N (axis 1)
-                # We need to add axes for K...
-                # (1, N) -> (1, N, 1, 1...)
-                h_exp = h
-                for _ in range(q.ndim - 2):
-                    h_exp = h_exp[..., jnp.newaxis]
-                return t + h_exp * q
+            # t: (S, 1, K...) or (S, 1, 1)
+            # q: (S, N, K...) or (S, N)
+            
+            # If t has shape (S, 1, 1) [from scalar param], q might satisfy q.ndim == 2 (S, N)
+            # We want to add them to get (S, N, 1).
+            # t is already (S, 1, 1).
+            # If q is (S, N), we need to expand it to (S, N, 1).
+            
+            q_expanded = q
+            if t.ndim > q.ndim:
+                 # Check if t is (...) -> (S, 1, ...)
+                 # and q is (S, N)
+                 # We need to insert dimensions into q to match t's rank
+                 # t: (S, 1, D1, D2...)
+                 # q: (S, N)
+                 # q -> (S, N, 1, 1...)
+                 for _ in range(t.ndim - q.ndim):
+                     q_expanded = q_expanded[..., jnp.newaxis]
+            
+            # Now q_expanded should have same rank as t, but with N in axis 1.
+            # h is (1, N).
+            
+            # Expand h to match q_expanded rank
+            h_exp = h
+            for _ in range(q_expanded.ndim - h.ndim):
+                h_exp = h_exp[..., jnp.newaxis]
+                
+            return t + h_exp * q_expanded
 
         theta_new = jax.tree_util.tree_map(update_step, theta, Q)
 
@@ -1233,6 +1247,8 @@ class AdaptiveImportanceSampler:
             "khat": jnp.full(log_ell.shape[1], jnp.inf),  # (N,)
             "p_loo_eta": jnp.zeros(log_ell.shape[1]),
             "p_loo_psis": jnp.zeros(log_ell.shape[1]),
+            "ll_loo_eta": jnp.full(log_ell.shape[1], -jnp.inf),
+            "ll_loo_psis": jnp.full(log_ell.shape[1], -jnp.inf),
         }
 
         results = {}
