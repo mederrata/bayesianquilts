@@ -2006,11 +2006,27 @@ class MICEBayesianLOO(MICELogistic):
     def _result_to_dict(self, result: UnivariateModelResult) -> Dict[str, Any]:
         """Convert UnivariateModelResult to a serializable dict."""
         d = asdict(result)
+
+        def to_python(x):
+            if x is None:
+                return None
+            if isinstance(x, (np.ndarray, jnp.ndarray)):
+                return np.array(x).tolist()
+            if isinstance(x, (np.number, jnp.number)):
+                return x.item()
+            return x
+
         # Convert params (JAX arrays) to nested lists
         if d['params'] is not None:
             d['params'] = {
-                k: np.array(v).tolist() for k, v in d['params'].items()
+                k: to_python(v) for k, v in d['params'].items()
             }
+        
+        # Convert other potential numpy/jax fields
+        for field in ['predictor_mean', 'predictor_std', 'beta_mean', 'intercept_mean', 'cutpoints_mean']:
+            if field in d:
+                d[field] = to_python(d[field])
+
         return d
 
     def _dict_to_result(self, d: Dict[str, Any]) -> UnivariateModelResult:
@@ -2020,6 +2036,16 @@ class MICEBayesianLOO(MICELogistic):
             d['params'] = {
                 k: jnp.array(v, dtype=self.dtype) for k, v in d['params'].items()
             }
+        
+        # Convert numpy lists back to arrays if needed
+        # beta_mean can be float or array
+        if d.get('beta_mean') is not None and isinstance(d['beta_mean'], list):
+            d['beta_mean'] = np.array(d['beta_mean'])
+            
+        # cutpoints_mean is array
+        if d.get('cutpoints_mean') is not None and isinstance(d['cutpoints_mean'], list):
+            d['cutpoints_mean'] = np.array(d['cutpoints_mean'])
+
         return UnivariateModelResult(**d)
 
     def save(self, path: Union[str, Path]) -> None:
@@ -2244,3 +2270,110 @@ class MICEBayesianLOO(MICELogistic):
         instance.prediction_graph = state.get('prediction_graph', {})
 
         return instance
+
+    def get_top_k_predictors(
+        self, 
+        target: Union[int, str], 
+        k: int = 5, 
+        metric: str = 'elpd_loo'
+    ) -> pd.DataFrame:
+        """
+        Get top k predictors for a given target variable.
+        
+        Args:
+            target: Target variable index or name.
+            k: Number of top predictors to return.
+            metric: Metric to sort by ('elpd_loo' or 'elpd_loo_per_obs').
+            
+        Returns:
+            DataFrame with columns: ['predictor_idx', 'predictor_name', 'n_obs', 'elpd_loo', 'elpd_loo_per_obs']
+        """
+        # Resolve target index
+        if isinstance(target, str):
+            try:
+                target_idx = self.variable_names.index(target)
+            except ValueError:
+                raise ValueError(f"Variable '{target}' not found in variable_names.")
+        else:
+            target_idx = target
+            
+        # Collect results for this target
+        results_list = []
+        
+        # Check univariate results
+        for (t_idx, p_idx), result in self.univariate_results.items():
+            if t_idx == target_idx:
+                predictor_name = self.variable_names[p_idx] if p_idx < len(self.variable_names) else f"Var_{p_idx}"
+                results_list.append({
+                    'predictor_idx': p_idx,
+                    'predictor_name': predictor_name,
+                    'n_obs': result.n_obs,
+                    'elpd_loo': result.elpd_loo,
+                    'elpd_loo_per_obs': result.elpd_loo_per_obs,
+                    'khat_max': result.khat_max
+                })
+                
+        # Create DataFrame
+        if not results_list:
+            return pd.DataFrame(columns=['predictor_idx', 'predictor_name', 'n_obs', 'elpd_loo', 'elpd_loo_per_obs', 'khat_max'])
+            
+        df = pd.DataFrame(results_list)
+        
+        # Sort
+        if metric not in df.columns:
+            raise ValueError(f"Invalid metric: {metric}. Must be one of {df.columns.tolist()}")
+            
+        df = df.sort_values(by=metric, ascending=False)
+        
+        return df.head(k)
+
+    def get_all_predictors_loo(
+        self, 
+        metric: str = 'elpd_loo',
+        k: Optional[int] = None
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Get LOO values for all predictors for all targets.
+        
+        Args:
+            metric: Metric to use ('elpd_loo' or 'elpd_loo_per_obs').
+            k: If provided, only return top k predictors for each target.
+            
+        Returns:
+            Dict mapping target_name -> {predictor_name: metric_value}
+            The inner dictionary is sorted by metric value (descending).
+        """
+        summary = {}
+        
+        # Initialize sub-dicts for all variables
+        for name in self.variable_names:
+            summary[name] = {}
+            
+        for (t_idx, p_idx), result in self.univariate_results.items():
+            # Get names
+            target_name = self.variable_names[t_idx] if t_idx < len(self.variable_names) else f"Var_{t_idx}"
+            predictor_name = self.variable_names[p_idx] if p_idx < len(self.variable_names) else f"Var_{p_idx}"
+            
+            # Get value
+            if metric == 'elpd_loo':
+                val = result.elpd_loo
+            elif metric == 'elpd_loo_per_obs':
+                val = result.elpd_loo_per_obs
+            else:
+                 raise ValueError(f"Invalid metric: {metric}")
+                 
+            # Store
+            summary[target_name][predictor_name] = float(val)
+
+        # Sort and limit
+        for target in summary:
+            # Sort by value descending
+            sorted_predictors = dict(sorted(summary[target].items(), key=lambda item: item[1], reverse=True))
+            
+            # Limit to k if requested
+            if k is not None:
+                sorted_predictors = dict(list(sorted_predictors.items())[:k])
+                
+            summary[target] = sorted_predictors
+
+        return summary
