@@ -384,9 +384,9 @@ The library implements methods from peer-reviewed research:
 
 ## API Stability
 
-The API is evolving (version 0.1.2). Breaking changes possible until 1.0 release. Pin versions in production:
+The API is evolving (version 0.2.0). Breaking changes possible until 1.0 release. Pin versions in production:
 ```
-bayesianquilts==0.1.2
+bayesianquilts==0.2.0
 ```
 
 ## Key Dependencies to Understand

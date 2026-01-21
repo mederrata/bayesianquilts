@@ -1,0 +1,27 @@
+Package: bayesianquilts
+Title: Bayesian Quilts
+Version: 0.2.0
+Authors@R: person("Joshua", "Chang", email = "josh@mederrata.com", role = c("aut", "cre"))
+Description: R port of the bayesianquilts library for interpretable Bayesian machine learning.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Imports:
+    R6,
+    matrixStats,
+    loo
+RoxygenNote: 7.2.3
+
+Package: bayesianquilts
+Title: Bayesian Quilts
+Version: 0.1.0
+Authors@R: person("Joshua", "Chang", email = "josh@mederrata.com", role = c("aut", "cre"))
+Description: R port of the bayesianquilts library for interpretable Bayesian machine learning.
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Imports:
+    R6,
+    matrixStats,
+    loo
+RoxygenNote: 7.2.3
