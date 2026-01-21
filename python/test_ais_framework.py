@@ -16,9 +16,9 @@ sys.path.insert(0, '/Users/josh/workspace/bayesianquilts')
 from bayesianquilts.metrics.ais import (
     AdaptiveImportanceSampler,
     LogisticRegressionLikelihood,
-    PoissonRegressionLikelihood,
     LinearRegressionLikelihood
 )
+from bayesianquilts.predictors.regression.poisson import PoissonRegressionLikelihood
 
 
 def test_logistic_regression_ais():
@@ -56,7 +56,7 @@ def test_logistic_regression_ais():
 
     # Run AIS with different transformations
     results = ais_sampler.adaptive_is_loo(
-        data, params, hbar=1.0, variational=False,
+        data, params, initial_step_size=1.0, variational=False,
         transformations=['ll', 'kl', 'identity']
     )
 
@@ -64,7 +64,8 @@ def test_logistic_regression_ais():
     for transform_name, result in results.items():
         print(f"\n{transform_name.upper()} Transformation:")
         print(f"  - k-hat range: [{jnp.min(result['khat']):.3f}, {jnp.max(result['khat']):.3f}]")
-        print(f"  - Weight entropy range: [{jnp.min(result['weight_entropy']):.3f}, {jnp.max(result['weight_entropy']):.3f}]")
+        if 'weight_entropy' in result:
+            print(f"  - Weight entropy range: [{jnp.min(result['weight_entropy']):.3f}, {jnp.max(result['weight_entropy']):.3f}]")
         print(f"  - Mean p_loo (eta): {jnp.mean(result['p_loo_eta']):.3f}")
         print(f"  - Mean p_loo (PSIS): {jnp.mean(result['p_loo_psis']):.3f}")
 
@@ -105,8 +106,9 @@ def test_poisson_regression_ais():
 
     # Run AIS
     results = ais_sampler.adaptive_is_loo(
-        data, params, hbar=0.5, variational=False,
-        transformations=['ll', 'var']
+        data, params, initial_step_size=0.5, variational=False,
+        transformations=['ll', 'var'],
+        verbose=True
     )
 
     print(f"Transformations tested: {list(results.keys())}")
@@ -154,7 +156,7 @@ def test_linear_regression_ais():
 
     # Run AIS
     results = ais_sampler.adaptive_is_loo(
-        data, params, hbar=1.5, variational=False,
+        data, params, initial_step_size=1.5, variational=False,
         transformations=['ll', 'kl', 'var', 'identity']
     )
 
@@ -162,7 +164,8 @@ def test_linear_regression_ais():
     for transform_name, result in results.items():
         print(f"\n{transform_name.upper()} Transformation:")
         print(f"  - k-hat range: [{jnp.min(result['khat']):.3f}, {jnp.max(result['khat']):.3f}]")
-        print(f"  - PSIS entropy range: [{jnp.min(result['psis_entropy']):.3f}, {jnp.max(result['psis_entropy']):.3f}]")
+        if 'psis_entropy' in result:
+            print(f"  - PSIS entropy range: [{jnp.min(result['psis_entropy']):.3f}, {jnp.max(result['psis_entropy']):.3f}]")
 
     return results
 
@@ -223,13 +226,13 @@ def test_with_priors():
     # Test both variational and non-variational modes
     print("\nNon-variational mode (use full posterior):")
     results_full = ais_sampler.adaptive_is_loo(
-        data, params, hbar=1.0, variational=False,
+        data, params, initial_step_size=1.0, variational=False,
         transformations=['ll', 'identity']
     )
 
     print("\nVariational mode (trust surrogate):")
     results_var = ais_sampler.adaptive_is_loo(
-        data, params, hbar=1.0, variational=True,
+        data, params, initial_step_size=1.0, variational=True,
         transformations=['ll', 'identity']
     )
 
