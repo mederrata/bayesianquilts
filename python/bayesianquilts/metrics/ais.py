@@ -70,13 +70,6 @@ class LikelihoodFunction(ABC):
         """
         pass
 
-    def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
-        """Extract and flatten parameters into a single array.
-        
-        DEPRECATED: Use PyTree operations instead.
-        """
-        raise NotImplementedError("extract_parameters is deprecated.")
-
 
 class Transformation(ABC):
     """Abstract base class for AIS transformations."""
@@ -175,20 +168,6 @@ class Transformation(ABC):
 
         return moments
 
-    def _compute_importance_weights(
-        self,
-        data: Any,
-        params_original: Dict[str, Any],
-        params_transformed: Dict[str, Any],
-        log_jacobian: jnp.ndarray,
-        variational: bool,
-        log_pi_original: jnp.ndarray,
-        log_ell_original: jnp.ndarray = None,
-    ) -> Tuple[jnp.ndarray, ...]:
-        """Compute importance weights."""
-        # Placeholder mainly, but helper method below does the work.
-        pass
-
     def compute_importance_weights_helper(
         self,
         likelihood_fn: LikelihoodFunction,
@@ -201,8 +180,11 @@ class Transformation(ABC):
         log_ell_original: jnp.ndarray = None,
         surrogate_log_prob_fn=None,
     ) -> Tuple[jnp.ndarray, ...]:
+        """Compute importance weights for transformed parameters.
 
-        # Copied logic from _compute_importance_weights
+        Returns:
+            Tuple of (eta_weights, psis_weights, khat, log_ell_new).
+        """
         log_ell_new = likelihood_fn.log_likelihood(data, params_transformed)
 
         if variational and surrogate_log_prob_fn is not None:
@@ -265,12 +247,32 @@ class SmallStepTransformation(Transformation):
     ) -> jnp.ndarray:
         """Compute divergence of Q using generic autodiff (Trace of Jacobian).
 
-        For complex PyTree structures where leaves have different dimensionalities
-        (e.g., some leaves have shape (S, N, K) and others have (S, N, I, J)),
-        we return zero divergence as an approximation. This is reasonable because:
-        1. The Jacobian correction term is often small
-        2. Many LOO implementations ignore this term
-        3. Computing exact divergence for complex PyTrees is expensive and error-prone
+        The divergence div(Q) is used to compute the log Jacobian determinant:
+            log|J| ≈ log(1 + h * div(Q))
+
+        **Zero Divergence Fallback**: Returns zero divergence when:
+        - PyTree is empty
+        - Leaves have fewer than 2 dimensions
+        - Leaves have inconsistent batch shapes
+        - Any leaf has more than 3 dimensions (complex structure)
+
+        This approximation is reasonable because:
+        1. The Jacobian correction term is often small relative to other terms
+        2. Many LOO implementations (e.g., standard PSIS-LOO) ignore this term
+        3. Computing exact divergence for complex PyTrees is O(K) expensive
+        4. Zero divergence corresponds to assuming volume-preserving transformation
+
+        For simple 3D PyTrees (all leaves shape (S, N, K)), exact divergence
+        is computed via JVP-based trace estimation.
+
+        Args:
+            theta: Current parameter PyTree
+            data: Input data
+            params: Original model parameters
+            current_log_ell: Current log-likelihood values (S, N)
+
+        Returns:
+            Divergence array of shape (S, N), or zeros if fallback is used.
         """
         leaves, treedef = jax.tree_util.tree_flatten(theta)
 
@@ -506,83 +508,6 @@ class SmallStepTransformation(Transformation):
         return {
             "theta_new": theta_new,
             "log_jacobian": log_jacobian,
-            "eta_weights": eta_weights,
-            "psis_weights": psis_weights,
-            "khat": khat,
-            "predictions": predictions,
-            "log_ell_new": log_ell_new,
-            "weight_entropy": weight_entropy,
-            "psis_entropy": psis_entropy,
-            "p_loo_eta": p_loo_eta,
-            "p_loo_psis": p_loo_psis,
-            "ll_loo_eta": ll_loo_eta,
-            "ll_loo_psis": ll_loo_psis,
-        }
-
-        log_jac = jnp.log(jnp.abs(1.0 + h * div_Q))
-
-        if log_jac.ndim > 2:
-            log_jac = jnp.squeeze(log_jac)
-
-        # Reconstruct params to compute weights
-        params_new = {}
-        # theta_new is (S, N, K)
-        # We need to reconstruct.
-        # This part is model specific... extracting K back to dict structure.
-        # For now assuming we can loop over N efficiently or vmap?
-
-        # Reconstruct logic copied/adapted:
-        # NOTE: This reconstruction loop is slow in Python.
-        # But we must do it to get params_new for log_likelihood call.
-
-        # Optimization: if we can, avoid full reconstruction or do it vectorized.
-        # But `reconstruct_parameters` is abstract.
-        # Let's assume we do it per N for now as in legacy.
-
-        # Pre-calc shapes
-        S, N = log_ell.shape
-
-        for i in range(N):
-            p_i = self.likelihood_fn.reconstruct_parameters(theta_new[:, i, :], params)
-            if i == 0:
-                for k, v in p_i.items():
-                    # v is (S, ...) -> (S, 1, ...)
-                    params_new[k] = v[:, jnp.newaxis, ...]
-            else:
-                for k, v in p_i.items():
-                    params_new[k] = jnp.concatenate(
-                        [params_new[k], v[:, jnp.newaxis, ...]], axis=1
-                    )
-
-        # Compute weights
-        eta_weights, psis_weights, khat, log_ell_new = (
-            self.compute_importance_weights_helper(
-                self.likelihood_fn,
-                data,
-                params,
-                params_new,
-                log_jac,
-                variational,
-                log_pi,
-                log_ell_original,
-                surrogate_log_prob_fn,
-            )
-        )
-
-        predictions = self.likelihood_fn.log_likelihood(data, params_new)
-
-        weight_entropy = self.entropy(eta_weights)
-        psis_entropy = self.entropy(psis_weights)
-
-        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
-        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
-
-        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
-        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
-
-        return {
-            "theta_new": theta_new,
-            "log_jacobian": log_jac,
             "eta_weights": eta_weights,
             "psis_weights": psis_weights,
             "khat": khat,
@@ -839,9 +764,6 @@ class PMM2(SmallStepTransformation):
 
         moments = Transformation.compute_moments(params, weights)
 
-        # We assume theta is PyTree (Dict)
-        # Ideally we use extract_parameters on a constructed dict.
-
         Q_dict = {}
 
         for name, value in params.items():
@@ -888,14 +810,9 @@ class MM1(GlobalTransformation):
         log_ell_original=None,
         **kwargs,
     ):
-        # Legacy _transform_mm1 logic
-        # ...
-        # For refactor, we can just invoke _transform_mm1 if we port it?
-        # Or reimplement.
-        # Reimplementing briefly for cleanliness.
-
+        """Apply MM1 (Moment Matching 1) transformation - shift only."""
         if log_ell_original is None:
-            raise ValueError("required")
+            raise ValueError("log_ell_original is required for MM1")
         log_w = -log_ell_original
         weights = jnp.exp(log_w)
         moments = Transformation.compute_moments(params, weights)
@@ -957,6 +874,8 @@ class MM1(GlobalTransformation):
 
 
 class MM2(GlobalTransformation):
+    """Moment Matching 2 transformation - shift and scale."""
+
     def __call__(
         self,
         max_iter,
@@ -968,8 +887,9 @@ class MM2(GlobalTransformation):
         log_ell_original=None,
         **kwargs,
     ):
+        """Apply MM2 (Moment Matching 2) transformation - shift and scale."""
         if log_ell_original is None:
-            raise ValueError("required")
+            raise ValueError("log_ell_original is required for MM2")
         log_w = -log_ell_original
         weights = jnp.exp(log_w)
         moments = Transformation.compute_moments(params, weights)
@@ -994,7 +914,7 @@ class MM2(GlobalTransformation):
                     jnp.log(ratio), axis=tuple(range(1, ratio.ndim))
                 )[jnp.newaxis, :]
 
-        theta_new = self.likelihood_fn.extract_parameters(new_params)
+        theta_new = new_params
 
         eta_weights, psis_weights, khat, log_ell_new = (
             self.compute_importance_weights_helper(
@@ -1215,7 +1135,14 @@ class AdaptiveImportanceSampler:
             likelihood_fn: Likelihood function implementing LikelihoodFunction interface
             prior_log_prob_fn: Function computing log prior probability
             surrogate_log_prob_fn: Function computing log surrogate probability (for variational)
+
+        Raises:
+            TypeError: If likelihood_fn is not a LikelihoodFunction instance.
         """
+        if not isinstance(likelihood_fn, LikelihoodFunction):
+            raise TypeError(
+                f"likelihood_fn must be a LikelihoodFunction instance, got {type(likelihood_fn)}"
+            )
         self.likelihood_fn = likelihood_fn
         self.prior_log_prob_fn = prior_log_prob_fn
         self.surrogate_log_prob_fn = surrogate_log_prob_fn
@@ -1255,7 +1182,25 @@ class AdaptiveImportanceSampler:
 
         Returns:
             Dictionary of best results
+
+        Raises:
+            ValueError: If data or params are empty or have invalid shapes.
         """
+        # Input validation
+        if not params:
+            raise ValueError("params cannot be empty")
+
+        # Validate params has array-like leaves
+        param_leaves = jax.tree_util.tree_leaves(params)
+        if not param_leaves:
+            raise ValueError("params must contain at least one parameter array")
+
+        first_param = param_leaves[0]
+        if first_param.ndim < 1:
+            raise ValueError("Parameter arrays must have at least 1 dimension (samples)")
+        n_samples = first_param.shape[0]
+        if n_samples == 0:
+            raise ValueError("Parameter arrays must have at least 1 sample")
 
         # Initial computations
         log_ell = self.likelihood_fn.log_likelihood(data, params)  # (S, N)
@@ -1464,12 +1409,6 @@ class AdaptiveImportanceSampler:
             "surrogate_log_prob_fn": self.surrogate_log_prob_fn,
         }
 
-        # No need to recompute theta_expanded, it was computed earlier.
-        # Ensure common_kwargs uses the correct theta_expanded if passed explicitly?
-        # Actually SmallStepTransformation takes theta as arg, not from common_kwargs.
-        # common_kwargs has log_ell, etc.
-        pass
-
         # Run sweeps
         for name, transform in transforms.items():
             if verbose:
@@ -1532,46 +1471,6 @@ class AdaptiveImportanceSampler:
         results["best"] = best_metrics
         return results
 
-    # Legacy methods have been removed in favor of Transformation subclasses.
-
-
-# Legacy classes for backward compatibility
-class AdaptiveIsSampler(ABC):
-    def __init__(self):
-        return
-
-
-class Bijection(ABC):
-    @abstractmethod
-    def call(self, data, **params):
-        return
-
-    @abstractmethod
-    def inverse(self):
-        return
-
-    @abstractmethod
-    def forward_grad(self):
-        return
-
-    def __init__(self):
-        return
-
-
-class AutoDiffBijection(Bijection):
-    def __init__(self, model, hbar=1.0):
-        self.model = model
-        self.hbar = hbar
-        return
-
-    def call(self, data, params):
-        return self.model.adaptive_is_loo(data, params, self.hbar)
-
-
-class SmallStepTransformation(Bijection):
-    def call(self):
-        return
-
 
 # Example implementations for common likelihood functions
 
@@ -1608,8 +1507,12 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
 
     def log_likelihood_gradient(
         self, data: Dict[str, Any], params: Dict[str, Any]
-    ) -> jnp.ndarray:
-        """Compute gradient of log-likelihood w.r.t. parameters."""
+    ) -> Dict[str, Any]:
+        """Compute gradient of log-likelihood w.r.t. parameters.
+
+        Returns:
+            PyTree matching params structure with shapes (S, N, ...).
+        """
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)
 
@@ -1623,27 +1526,24 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         sigma = jax.nn.sigmoid(mu)
 
         # Gradient w.r.t. linear predictor
-        grad_mu = y[jnp.newaxis, :] - sigma  # (n_samples, n_data)
+        grad_mu = y[jnp.newaxis, :] - sigma  # (S, N)
 
-        # Gradient w.r.t. beta: X.T @ grad_mu
-        grad_beta = jnp.einsum(
-            "df,sd->sdf", X, grad_mu
-        )  # (n_samples, n_data, n_features)
+        # Gradient w.r.t. beta: (S, N, n_features)
+        grad_beta = jnp.einsum("df,sd->sdf", X, grad_mu)
 
-        # Gradient w.r.t. intercept
-        grad_intercept = grad_mu[..., jnp.newaxis]  # (n_samples, n_data, 1)
+        # Gradient w.r.t. intercept: (S, N)
+        grad_intercept = grad_mu
 
-        # Concatenate gradients
-        gradients = jnp.concatenate(
-            [grad_beta, grad_intercept], axis=-1
-        )  # (n_samples, n_data, n_features + 1)
-
-        return gradients
+        return {"beta": grad_beta, "intercept": grad_intercept}
 
     def log_likelihood_hessian_diag(
         self, data: Dict[str, Any], params: Dict[str, Any]
-    ) -> jnp.ndarray:
-        """Compute diagonal of Hessian of log-likelihood."""
+    ) -> Dict[str, Any]:
+        """Compute diagonal of Hessian of log-likelihood.
+
+        Returns:
+            PyTree matching params structure with shapes (S, N, ...).
+        """
         X = jnp.asarray(data["X"], dtype=self.dtype)
 
         beta = params["beta"]
@@ -1656,49 +1556,15 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         sigma = jax.nn.sigmoid(mu)
 
         # Hessian diagonal w.r.t. linear predictor
-        hess_diag_mu = -sigma * (1 - sigma)  # (n_samples, n_data)
+        hess_diag_mu = -sigma * (1 - sigma)  # (S, N)
 
-        # Hessian diagonal w.r.t. beta: X^2 * hess_diag_mu
-        hess_diag_beta = jnp.einsum(
-            "df,sd->sdf", X**2, hess_diag_mu
-        )  # (n_samples, n_data, n_features)
+        # Hessian diagonal w.r.t. beta: (S, N, n_features)
+        hess_diag_beta = jnp.einsum("df,sd->sdf", X**2, hess_diag_mu)
 
-        # Hessian diagonal w.r.t. intercept
-        hess_diag_intercept = hess_diag_mu[..., jnp.newaxis]  # (n_samples, n_data, 1)
+        # Hessian diagonal w.r.t. intercept: (S, N)
+        hess_diag_intercept = hess_diag_mu
 
-        # Concatenate
-        hess_diag = jnp.concatenate([hess_diag_beta, hess_diag_intercept], axis=-1)
-
-        return hess_diag
-
-
-    def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
-        beta = params["beta"]  # (n_samples, n_features)
-        intercept = params["intercept"]  # (n_samples,)
-
-        # Ensure we don't have redundant trailing dims of 1
-        if intercept.ndim > 0 and intercept.shape[-1] == 1:
-            intercept = jnp.squeeze(intercept, axis=-1)
-
-        # Broadcast to matching batch shapes
-        target_shape = jnp.broadcast_shapes(beta.shape[:-1], intercept.shape)
-        beta = jnp.broadcast_to(beta, target_shape + (beta.shape[-1],))
-        intercept = jnp.broadcast_to(intercept, target_shape)
-
-        # Concatenate
-        theta = jnp.concatenate([beta, intercept[..., jnp.newaxis]], axis=-1)
-        return theta
-
-    def reconstruct_parameters(
-        self, flat_params: jnp.ndarray, template: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Reconstruct parameters from flattened array."""
-        n_features = template["beta"].shape[-1]
-
-        beta = flat_params[..., :n_features]
-        intercept = flat_params[..., n_features]
-
-        return {"beta": beta, "intercept": intercept}
+        return {"beta": hess_diag_beta, "intercept": hess_diag_intercept}
 
 
 class LinearRegressionLikelihood(LikelihoodFunction):
@@ -1742,8 +1608,12 @@ class LinearRegressionLikelihood(LikelihoodFunction):
 
     def log_likelihood_gradient(
         self, data: Dict[str, Any], params: Dict[str, Any]
-    ) -> jnp.ndarray:
-        """Compute gradient of log-likelihood."""
+    ) -> Dict[str, Any]:
+        """Compute gradient of log-likelihood.
+
+        Returns:
+            PyTree matching params structure with shapes (S, N, ...).
+        """
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)
 
@@ -1755,31 +1625,33 @@ class LinearRegressionLikelihood(LikelihoodFunction):
             mu_lin = jnp.einsum("df,sdf->sd", X, beta)
         else:
             mu_lin = jnp.einsum("df,sf->sd", X, beta)
-        
-        # Consistent broadcasting for intercept and sigma
-        if intercept.ndim == 1:
-            intercept = intercept[:, jnp.newaxis]
-        if log_sigma.ndim == 1:
-            log_sigma = log_sigma[:, jnp.newaxis]
 
-        mu = mu_lin + jnp.broadcast_to(intercept, mu_lin.shape)
-        sigma = jnp.exp(jnp.broadcast_to(log_sigma, mu_lin.shape))
+        # Consistent broadcasting for intercept and sigma
+        intercept_bc = intercept[:, jnp.newaxis] if intercept.ndim == 1 else intercept
+        log_sigma_bc = log_sigma[:, jnp.newaxis] if log_sigma.ndim == 1 else log_sigma
+
+        mu = mu_lin + jnp.broadcast_to(intercept_bc, mu_lin.shape)
+        sigma = jnp.exp(jnp.broadcast_to(log_sigma_bc, mu_lin.shape))
         residuals = y[jnp.newaxis, :] - mu
 
-        # Gradients
+        # Gradients as PyTree
         grad_beta = jnp.einsum("df,sd->sdf", X, residuals / sigma**2)
-        grad_intercept = (residuals / sigma**2)[..., jnp.newaxis]
-        grad_log_sigma = (-1 + (residuals / sigma) ** 2)[..., jnp.newaxis]
+        grad_intercept = residuals / sigma**2  # (S, N)
+        grad_log_sigma = -1 + (residuals / sigma) ** 2  # (S, N)
 
-        gradients = jnp.concatenate(
-            [grad_beta, grad_intercept, grad_log_sigma], axis=-1
-        )
-        return gradients
+        result = {"beta": grad_beta, "intercept": grad_intercept}
+        if "log_sigma" in params:
+            result["log_sigma"] = grad_log_sigma
+        return result
 
     def log_likelihood_hessian_diag(
         self, data: Dict[str, Any], params: Dict[str, Any]
-    ) -> jnp.ndarray:
-        """Compute diagonal of Hessian."""
+    ) -> Dict[str, Any]:
+        """Compute diagonal of Hessian.
+
+        Returns:
+            PyTree matching params structure with shapes (S, N, ...).
+        """
         X = jnp.asarray(data["X"], dtype=self.dtype)
         y = jnp.asarray(data["y"], dtype=self.dtype)
 
@@ -1793,75 +1665,20 @@ class LinearRegressionLikelihood(LikelihoodFunction):
             mu_lin = jnp.einsum("df,sf->sd", X, beta)
 
         # Consistent broadcasting for intercept and sigma
-        if intercept.ndim == 1:
-            intercept = intercept[:, jnp.newaxis]
-        if log_sigma.ndim == 1:
-            log_sigma = log_sigma[:, jnp.newaxis]
+        intercept_bc = intercept[:, jnp.newaxis] if intercept.ndim == 1 else intercept
+        log_sigma_bc = log_sigma[:, jnp.newaxis] if log_sigma.ndim == 1 else log_sigma
 
-        mu = mu_lin + jnp.broadcast_to(intercept, mu_lin.shape)
-        sigma = jnp.exp(jnp.broadcast_to(log_sigma, mu_lin.shape))
+        mu = mu_lin + jnp.broadcast_to(intercept_bc, mu_lin.shape)
+        sigma = jnp.exp(jnp.broadcast_to(log_sigma_bc, mu_lin.shape))
         residuals = y[jnp.newaxis, :] - mu
-        
-        # Ensure sigma is broadcast to (S, N) for division
         sigma_sq = sigma**2
-        
-        # Hessian diagonals
-        # X**2 is (N, K)
-        # 1/sigma**2 is (S, N)
-        # result (S, N, K)
+
+        # Hessian diagonals as PyTree
         hess_diag_beta = jnp.einsum("df,sd->sdf", -(X**2), 1.0 / sigma_sq)
-        
-        # intercept hessian: -1/sigma**2
-        # (S, N) -> (S, N, 1)
-        hess_diag_intercept = (-1.0 / sigma_sq)[..., jnp.newaxis]
-        
-        # log_sigma hessian: -2 * (residual/sigma)**2
-        hess_diag_log_sigma = (-2.0 * (residuals / sigma) ** 2)[..., jnp.newaxis]
+        hess_diag_intercept = -1.0 / sigma_sq  # (S, N)
+        hess_diag_log_sigma = -2.0 * (residuals / sigma) ** 2  # (S, N)
 
-        hess_diag = jnp.concatenate(
-            [hess_diag_beta, hess_diag_intercept, hess_diag_log_sigma], axis=-1
-        )
-        return hess_diag
-
-
-    def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
-        """Extract parameters into flattened array."""
-        beta = params["beta"]
-        intercept = params["intercept"]
-        log_sigma = params.get("log_sigma", jnp.zeros(beta.shape[:-1]))
-
-        # Ensure we don't have redundant trailing dims of 1
-        if intercept.ndim > 0 and intercept.shape[-1] == 1:
-            intercept = jnp.squeeze(intercept, axis=-1)
-        if log_sigma.ndim > 0 and log_sigma.shape[-1] == 1:
-            log_sigma = jnp.squeeze(log_sigma, axis=-1)
-
-        # Dynamic broadcasting
-        target_shape = jnp.broadcast_shapes(
-            beta.shape[:-1], intercept.shape, log_sigma.shape
-        )
-        beta = jnp.broadcast_to(beta, target_shape + (beta.shape[-1],))
-        intercept = jnp.broadcast_to(intercept, target_shape)
-        log_sigma = jnp.broadcast_to(log_sigma, target_shape)
-
-
-        theta = jnp.concatenate(
-            [beta, intercept[..., jnp.newaxis], log_sigma[..., jnp.newaxis]], axis=-1
-        )
-        return theta
-
-    def reconstruct_parameters(
-        self, flat_params: jnp.ndarray, template: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Reconstruct parameters from flattened array."""
-        n_features = template["beta"].shape[-1]
-
-        beta = flat_params[..., :n_features]
-        intercept = flat_params[..., n_features]
-        log_sigma = flat_params[..., n_features + 1]
-
-        result = {"beta": beta, "intercept": intercept}
-        if "log_sigma" in template:
-            result["log_sigma"] = log_sigma
-
+        result = {"beta": hess_diag_beta, "intercept": hess_diag_intercept}
+        if "log_sigma" in params:
+            result["log_sigma"] = hess_diag_log_sigma
         return result
