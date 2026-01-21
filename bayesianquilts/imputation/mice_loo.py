@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import jax
 import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
 import jax.flatten_util
 import yaml
 from pathlib import Path
@@ -652,8 +653,8 @@ class MICEBayesianLOO(MICELogistic):
             else:
                 shape = ()
             
-            surrogate_params[f'{var_name}_loc'] = jnp.zeros(shape, dtype=self.dtype)
-            surrogate_params[f'{var_name}_log_scale'] = jnp.zeros(shape, dtype=self.dtype) - 1.0  # Start with small scale
+            surrogate_params[f'{var_name}_loc'] = jnp.zeros(shape, dtype=model.dtype)
+            surrogate_params[f'{var_name}_log_scale'] = jnp.zeros(shape, dtype=model.dtype) - 1.0  # Start with small scale
         
         # Define target log prob
         def target_log_prob_fn(data, **params):
@@ -665,14 +666,10 @@ class MICEBayesianLOO(MICELogistic):
         optimizer = optax.adam(learning_rate=5e-3)
         opt_state = optimizer.init(surrogate_params)
         
-        best_loss = float('inf')
-        patience_counter = 0
-        max_patience = 20
-        
-        for step in range(self.pathfinder_maxiter):
-            # Compute loss
-            def loss_fn(params):
-                surrogate = create_surrogate(params)
+        @jax.jit
+        def update_step(params, opt_state, seed):
+            def loss_fn(p):
+                surrogate = create_surrogate(p)
                 return minibatch_mc_variational_loss(
                     target_log_prob_fn=target_log_prob_fn,
                     surrogate_posterior=surrogate,
@@ -680,14 +677,19 @@ class MICEBayesianLOO(MICELogistic):
                     batch_size=1,
                     data=data,
                     sample_size=10,
-                    seed=seed + step
+                    seed=seed
                 )
-            
-            loss, grads = jax.value_and_grad(loss_fn)(surrogate_params)
-            
-            # Update
+            loss, grads = jax.value_and_grad(loss_fn)(params)
             updates, opt_state = optimizer.update(grads, opt_state)
-            surrogate_params = optax.apply_updates(surrogate_params, updates)
+            new_params = optax.apply_updates(params, updates)
+            return new_params, opt_state, loss
+
+        best_loss = float('inf')
+        patience_counter = 0
+        max_patience = 20
+        
+        for step in range(self.pathfinder_maxiter):
+            surrogate_params, opt_state, loss = update_step(surrogate_params, opt_state, seed + step)
             
             # Check convergence
             if loss < best_loss:
@@ -912,19 +914,20 @@ class MICEBayesianLOO(MICELogistic):
         if params is not None:
             # Compute point estimates before discarding params
             # Standardize on numpy arrays to avoid JAX device memory hold
-            beta_mean = np.array(np.mean(params['beta'], axis=0))
-            intercept_mean = float(np.mean(params['intercept']))
+            beta_mean = np.array(np.mean(params.get('beta', 0.0), axis=0)) if 'beta' in params else None
+            intercept_mean = float(np.mean(params['intercept'])) if 'intercept' in params else None
             
             # For ordinal, cutpoints
             cutpoints_mean = None
             if 'cutpoints_raw' in params:
-                 # Check if we need to transform? 
-                 # Usually consistent estimates are enough. 
-                 # But let's just save raw means for now or transformed if possible.
-                 pass
+                 # Transform raw cutpoints to ordered ones and then average
+                 # Vmap the transform over samples
+                 transformed_cutpoints = jax.vmap(model._transform_cutpoints)(params['cutpoints_raw'])
+                 cutpoints_mean = np.array(np.mean(transformed_cutpoints, axis=0))
         else:
             beta_mean = None
             intercept_mean = None
+            cutpoints_mean = None
 
         return UnivariateModelResult(
             n_obs=n_obs,
@@ -938,7 +941,8 @@ class MICEBayesianLOO(MICELogistic):
             converged=converged,
             params=None, # Drop large posterior samples to save memory
             beta_mean=beta_mean,
-            intercept_mean=intercept_mean
+            intercept_mean=intercept_mean,
+            cutpoints_mean=cutpoints_mean
         )
 
     def _fit_univariate(
@@ -1086,12 +1090,20 @@ class MICEBayesianLOO(MICELogistic):
         elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
 
         if params is not None:
-             # Compute point estimates
-             beta_mean = np.array(np.mean(params['beta'], axis=0))
-             intercept_mean = float(np.mean(params['intercept']))
+             # Compute point estimates before discarding params
+             beta_mean = np.array(np.mean(params.get('beta', 0.0), axis=0)) if 'beta' in params else None
+             intercept_mean = float(np.mean(params['intercept'])) if 'intercept' in params else None
+            
+             # For ordinal, cutpoints
+             cutpoints_mean = None
+             if 'cutpoints_raw' in params:
+                  # Transform raw cutpoints to ordered ones and then average
+                  transformed_cutpoints = jax.vmap(model._transform_cutpoints)(params['cutpoints_raw'])
+                  cutpoints_mean = np.array(np.mean(transformed_cutpoints, axis=0))
         else:
              beta_mean = None
              intercept_mean = None
+             cutpoints_mean = None
 
         return UnivariateModelResult(
             n_obs=n_obs,
@@ -1107,7 +1119,8 @@ class MICEBayesianLOO(MICELogistic):
             predictor_mean=X_mean,
             predictor_std=X_std,
             beta_mean=beta_mean,
-            intercept_mean=intercept_mean
+            intercept_mean=intercept_mean,
+            cutpoints_mean=cutpoints_mean
         )
         """
         Run Pathfinder variational inference.
@@ -1628,14 +1641,21 @@ class MICEBayesianLOO(MICELogistic):
         X_std = uni_result.predictor_std if uni_result.predictor_std is not None else 1.0
         x_standardized = (predictor_value - X_mean) / X_std
 
-        if uni_result.beta_mean is not None and uni_result.intercept_mean is not None:
+        if uni_result.beta_mean is not None:
              # Use stored point estimates
              beta = uni_result.beta_mean
-             intercept = uni_result.intercept_mean
+             intercept = uni_result.intercept_mean if uni_result.intercept_mean is not None else 0.0
+             cutpoints = uni_result.cutpoints_mean
         elif uni_result.params is not None:
              # Fallback to computing from params if available (legacy support)
-             beta = np.mean(uni_result.params['beta'], axis=0)
-             intercept = np.mean(uni_result.params['intercept'])
+             beta = np.mean(uni_result.params.get('beta', 0.0), axis=0)
+             intercept = np.mean(uni_result.params.get('intercept', 0.0))
+             cutpoints = None
+             if 'cutpoints_raw' in uni_result.params:
+                  # Need the model to transform
+                  # Since model isn't here, this is tricky. 
+                  # But we shouldn't hit this often now that we store cutpoints_mean.
+                  pass
         else:
              raise ValueError("No parameters available for prediction")
 
@@ -1644,12 +1664,29 @@ class MICEBayesianLOO(MICELogistic):
         else:
              beta_val = beta
              
-        linear_pred = float(x_standardized * beta_val + intercept)
+        eta = float(x_standardized * beta_val + intercept)
 
         if target_var_type == 'binary':
-            pred = 1.0 / (1.0 + np.exp(-linear_pred))
+            pred = 1.0 / (1.0 + np.exp(-eta))
+        elif target_var_type == 'ordinal' and cutpoints is not None:
+            # Ordinal prediction: Expected value
+            # Probabilities for each category
+            # P(Y <= k) = sigmoid(c_k - eta)
+            # P(Y = k) = P(Y <= k) - P(Y <= k-1)
+            def sigmoid(x):
+                return 1.0 / (1.0 + np.exp(-x))
+            
+            p_le = sigmoid(cutpoints - eta)
+            # Add boundary conditions
+            p_le = np.concatenate([[0.0], p_le, [1.0]])
+            p = np.diff(p_le)
+            
+            # Expected value: sum(k * p_k)
+            categories = np.arange(len(p))
+            pred = np.sum(categories * p)
         else:
-            pred = linear_pred
+            # Continuous or ordinal without cutpoints (fallback)
+            pred = eta
             
         return float(pred)
 
@@ -1793,14 +1830,19 @@ class MICEBayesianLOO(MICELogistic):
             sigma2_eff = np.exp(-2 * elpd_mean) / (2 * np.pi * np.e)
             
             # 2. Get coefficient (beta)
-            # Use absolute mean beta as scaling factor approx? Or expectation of beta^2?
-            # Var(aX) = a^2 Var(X). expectation of beta^2 is beta_mean^2 + beta_var.
-            # Let's use beta_mean^2 for first order approx.
-            beta = np.mean(uni_result.params['beta'])
+            if uni_result.beta_mean is not None:
+                beta = uni_result.beta_mean
+            elif uni_result.params is not None and 'beta' in uni_result.params:
+                beta = np.mean(uni_result.params['beta'])
+            else:
+                beta = 0.0
+            
+            if isinstance(beta, (np.ndarray, list)) and len(beta) > 0:
+                beta = beta[0]
             
             # 3. Propagate Variance
             # Sigma_out = beta^2 * Sigma_in + sigma_noise
-            current_variance = (beta ** 2) * current_variance + sigma2_eff
+            current_variance = (float(beta) ** 2) * current_variance + sigma2_eff
             
         # 4. Convert final variance back to ELPD
         # elpd_chain = N * (-0.5 * log(2*pi*e * current_variance))
@@ -1870,7 +1912,7 @@ class MICEBayesianLOO(MICELogistic):
                 # Use stored intercept_mean if available
                 if zero_result.intercept_mean is not None:
                      intercept = zero_result.intercept_mean
-                elif zero_result.params is not None:
+                elif zero_result.params is not None and 'intercept' in zero_result.params:
                      intercept = np.mean(zero_result.params['intercept'])
                 else:
                      # Should not happen if converged
@@ -1879,6 +1921,16 @@ class MICEBayesianLOO(MICELogistic):
                 if var_type == 'binary':
                     # Logistic: sigmoid(intercept)
                     pred = 1.0 / (1.0 + np.exp(-intercept))
+                elif var_type == 'ordinal' and zero_result.cutpoints_mean is not None:
+                    # Ordinal: Expected value with eta=0 (or intercept)
+                    def sigmoid(x):
+                        return 1.0 / (1.0 + np.exp(-x))
+                    
+                    p_le = sigmoid(zero_result.cutpoints_mean - intercept)
+                    p_le = np.concatenate([[0.0], p_le, [1.0]])
+                    p = np.diff(p_le)
+                    categories = np.arange(len(p))
+                    pred = np.sum(categories * p)
                 else:
                     # Linear: intercept
                     pred = intercept

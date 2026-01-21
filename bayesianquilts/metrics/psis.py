@@ -367,7 +367,10 @@ def gpinv(p, k, sigma):
 
     # Boundary conditions
     x = jnp.where(p == 0, 0.0, x)
-    val_at_1 = jnp.where(k >= 0, jnp.inf, -sigma / k)
+    # Use safe division to avoid ZeroDivisionError when k=0
+    # (jnp.where evaluates both branches, so -sigma/k would error even when k>=0)
+    safe_k = jnp.where(k == 0, 1.0, k)
+    val_at_1 = jnp.where(k >= 0, jnp.inf, -sigma / safe_k)
     x = jnp.where(p == 1, val_at_1, x)
 
     # Final check on sigma

@@ -357,6 +357,38 @@ class NegativeBinomialRegression(BayesianModel):
 
         return result
 
+    def tail_probability_mass(self, data, **params):
+        X = data["X"].astype(self.dtype)
+        y = data["y"].astype(self.dtype)
+        beta = params["beta"]
+        intercept = params["intercept"]
+        log_concentration = params["log_concentration"]
+
+        mean, total_count, probs = self._compute_mean_and_concentration(
+            X, beta, intercept, log_concentration
+        )
+
+        nb_dist = tfd.NegativeBinomial(total_count=total_count, probs=probs)
+        # S(y) = P(Y >= y) = P(Y > y - 1)
+        nb_survival = nb_dist.survival_function(y - 1)
+
+        if self.zero_inflated:
+            zero_logit = params["zero_logit"]
+            zero_prob = jax.nn.sigmoid(zero_logit).astype(self.dtype)
+
+            # Broadcast zero_prob to match nb_survival shape
+            zero_prob_bc = zero_prob
+            if zero_prob.ndim < nb_survival.ndim:
+                 zero_prob_bc = zero_prob[..., jnp.newaxis]
+            elif zero_prob.ndim > nb_survival.ndim:
+                 zero_prob_bc = jnp.squeeze(zero_prob, axis=-1)
+
+            # If y = 0, P(Y >= 0) = 1
+            # If y > 0, P(Y >= y) = (1 - pi) * P_NB(Y >= y)
+            return jnp.where(y == 0, 1.0, (1.0 - zero_prob_bc) * nb_survival)
+        else:
+            return nb_survival
+
 
 class NegativeBinomialRegressionLikelihood(AutoDiffLikelihoodMixin):
     """Likelihood function for Negative Binomial GLM regression."""
