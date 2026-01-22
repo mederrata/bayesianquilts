@@ -1166,6 +1166,18 @@ class AdaptiveImportanceSampler:
         """Compute entropy of probability distributions."""
         return _compute_entropy(probs)
 
+    # Default transformation order by computational complexity (least to most expensive)
+    DEFAULT_TRANSFORMATION_ORDER = [
+        'identity',   # No computation - just standard PSIS-LOO
+        'mm1',        # Global moment matching (shift only)
+        'mm2',        # Global moment matching (shift + scale)
+        'pmm1',       # Partial moment matching (shift)
+        'pmm2',       # Partial moment matching (shift + scale)
+        'll',         # Likelihood descent (requires gradient)
+        'kl',         # KL divergence (requires gradient + posterior weights)
+        'var',        # Variance-based (requires gradient + Hessian + f_fn)
+    ]
+
     def adaptive_is_loo(
         self,
         data: Any,
@@ -1178,8 +1190,15 @@ class AdaptiveImportanceSampler:
         f_fn: Optional[Callable] = None,
         rhos: jnp.ndarray = None,
         transformations: List[str] = None,
+        try_all_transformations: bool = False,
+        khat_threshold: float = 0.7,
     ):
         """Perform Adaptive Importance Sampling for Leave-One-Out CV.
+
+        By default, transformations are tried in order of computational complexity
+        (identity < mm1/mm2 < pmm1/pmm2 < ll < kl < var). Once a data point achieves
+        khat < khat_threshold, it is considered "adapted" and subsequent transformations
+        are skipped for that point (unless try_all_transformations=True).
 
         Args:
             data: Input data
@@ -1194,6 +1213,13 @@ class AdaptiveImportanceSampler:
             rhos: Optional manual grid of step sizes. If None, generated from n_sweeps.
             transformations: Optional list of transformation names to run.
                              Available: 'll', 'kl', 'var', 'pmm1', 'pmm2', 'mm1', 'mm2', 'identity'.
+                             If None, uses DEFAULT_TRANSFORMATION_ORDER.
+            try_all_transformations: If False (default), skip transformations for data
+                             points that have already achieved khat < khat_threshold.
+                             If True, try all transformations for all points.
+            khat_threshold: Threshold for considering a point "adapted" (default 0.7).
+                           Points with khat below this threshold won't be processed
+                           by subsequent transformations unless try_all_transformations=True.
 
         Returns:
             Dictionary of best results
@@ -1315,32 +1341,46 @@ class AdaptiveImportanceSampler:
              all_transforms["var"] = Variance(self.likelihood_fn, f_fn=f_fn)
              all_transforms["variance_based"] = Variance(self.likelihood_fn, f_fn=f_fn)
 
-        # Filter transformations if requested
+        # Determine transformation order
         if transformations is not None:
-            transforms = {
-                name: all_transforms[name]
-                for name in transformations
-                if name in all_transforms
-            }
-            # Handle 'identity' as a special case if requested (no-op transform)
+            # User-specified order
+            transform_order = [t for t in transformations if t in all_transforms or t == 'identity']
         else:
-            transforms = all_transforms
-            # Remove aliases from default run to avoid duplication
-            transforms.pop("ll", None)
+            # Default order by computational complexity
+            # Filter to only include transforms that are available
+            transform_order = [
+                t for t in self.DEFAULT_TRANSFORMATION_ORDER
+                if t in all_transforms or t == 'identity'
+            ]
+            # Exclude 'var' from default if f_fn not provided
+            if f_fn is None and 'var' in transform_order:
+                transform_order.remove('var')
+
+        # Build transforms dict preserving order
+        transforms = {}
+        for name in transform_order:
+            if name != 'identity' and name in all_transforms:
+                transforms[name] = all_transforms[name]
+        # 'identity' is handled separately below
 
         # Initialize best results
+        n_data = log_ell.shape[1]
         best_metrics = {
-            "khat": jnp.full(log_ell.shape[1], jnp.inf),  # (N,)
-            "p_loo_eta": jnp.zeros(log_ell.shape[1]),
-            "p_loo_psis": jnp.zeros(log_ell.shape[1]),
-            "ll_loo_eta": jnp.full(log_ell.shape[1], -jnp.inf),
-            "ll_loo_psis": jnp.full(log_ell.shape[1], -jnp.inf),
+            "khat": jnp.full(n_data, jnp.inf),  # (N,)
+            "p_loo_eta": jnp.zeros(n_data),
+            "p_loo_psis": jnp.zeros(n_data),
+            "ll_loo_eta": jnp.full(n_data, -jnp.inf),
+            "ll_loo_psis": jnp.full(n_data, -jnp.inf),
         }
+
+        # Track which points are considered "adapted" (khat < threshold)
+        # Once adapted, skip further transformations for that point (unless try_all)
+        adapted_mask = jnp.zeros(n_data, dtype=bool)
 
         results = {}
 
-        # Handle 'identity' sweep explicitly if requested or if transformations is None
-        if transformations is None or "identity" in transformations:
+        # Handle 'identity' sweep explicitly if in transform_order
+        if "identity" in transform_order:
             if verbose:
                 print("Running identity...")
             # Compute identity importance weights (standard PSIS-LOO)
@@ -1399,15 +1439,20 @@ class AdaptiveImportanceSampler:
             best_metrics["p_loo_psis"] = jnp.where(
                 idx, p_loo_psis, best_metrics["p_loo_psis"]
             )
-            if "ll_loo_eta" not in best_metrics:
-                best_metrics["ll_loo_eta"] = jnp.zeros_like(p_loo_eta)
-                best_metrics["ll_loo_psis"] = jnp.zeros_like(p_loo_psis)
             best_metrics["ll_loo_eta"] = jnp.where(
                 idx, ll_loo_eta, best_metrics["ll_loo_eta"]
             )
             best_metrics["ll_loo_psis"] = jnp.where(
                 idx, ll_loo_psis, best_metrics["ll_loo_psis"]
             )
+
+            # Update adapted mask - points with khat below threshold are considered adapted
+            if not try_all_transformations:
+                newly_adapted = khat < khat_threshold
+                adapted_mask = adapted_mask | newly_adapted
+                if verbose:
+                    n_adapted = jnp.sum(adapted_mask).item()
+                    print(f"  {n_adapted}/{n_data} points adapted (khat < {khat_threshold})")
 
         # Common kwargs for all transforms
         common_kwargs = {
@@ -1422,10 +1467,20 @@ class AdaptiveImportanceSampler:
             "surrogate_log_prob_fn": self.surrogate_log_prob_fn,
         }
 
-        # Run sweeps
+        # Run sweeps in order of computational complexity
         for name, transform in transforms.items():
+            # Early exit if all points are adapted and we're not forcing all transformations
+            if not try_all_transformations and jnp.all(adapted_mask):
+                if verbose:
+                    print(f"All {n_data} points adapted, skipping remaining transformations")
+                break
+
             if verbose:
-                print(f"Running {name}...")
+                if not try_all_transformations:
+                    n_remaining = n_data - jnp.sum(adapted_mask).item()
+                    print(f"Running {name}... ({n_remaining} points remaining)")
+                else:
+                    print(f"Running {name}...")
 
             # Determine rhos for this transform
             current_rhos = rhos
@@ -1462,10 +1517,15 @@ class AdaptiveImportanceSampler:
 
                     results[key] = res
 
-                    # Update best
+                    # Update best metrics only for non-adapted points (or all if try_all)
                     khat_safe = jnp.where(jnp.isnan(res["khat"]), jnp.inf, res["khat"])
 
-                    improvement = khat_safe < best_metrics["khat"]
+                    # Only consider improvement for points not already adapted
+                    if try_all_transformations:
+                        improvement = khat_safe < best_metrics["khat"]
+                    else:
+                        improvement = (khat_safe < best_metrics["khat"]) & (~adapted_mask)
+
                     best_metrics["khat"] = jnp.where(
                         improvement, khat_safe, best_metrics["khat"]
                     )
@@ -1475,6 +1535,17 @@ class AdaptiveImportanceSampler:
                     best_metrics["p_loo_psis"] = jnp.where(
                         improvement, res["p_loo_psis"], best_metrics["p_loo_psis"]
                     )
+                    best_metrics["ll_loo_eta"] = jnp.where(
+                        improvement, res["ll_loo_eta"], best_metrics["ll_loo_eta"]
+                    )
+                    best_metrics["ll_loo_psis"] = jnp.where(
+                        improvement, res["ll_loo_psis"], best_metrics["ll_loo_psis"]
+                    )
+
+                    # Update adapted mask after this transformation
+                    if not try_all_transformations:
+                        newly_adapted = best_metrics["khat"] < khat_threshold
+                        adapted_mask = adapted_mask | newly_adapted
 
                 except Exception as e:
                     if verbose:

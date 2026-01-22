@@ -113,7 +113,7 @@ LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
       # For Likelihood Descent, Q is the gradient of log likelihood
       # We assume the user implements gradient calculation that returns S x N x K structure
       # matching theta (which is S x N x K)
-      
+
       # Note: params passed here might normally be S x K, but for Q computation we might need
       # effectively to evaluate gradient at 'theta' (which splits by N).
       # But basic Likelihood Descent uses the gradient at the *original* params usually?
@@ -122,20 +122,20 @@ LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
       # It uses 'params' (the dict).
       # If 'params' is the original S x K samples, then gradient is S x N x K.
       # This matches theta structure (S x N x K).
-      
+
       # However, if we were iterative (max_iter > 1), we would need gradient at theta values.
       # The python code for 'LikelihoodDescent' ignores 'theta' arg and uses 'params'.
-      # This implies it takes a ONE STEP transformation from the posterior. 
+      # This implies it takes a ONE STEP transformation from the posterior.
       # It does NOT update iteratively in the Python implementation shown (it returns grad_ll directly).
-      
+
       grad <- self$likelihood_fn$log_likelihood_gradient(data, params)
       return(grad)
     },
-    
+
     compute_divergence_Q = function(theta, data, params, ...) {
       # div(Q) = Laplacian(log_ell) = sum(diag(Hessian))
       diag_hess <- self$likelihood_fn$log_likelihood_hessian_diag(data, params)
-      
+
       # diag_hess is list of S x N x K (or S x N)
       # Sum over K (dims > 2)
       divs <- list()
@@ -147,7 +147,7 @@ LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
           divs[[k]] <- val
         }
       }
-      
+
       # Sum over all params
       total_div <- divs[[1]]
       if (length(divs) > 1) {
@@ -155,8 +155,132 @@ LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
           total_div <- total_div + divs[[i]]
         }
       }
-      
+
       return(total_div)
+    }
+  )
+)
+
+
+#' MM1 (Moment Matching 1) Transformation - Shift Only
+#'
+#' @export
+MM1 <- R6::R6Class("MM1",
+  inherit = Transformation,
+  public = list(
+    #' @description Apply MM1 transformation
+    call = function(max_iter, params, theta, data, log_ell, log_ell_original = NULL, ...) {
+      if (is.null(log_ell_original)) {
+        log_ell_original <- log_ell
+      }
+
+      log_w <- -log_ell_original
+      weights <- exp(log_w)
+
+      moments <- self$compute_moments(params, weights)
+
+      S <- nrow(log_ell)
+      N <- ncol(log_ell)
+
+      new_params <- list()
+      for (name in names(params)) {
+        val <- params[[name]]
+        m <- moments[[name]]
+
+        if (is.null(dim(val)) || length(dim(val)) == 1) {
+          # Scalar param: S
+          diff <- -m$mean + m$mean_w  # N
+          # Broadcast val (S) + diff (N) -> S x N
+          new_params[[name]] <- outer(val, rep(1, N)) + outer(rep(1, S), diff)
+        } else {
+          # Matrix param: S x K
+          # diff: -mean (K) + mean_w (N x K) -> N x K
+          K <- ncol(val)
+          diff <- sweep(-matrix(m$mean, nrow=N, ncol=K, byrow=TRUE), c(1,2), m$mean_w, "+")
+          # val (S x K) + diff (N x K) -> S x N x K
+          arr <- array(0, dim=c(S, N, K))
+          for (i in 1:N) {
+            arr[, i, ] <- sweep(val, 2, diff[i, ], "+")
+          }
+          new_params[[name]] <- arr
+        }
+      }
+
+      # MM1 Jacobian is 1 (log = 0)
+      log_jacobian <- matrix(0, nrow=S, ncol=N)
+
+      list(theta_new = new_params, log_jacobian = log_jacobian)
+    }
+  )
+)
+
+
+#' MM2 (Moment Matching 2) Transformation - Shift and Scale
+#'
+#' @export
+MM2 <- R6::R6Class("MM2",
+  inherit = Transformation,
+  public = list(
+    #' @description Apply MM2 transformation
+    call = function(max_iter, params, theta, data, log_ell, log_ell_original = NULL, ...) {
+      if (is.null(log_ell_original)) {
+        log_ell_original <- log_ell
+      }
+
+      log_w <- -log_ell_original
+      weights <- exp(log_w)
+
+      moments <- self$compute_moments(params, weights)
+
+      S <- nrow(log_ell)
+      N <- ncol(log_ell)
+
+      new_params <- list()
+      log_det_jac <- matrix(0, nrow=S, ncol=N)
+
+      for (name in names(params)) {
+        val <- params[[name]]
+        m <- moments[[name]]
+
+        if (is.null(dim(val)) || length(dim(val)) == 1) {
+          # Scalar param: S
+          # ratio: sqrt(var_w / var) -> N
+          ratio <- sqrt(m$var_w / (m$var + 1e-10))
+
+          # term1: ratio * (val - mean) -> S x N
+          term1 <- outer(val - m$mean, ratio)
+          # new_val = term1 + mean_w
+          new_params[[name]] <- sweep(term1, 2, m$mean_w, "+")
+
+          # log det: log(ratio) for each N, same across S
+          log_det_jac <- sweep(log_det_jac, 2, log(ratio), "+")
+
+        } else {
+          # Matrix param: S x K
+          K <- ncol(val)
+
+          # ratio: sqrt(var_w / var) -> N x K
+          var_expanded <- matrix(m$var, nrow=N, ncol=K, byrow=TRUE)
+          ratio <- sqrt(m$var_w / (var_expanded + 1e-10))
+
+          # val_centered: S x K
+          val_centered <- sweep(val, 2, m$mean, "-")
+
+          # new_val[s, n, k] = ratio[n, k] * val_centered[s, k] + mean_w[n, k]
+          arr <- array(0, dim=c(S, N, K))
+          for (i in 1:N) {
+            scaled <- sweep(val_centered, 2, ratio[i, ], "*")
+            arr[, i, ] <- sweep(scaled, 2, m$mean_w[i, ], "+")
+          }
+          new_params[[name]] <- arr
+
+          # log det: sum_k log(ratio[n, k])
+          log_det_k <- rowSums(log(ratio))  # N
+          log_det_jac <- sweep(log_det_jac, 2, log_det_k, "+")
+        }
+      }
+
+      list(theta_new = new_params, log_jacobian = log_det_jac)
     }
   )
 )

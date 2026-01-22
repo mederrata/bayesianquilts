@@ -11,8 +11,13 @@ export(LikelihoodFunction)
 export(Transformation)
 export(SmallStepTransformation)
 export(LikelihoodDescent)
+export(MM1)
+export(MM2)
 export(LogisticRegressionLikelihood)
 export(PoissonRegressionLikelihood)
+
+# Exported constants
+export(DEFAULT_TRANSFORMATION_ORDER)
 
 # Exported functions
 export(psislw)
