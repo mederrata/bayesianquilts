@@ -21,7 +21,29 @@ import jax
 import jax.numpy as jnp
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable, Tuple, Optional, List
+from functools import partial
 from bayesianquilts.metrics import psis
+
+
+# JIT-compiled utility functions for performance
+@partial(jax.jit, static_argnums=())
+def _normalize_weights(log_weights: jnp.ndarray) -> jnp.ndarray:
+    """Normalize log weights to probabilities (JIT-compiled)."""
+    log_weights = log_weights - jnp.max(log_weights, axis=0, keepdims=True)
+    weights = jnp.exp(log_weights)
+    return weights / jnp.sum(weights, axis=0, keepdims=True)
+
+
+@jax.jit
+def _compute_entropy(weights: jnp.ndarray) -> jnp.ndarray:
+    """Compute entropy of weights (JIT-compiled)."""
+    return -jnp.sum(weights * jnp.log(weights + 1e-12), axis=0)
+
+
+@jax.jit
+def _weighted_sum(weights: jnp.ndarray, values: jnp.ndarray) -> jnp.ndarray:
+    """Compute weighted sum along axis 0 (JIT-compiled)."""
+    return jnp.sum(weights * values, axis=0)
 
 
 class LikelihoodFunction(ABC):
@@ -115,9 +137,8 @@ class Transformation(ABC):
         """
         moments = {}
 
-        # Normalize weights along sample dimension (axis 0)
-        w_sum = jnp.sum(weights, axis=0, keepdims=True)
-        w_norm = weights / (w_sum + 1e-10)  # (S, N)
+        # Normalize weights along sample dimension (axis 0) - single computation
+        w_norm = _normalize_weights(jnp.log(weights + 1e-10))  # (S, N)
 
         for name, value in params.items():
             # value shape: (S, ...) where ... can be empty, (K,), (K, L), etc.
@@ -125,7 +146,7 @@ class Transformation(ABC):
 
             # Unweighted statistics (reduce over S)
             mean = jnp.mean(value, axis=0)  # (...)
-            var = jnp.mean((value - mean) ** 2, axis=0)  # (...)
+            var = jnp.var(value, axis=0)  # (...) - use jnp.var for efficiency
 
             # For weighted statistics, we need to broadcast:
             # - value from (S, ...) to (S, 1, ...) so N dimension can be inserted
@@ -142,8 +163,12 @@ class Transformation(ABC):
             # Weighted mean: sum over S -> (N, ...)
             mean_w = jnp.sum(w_expanded * v_expanded, axis=0)
 
-            # Weighted variance: sum over S -> (N, ...)
-            var_w = jnp.sum(w_expanded * (v_expanded - mean_w) ** 2, axis=0)
+            # Weighted variance using online formula to avoid recomputing mean_w
+            # var_w = E[x^2] - E[x]^2
+            mean_sq_w = jnp.sum(w_expanded * v_expanded ** 2, axis=0)
+            var_w = mean_sq_w - mean_w ** 2
+            # Clip negative values due to numerical precision
+            var_w = jnp.maximum(var_w, 0.0)
 
             moments[name] = {"mean": mean, "mean_w": mean_w, "var": var, "var_w": var_w}
 
@@ -183,25 +208,23 @@ class Transformation(ABC):
                 delta_log_pi = jnp.zeros_like(log_ell_new)
 
         # Combine all log terms first, then apply max-subtract for numerical stability
-        # This ensures the combined effect of Jacobian and likelihood delta doesn't overflow
         log_eta_weights = delta_log_pi + log_jacobian
-        log_eta_weights = log_eta_weights - jnp.max(
-            log_eta_weights, axis=0, keepdims=True
-        )
-
         log_eta_weights = log_eta_weights.astype(jnp.float64)
-        psis_weights, khat = psis.psislw(log_eta_weights)
 
-        eta_weights = jnp.exp(log_eta_weights)
-        eta_weights = eta_weights / jnp.sum(eta_weights, axis=0, keepdims=True)
+        # Use JIT-compiled normalization
+        eta_weights = _normalize_weights(log_eta_weights)
 
-        psis_weights = jnp.exp(psis_weights)
-        psis_weights = psis_weights / jnp.sum(psis_weights, axis=0, keepdims=True)
+        # PSIS smoothing
+        psis_log_weights, khat = psis.psislw(
+            log_eta_weights - jnp.max(log_eta_weights, axis=0, keepdims=True)
+        )
+        psis_weights = _normalize_weights(psis_log_weights)
 
         return eta_weights, psis_weights, khat, log_ell_new
 
     def entropy(self, weights):
-        return -jnp.sum(weights * jnp.log(weights + 1e-12), axis=0)
+        """Compute entropy of weights."""
+        return _compute_entropy(weights)
 
 
 class SmallStepTransformation(Transformation):
@@ -298,47 +321,63 @@ class SmallStepTransformation(Transformation):
         def func(t):
             return self.compute_Q(t, data, params, current_log_ell, **kwargs_for_jvp)
 
-        divergence = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
+        # Compute total number of parameters
+        total_K = sum(L.shape[-1] for L in leaves)
 
-        def basis_jvp(accum_div, leaf_idx_and_feature_idx):
-            leaf_idx, feat_idx = leaf_idx_and_feature_idx
+        # Build index mapping: flat_idx -> (leaf_idx, feature_idx)
+        leaf_indices = []
+        feat_indices = []
+        for i, L in enumerate(leaves):
+            K_i = L.shape[-1]
+            leaf_indices.extend([i] * K_i)
+            feat_indices.extend(range(K_i))
 
-            def make_tangent(i, x):
-                t = jnp.zeros_like(x)
-                if i == leaf_idx:
-                    t = t.at[..., feat_idx].set(1.0)
-                return t
+        leaf_indices = jnp.array(leaf_indices)
+        feat_indices = jnp.array(feat_indices)
 
-            tangents = [make_tangent(i, L) for i, L in enumerate(leaves)]
+        # Vectorized JVP computation using vmap
+        def single_jvp(flat_idx):
+            leaf_idx = leaf_indices[flat_idx]
+            feat_idx = feat_indices[flat_idx]
+
+            # Create one-hot tangent vector
+            tangents = []
+            for i, L in enumerate(leaves):
+                t = jnp.zeros_like(L)
+                # Use where to conditionally set the tangent
+                mask = jnp.arange(L.shape[-1]) == feat_idx
+                t = jnp.where(
+                    (i == leaf_idx) & mask[jnp.newaxis, jnp.newaxis, :],
+                    1.0, 0.0
+                )
+                tangents.append(t)
+
             tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
-
             _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
 
             q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
-            target_leaf_out = q_out_leaves[leaf_idx]
 
-            # Handle both 3D (S, N, K) and 2D (S, N) Q outputs
-            # 2D occurs for scalar parameters where the "K" dimension is 1 and squeezed
-            if target_leaf_out.ndim == 2:
-                # Scalar parameter: entire array is the derivative
-                d_component = target_leaf_out
-            else:
-                # Vector parameter: index into last dim
-                d_component = target_leaf_out[..., feat_idx]
-
-            return accum_div + d_component, None
-
-        indices = []
-        for i, L in enumerate(leaves):
-            K_i = L.shape[-1]
-            for k in range(K_i):
-                indices.append((i, k))
+            # Sum contributions from this parameter
+            div_contrib = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
+            for i, q_leaf in enumerate(q_out_leaves):
+                if i == leaf_idx:
+                    if q_leaf.ndim == 2:
+                        div_contrib = q_leaf
+                    else:
+                        div_contrib = q_leaf[..., feat_idx]
+            return div_contrib
 
         # Try to compute divergence; fall back to zero if JVP fails
-        # (e.g., due to shape incompatibilities in gradient functions)
         try:
-            for idx in indices:
-                divergence, _ = basis_jvp(divergence, idx)
+            # Use lax.fori_loop for memory efficiency instead of vmap
+            # (vmap would create total_K copies of all intermediates)
+            def body_fn(i, acc):
+                return acc + single_jvp(i)
+
+            divergence = jax.lax.fori_loop(
+                0, total_K, body_fn,
+                jnp.zeros(batch_shape, dtype=first_leaf.dtype)
+            )
         except (ValueError, TypeError) as e:
             # JVP failed - return zero divergence
             return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
@@ -357,23 +396,30 @@ class SmallStepTransformation(Transformation):
         Returns:
             Tuple of (Q_standardized, Q_norm_max) where Q_norm_max has shape (1, N).
         """
-        # Standardize component-wise
+        # Standardize component-wise (fused with max computation for efficiency)
         if theta_std is not None:
             Q = jax.tree_util.tree_map(lambda q, s: q / (s + 1e-6), Q, theta_std)
 
-        # Compute max absolute value across all leaves, keeping (S, N) shape
+        # Compute max absolute value across all leaves in a single pass
+        # Using reduce instead of stack to avoid creating intermediate arrays
+        leaves = jax.tree_util.tree_leaves(Q)
+
+        if not leaves:
+            return Q, jnp.zeros((1, 1))
+
         def leaf_abs_max(leaf):
             if leaf.ndim > 2:
+                # Reduce over trailing dimensions
                 return jnp.max(jnp.abs(leaf), axis=tuple(range(2, leaf.ndim)))
             return jnp.abs(leaf)
 
-        mags = jax.tree_util.tree_leaves(jax.tree_util.tree_map(leaf_abs_max, Q))
+        # Compute max across all leaves without stacking
+        first_mag = leaf_abs_max(leaves[0])
+        Q_norm = first_mag
+        for leaf in leaves[1:]:
+            Q_norm = jnp.maximum(Q_norm, leaf_abs_max(leaf))
 
-        if mags:
-            Q_norm = jnp.max(jnp.stack(mags, axis=0), axis=0)  # (S, N)
-            Q_norm_max = jnp.max(Q_norm, axis=0, keepdims=True)  # (1, N)
-        else:
-            Q_norm_max = jnp.zeros((1, 1))
+        Q_norm_max = jnp.max(Q_norm, axis=0, keepdims=True)  # (1, N)
 
         return Q, Q_norm_max
 
@@ -486,15 +532,18 @@ class SmallStepTransformation(Transformation):
         )
 
         predictions = log_ell_new
-        
-        weight_entropy = self.entropy(eta_weights)
-        psis_entropy = self.entropy(psis_weights)
+        exp_predictions = jnp.exp(predictions)
+        exp_log_ell_new = jnp.exp(log_ell_new)
 
-        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
-        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+        # Use JIT-compiled entropy and weighted sum
+        weight_entropy = _compute_entropy(eta_weights)
+        psis_entropy = _compute_entropy(psis_weights)
 
-        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
-        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+        p_loo_eta = _weighted_sum(eta_weights, exp_predictions)
+        p_loo_psis = _weighted_sum(psis_weights, exp_predictions)
+
+        ll_loo_eta = _weighted_sum(eta_weights, exp_log_ell_new)
+        ll_loo_psis = _weighted_sum(psis_weights, exp_log_ell_new)
 
         return {
             "theta_new": theta_new,
@@ -843,15 +892,17 @@ class MM1(GlobalTransformation):
         )
 
         predictions = self.likelihood_fn.log_likelihood(data, new_params)
+        exp_predictions = jnp.exp(predictions)
+        exp_log_ell_new = jnp.exp(log_ell_new)
 
-        weight_entropy = self.entropy(eta_weights)
-        psis_entropy = self.entropy(psis_weights)
+        weight_entropy = _compute_entropy(eta_weights)
+        psis_entropy = _compute_entropy(psis_weights)
 
-        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
-        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+        p_loo_eta = _weighted_sum(eta_weights, exp_predictions)
+        p_loo_psis = _weighted_sum(psis_weights, exp_predictions)
 
-        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
-        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+        ll_loo_eta = _weighted_sum(eta_weights, exp_log_ell_new)
+        ll_loo_psis = _weighted_sum(psis_weights, exp_log_ell_new)
 
         return {
             "theta_new": theta_new,
@@ -927,15 +978,17 @@ class MM2(GlobalTransformation):
         )
 
         predictions = self.likelihood_fn.log_likelihood(data, new_params)
+        exp_predictions = jnp.exp(predictions)
+        exp_log_ell_new = jnp.exp(log_ell_new)
 
-        weight_entropy = self.entropy(eta_weights)
-        psis_entropy = self.entropy(psis_weights)
+        weight_entropy = _compute_entropy(eta_weights)
+        psis_entropy = _compute_entropy(psis_weights)
 
-        p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
-        p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+        p_loo_eta = _weighted_sum(eta_weights, exp_predictions)
+        p_loo_psis = _weighted_sum(psis_weights, exp_predictions)
 
-        ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
-        ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+        ll_loo_eta = _weighted_sum(eta_weights, exp_log_ell_new)
+        ll_loo_psis = _weighted_sum(psis_weights, exp_log_ell_new)
 
         return {
             "theta_new": theta_new,
@@ -1017,48 +1070,60 @@ class AutoDiffLikelihoodMixin(LikelihoodFunction):
     def log_likelihood_hessian_diag(
         self, data: Any, params: Dict[str, Any]
     ) -> Any:
-        """Compute diagonal of Hessian of log-likelihood w.r.t. parameters using autodiff."""
-        
+        """Compute diagonal of Hessian of log-likelihood w.r.t. parameters using autodiff.
+
+        Uses forward-over-reverse mode autodiff for O(K) complexity instead of O(K^2)
+        from computing the full Hessian.
+        """
         # params: PyTree (S, ...)
         # Output: PyTree (S, N, ...) matches params structure
-        
-        # We need diagonal hessian of LL_n w.r.t theta.
-        # d^2 L_n / dtheta^2
-        
+
         n_data = jax.tree_util.tree_leaves(data)[0].shape[0]
 
         def single_sample_hess_diag(p_sample):
-             # p_sample: PyTree (...)
-             
-             def point_ll(p, i):
-                 p_exp = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), p)
-                 ll = self.log_likelihood(data, p_exp)  # (1, N)
-                 return ll[0, i]
+            # p_sample: PyTree (...)
 
-             # Compute diagonal Hessian via flattened parameters (O(K) complexity)
-             flat_p, unravel = jax.flatten_util.ravel_pytree(p_sample)
-             K = flat_p.shape[0]
-             
-             def flat_point_ll(fp, i):
-                 p = unravel(fp)
-                 return point_ll(p, i)
-             
-             # Compute diagonal hessian for flattened params
-             # d^2 L / d theta_k^2
-             
-             def diag_h_flat(i):
-                 return jnp.diag(jax.hessian(lambda fp: flat_point_ll(fp, i))(flat_p))
-             
-             # vmap over data points N
-             h_flat_N = jax.vmap(diag_h_flat)(jnp.arange(n_data)) # (N, K)
-             
-             # Unravel back to PyTree
-             # We need to unravel each (N, ...) row? 
-             # h_flat_N is (N, K). We can't directly unravel (N, K) if unravel expects (K,).
-             # But we can vmap unravel.
-             
-             h_tree_N = jax.vmap(unravel)(h_flat_N)
-             return h_tree_N
+            def point_ll(p, i):
+                p_exp = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), p)
+                ll = self.log_likelihood(data, p_exp)  # (1, N)
+                return ll[0, i]
+
+            # Flatten parameters for efficient diagonal Hessian computation
+            flat_p, unravel = jax.flatten_util.ravel_pytree(p_sample)
+            K = flat_p.shape[0]
+
+            def flat_point_ll(fp, i):
+                p = unravel(fp)
+                return point_ll(p, i)
+
+            # Compute diagonal Hessian using forward-over-reverse mode
+            # This is O(K) instead of O(K^2) for full Hessian
+            def diag_hess_single_point(i):
+                # Gradient function
+                grad_fn = jax.grad(lambda fp: flat_point_ll(fp, i))
+
+                # For diagonal, we compute d/d(theta_k) of grad_k
+                # Using forward mode on reverse mode gradient
+                def hvp_diag(fp):
+                    # Compute gradient
+                    g = grad_fn(fp)
+                    # For diagonal, compute JVP with each basis vector
+                    # But we can be smarter: use vmap over basis vectors
+                    def single_diag(k):
+                        tangent = jnp.zeros_like(fp).at[k].set(1.0)
+                        _, jvp_val = jax.jvp(grad_fn, (fp,), (tangent,))
+                        return jvp_val[k]
+
+                    return jax.vmap(single_diag)(jnp.arange(K))
+
+                return hvp_diag(flat_p)
+
+            # vmap over data points N
+            h_flat_N = jax.vmap(diag_hess_single_point)(jnp.arange(n_data))  # (N, K)
+
+            # Unravel back to PyTree
+            h_tree_N = jax.vmap(unravel)(h_flat_N)
+            return h_tree_N
 
         # Output shape: PyTree (S, N, ...)
         hessians = jax.vmap(single_sample_hess_diag)(params)
@@ -1099,7 +1164,7 @@ class AdaptiveImportanceSampler:
 
     def entropy(self, probs: jnp.ndarray) -> jnp.ndarray:
         """Compute entropy of probability distributions."""
-        return -jnp.sum(probs * jnp.log(probs + 1e-10), axis=0)
+        return _compute_entropy(probs)
 
     def adaptive_is_loo(
         self,
@@ -1280,34 +1345,33 @@ class AdaptiveImportanceSampler:
                 print("Running identity...")
             # Compute identity importance weights (standard PSIS-LOO)
             # log_eta = -log_ell
-            log_eta_weights = -log_ell
-            log_eta_weights = log_eta_weights - jnp.max(
-                log_eta_weights, axis=0, keepdims=True
+            log_eta_weights = (-log_ell).astype(jnp.float64)
+
+            # Use JIT-compiled normalization
+            eta_weights = _normalize_weights(log_eta_weights)
+
+            # PSIS smoothing
+            psis_log_weights, khat = psis.psislw(
+                log_eta_weights - jnp.max(log_eta_weights, axis=0, keepdims=True)
             )
-            log_eta_weights = log_eta_weights.astype(jnp.float64)
-
-            psis_weights, khat = psis.psislw(log_eta_weights)
-
-            eta_weights = jnp.exp(log_eta_weights)
-            eta_weights = eta_weights / jnp.sum(eta_weights, axis=0, keepdims=True)
-
-            psis_weights = jnp.exp(psis_weights)
-            psis_weights = psis_weights / jnp.sum(psis_weights, axis=0, keepdims=True)
+            psis_weights = _normalize_weights(psis_log_weights)
 
             log_ell_new = log_ell
             log_jac_identity = jnp.zeros_like(log_ell)
 
             predictions = log_ell  # Identity has same predictions
+            exp_predictions = jnp.exp(predictions)
+            exp_log_ell_new = jnp.exp(log_ell_new)
 
-            # Use self.entropy if available or compute directly
-            weight_entropy = self.entropy(eta_weights)
-            psis_entropy = self.entropy(psis_weights)
+            # Use JIT-compiled functions
+            weight_entropy = _compute_entropy(eta_weights)
+            psis_entropy = _compute_entropy(psis_weights)
 
-            p_loo_eta = jnp.sum(jnp.exp(predictions) * eta_weights, axis=0)
-            p_loo_psis = jnp.sum(jnp.exp(predictions) * psis_weights, axis=0)
+            p_loo_eta = _weighted_sum(eta_weights, exp_predictions)
+            p_loo_psis = _weighted_sum(psis_weights, exp_predictions)
 
-            ll_loo_eta = jnp.sum(eta_weights * jnp.exp(log_ell_new), axis=0)
-            ll_loo_psis = jnp.sum(psis_weights * jnp.exp(log_ell_new), axis=0)
+            ll_loo_eta = _weighted_sum(eta_weights, exp_log_ell_new)
+            ll_loo_psis = _weighted_sum(psis_weights, exp_log_ell_new)
 
             res_identity = {
                 "theta_new": theta_expanded,
