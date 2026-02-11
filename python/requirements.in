@@ -4,6 +4,7 @@ tfp-nightly[jax]
 jax
 tqdm
 pandas
+polars
 scikit-learn
 dill
 docling
@@ -13,7 +14,6 @@ pyarrow
 matplotlib
 numpy
 orbax-checkpoint
-grain
 arviz
 notebook
 blackjax
