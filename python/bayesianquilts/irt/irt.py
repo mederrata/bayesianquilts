@@ -231,7 +231,8 @@ class IRTModel(BayesianModel):
         """Produce a single imputed copy of a batch.
 
         For each item column with missing values, uses the imputation model's
-        predict() to get a stacked prediction and samples from the PMF.
+        ``predict_pmf()`` to obtain a proper ordinal categorical distribution
+        (stacked mixture of ordinal logistic PMFs) and samples from it.
 
         Args:
             batch: dict mapping keys to arrays.
@@ -244,7 +245,6 @@ class IRTModel(BayesianModel):
             rng = np.random.default_rng()
 
         imputed = {k: np.array(v, copy=True) for k, v in batch.items()}
-        n_obs = len(batch[self.person_key])
 
         for item_key in self.item_keys:
             col = np.asarray(batch[item_key], dtype=np.float64)
@@ -264,37 +264,14 @@ class IRTModel(BayesianModel):
                         observed_items[other_key] = val
 
                 try:
-                    result = self.imputation_model.predict(
-                        observed_items, target=item_key, return_details=True
+                    pmf = self.imputation_model.predict_pmf(
+                        observed_items,
+                        target=item_key,
+                        n_categories=self.response_cardinality,
                     )
-                    # Sample from the predicted distribution
-                    predictions = result.get('predictions', {})
-                    weights = result.get('weights', {})
-
-                    if predictions and weights:
-                        # Build a PMF over categories from the stacked prediction
-                        pmf = np.zeros(self.response_cardinality)
-                        stacked_pred = result['prediction']
-
-                        # For ordinal variables, the stacked prediction is an
-                        # expected value. We need to convert to a PMF.
-                        # Use the individual model predictions and weights to
-                        # build a mixture PMF, or fall back to rounding.
-                        # Simple approach: round to nearest category and add noise
-                        pred_val = np.clip(
-                            round(stacked_pred), 0, self.response_cardinality - 1
-                        )
-                        # Add small uniform noise for stochasticity
-                        pmf[:] = 0.01
-                        pmf[int(pred_val)] += 1.0
-                        pmf /= pmf.sum()
-                        sampled = rng.choice(self.response_cardinality, p=pmf)
-                    else:
-                        # Fallback: sample uniformly
-                        sampled = rng.integers(0, self.response_cardinality)
-
-                except (ValueError, KeyError):
-                    # If prediction fails (e.g., no models), sample uniformly
+                    sampled = rng.choice(self.response_cardinality, p=pmf)
+                except (ValueError, KeyError, AttributeError):
+                    # Fallback: sample uniformly if predict_pmf unavailable
                     sampled = rng.integers(0, self.response_cardinality)
 
                 imputed[item_key][row_idx] = float(sampled)

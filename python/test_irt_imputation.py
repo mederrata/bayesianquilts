@@ -84,6 +84,16 @@ class MockImputationModel:
             }
         return pred
 
+    def predict_pmf(self, items, target, n_categories, uncertainty_penalty=1.0):
+        """Mock predict_pmf returning a proper categorical PMF.
+
+        Returns a distribution peaked at category 2 with some spread.
+        """
+        pmf = np.ones(n_categories) * 0.02
+        pmf[min(2, n_categories - 1)] += 1.0
+        pmf /= pmf.sum()
+        return pmf
+
 
 # =========================================================================
 # Test validate_imputation_model
