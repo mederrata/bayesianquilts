@@ -2003,6 +2003,156 @@ class MICEBayesianLOO(MICELogistic):
         else:
             return stacked_pred
 
+    def _ordinal_pmf_from_model(
+        self,
+        result: UnivariateModelResult,
+        eta: float,
+        n_categories: int,
+    ) -> np.ndarray:
+        """Compute category PMF from an ordinal logistic model.
+
+        Args:
+            result: Fitted univariate model result (must have cutpoints_mean).
+            eta: Linear predictor value for this observation.
+            n_categories: Number of response categories.
+
+        Returns:
+            Array of shape (n_categories,) with category probabilities.
+        """
+        cutpoints = result.cutpoints_mean
+        if cutpoints is None:
+            # No cutpoints — return uniform
+            return np.ones(n_categories) / n_categories
+
+        def sigmoid(x):
+            return 1.0 / (1.0 + np.exp(-x))
+
+        p_le = sigmoid(cutpoints - eta)
+        p_le = np.concatenate([[0.0], p_le, [1.0]])
+        p = np.diff(p_le)
+        # Clip tiny negatives from numerical noise, re-normalise
+        p = np.clip(p, 0, None)
+        total = p.sum()
+        if total > 0:
+            p /= total
+        else:
+            p = np.ones(n_categories) / n_categories
+        return p
+
+    def predict_pmf(
+        self,
+        items: Dict[str, float],
+        target: str,
+        n_categories: int,
+        uncertainty_penalty: float = 1.0,
+    ) -> np.ndarray:
+        """Predict a full categorical PMF for an ordinal target.
+
+        Uses the same stacking logic as ``predict()`` but returns the
+        stacked *distribution* (mixture of ordinal PMFs) instead of a
+        scalar expected value.  This is the correct input for stochastic
+        imputation — sample from the returned PMF.
+
+        For binary or continuous targets the method falls back to
+        constructing a spike distribution at the stacked expected value.
+
+        Args:
+            items: Observed variable name → value mapping for this row.
+            target: Name of the target variable to impute.
+            n_categories: Number of response categories (``response_cardinality``).
+            uncertainty_penalty: Same as in ``predict()``.
+
+        Returns:
+            numpy array of shape ``(n_categories,)`` summing to 1.
+        """
+        if target not in self.variable_names:
+            raise ValueError(
+                f"Target '{target}' not in variable_names: {self.variable_names}"
+            )
+
+        target_idx = self.variable_names.index(target)
+        var_type = self.variable_types.get(target_idx, 'continuous')
+
+        # ---- collect (name, elpd, se, pmf) for every available model ----
+        models_info: list = []  # (name, elpd_loo, elpd_se, pmf_array)
+
+        # Zero-predictor
+        if target_idx in self.zero_predictor_results:
+            zr = self.zero_predictor_results[target_idx]
+            if zr.converged:
+                intercept = (
+                    zr.intercept_mean
+                    if zr.intercept_mean is not None
+                    else (
+                        float(np.mean(zr.params['intercept']))
+                        if zr.params and 'intercept' in zr.params
+                        else 0.0
+                    )
+                )
+                pmf = self._ordinal_pmf_from_model(zr, intercept, n_categories)
+                elpd_se = zr.elpd_loo_per_obs_se * zr.n_obs
+                models_info.append(('intercept', zr.elpd_loo, elpd_se, pmf))
+
+        # Univariate models
+        for predictor_name, predictor_value in items.items():
+            if predictor_name not in self.variable_names:
+                continue
+            if predictor_name == target:
+                continue
+            predictor_idx = self.variable_names.index(predictor_name)
+            key = (target_idx, predictor_idx)
+            if key not in self.univariate_results:
+                continue
+            ur = self.univariate_results[key]
+            if not ur.converged:
+                continue
+
+            # Compute eta for this model
+            X_mean = ur.predictor_mean if ur.predictor_mean is not None else 0.0
+            X_std = ur.predictor_std if ur.predictor_std is not None else 1.0
+            x_std = (predictor_value - X_mean) / X_std
+            beta_val = (
+                ur.beta_mean[0] if isinstance(ur.beta_mean, (np.ndarray, list))
+                else ur.beta_mean
+            )
+            intercept = ur.intercept_mean if ur.intercept_mean is not None else 0.0
+            eta = float(x_std * beta_val + intercept)
+
+            pmf = self._ordinal_pmf_from_model(ur, eta, n_categories)
+            elpd_se = ur.elpd_loo_per_obs_se * ur.n_obs
+            models_info.append((predictor_name, ur.elpd_loo, elpd_se, pmf))
+
+        if not models_info:
+            # No models — uniform fallback
+            return np.ones(n_categories) / n_categories
+
+        # ---- stacking weights (same logic as predict) ----
+        elpd_values = np.array([m[1] for m in models_info])
+        se_values = np.array([m[2] for m in models_info])
+        se_safe = np.where(np.isfinite(se_values), se_values, 1e6)
+        adjusted = elpd_values - uncertainty_penalty * se_safe
+
+        finite_mask = np.isfinite(adjusted)
+        if not np.any(finite_mask):
+            weights = np.ones(len(models_info)) / len(models_info)
+        else:
+            max_adj = np.max(adjusted[finite_mask])
+            log_w = np.where(finite_mask, adjusted - max_adj, -np.inf)
+            weights = np.exp(log_w)
+            weights /= weights.sum()
+
+        # ---- mixture PMF ----
+        pmf_stack = np.stack([m[3] for m in models_info], axis=0)  # (M, K)
+        stacked_pmf = weights @ pmf_stack  # (K,)
+        # Ensure valid distribution
+        stacked_pmf = np.clip(stacked_pmf, 0, None)
+        total = stacked_pmf.sum()
+        if total > 0:
+            stacked_pmf /= total
+        else:
+            stacked_pmf = np.ones(n_categories) / n_categories
+        return stacked_pmf
+
     def _result_to_dict(self, result: UnivariateModelResult) -> Dict[str, Any]:
         """Convert UnivariateModelResult to a serializable dict."""
         d = asdict(result)
