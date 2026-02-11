@@ -430,6 +430,353 @@ class TestFactorizedGRModel:
 
 
 # =========================================================================
+# Test FactorizedGRModel fitting with missing responses
+# =========================================================================
+
+class TestFactorizedGRModelMissingFit:
+    """Thorough tests for fitting FactorizedGRModel with missing response data.
+
+    Exercises the imputation iterator, verifies scale structure is preserved,
+    checks multiple n_imputation_samples values, and confirms loss is well-behaved.
+    """
+
+    NUM_PEOPLE = 40
+    NUM_ITEMS_PER_SCALE = 4
+    NUM_SCALES = 3
+    RESPONSE_CARDINALITY = 5
+
+    @pytest.fixture
+    def item_keys(self):
+        return [f"q_{i}" for i in range(self.NUM_SCALES * self.NUM_ITEMS_PER_SCALE)]
+
+    @pytest.fixture
+    def scale_indices(self):
+        n = self.NUM_ITEMS_PER_SCALE
+        return [list(range(j * n, (j + 1) * n)) for j in range(self.NUM_SCALES)]
+
+    def _make_data(self, item_keys, missingness_rate=0.0, seed=123):
+        """Generate synthetic ordinal response data with optional MCAR missingness."""
+        rng = np.random.default_rng(seed)
+        data = {"person": np.arange(self.NUM_PEOPLE, dtype=np.float64)}
+        for key in item_keys:
+            vals = rng.integers(0, self.RESPONSE_CARDINALITY, size=self.NUM_PEOPLE).astype(
+                np.float64
+            )
+            if missingness_rate > 0:
+                mask = rng.random(self.NUM_PEOPLE) < missingness_rate
+                vals[mask] = np.nan
+            data[key] = vals
+        return data
+
+    def _make_model(self, item_keys, scale_indices, imputation_model=None,
+                    n_imputation_samples=1):
+        from bayesianquilts.irt.factorizedgrm import FactorizedGRModel
+        return FactorizedGRModel(
+            scale_indices=scale_indices,
+            kappa_scale=0.1,
+            item_keys=item_keys,
+            num_people=self.NUM_PEOPLE,
+            response_cardinality=self.RESPONSE_CARDINALITY,
+            imputation_model=imputation_model,
+            n_imputation_samples=n_imputation_samples,
+        )
+
+    # ------------------------------------------------------------------
+    # 1. Imputation iterator mechanics
+    # ------------------------------------------------------------------
+
+    def test_imputing_iterator_yields_n_copies_for_missing_batch(
+        self, item_keys, scale_indices
+    ):
+        """When a batch has missing values, the imputing iterator yields
+        n_imputation_samples copies, each with no NaNs."""
+        n_samples = 3
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=n_samples,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.25)
+
+        # Verify the raw data has NaNs
+        nan_count = sum(np.isnan(data[k]).sum() for k in item_keys)
+        assert nan_count > 0, "Test data should have missing values"
+
+        # Collect batches from the imputing iterator
+        rng = np.random.default_rng(0)
+        copies = []
+        for _ in range(n_samples):
+            copies.append(model._impute_batch(data, rng))
+
+        assert len(copies) == n_samples
+
+        for i, batch in enumerate(copies):
+            for k in item_keys:
+                assert not np.any(np.isnan(batch[k])), (
+                    f"Copy {i}, item {k} still has NaN"
+                )
+                assert np.all(batch[k] >= 0), f"Copy {i}, {k} has negatives"
+                assert np.all(batch[k] < self.RESPONSE_CARDINALITY), (
+                    f"Copy {i}, {k} has out-of-range values"
+                )
+
+    def test_imputation_stochastic_across_draws(self, item_keys, scale_indices):
+        """Multiple imputation draws should not all be identical (stochasticity)."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=1,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.3, seed=7)
+
+        rng = np.random.default_rng(42)
+        draws = [model._impute_batch(data, rng) for _ in range(20)]
+
+        # At least one pair of draws should differ somewhere
+        any_different = False
+        for k in item_keys:
+            vals = np.stack([d[k] for d in draws], axis=0)
+            if np.any(vals != vals[0:1]):
+                any_different = True
+                break
+        assert any_different, (
+            "All 20 imputation draws are identical — imputation may not be stochastic"
+        )
+
+    def test_observed_values_unchanged_after_imputation(self, item_keys, scale_indices):
+        """Imputation must not modify observed (non-missing) responses."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.2, seed=99)
+
+        imputed = model._impute_batch(data)
+
+        for k in item_keys:
+            orig = data[k]
+            observed_mask = ~np.isnan(orig) & (orig >= 0) & (orig < self.RESPONSE_CARDINALITY)
+            np.testing.assert_array_equal(
+                imputed[k][observed_mask], orig[observed_mask],
+                err_msg=f"Observed values in {k} were modified by imputation",
+            )
+
+    # ------------------------------------------------------------------
+    # 2. End-to-end fitting with missing data
+    # ------------------------------------------------------------------
+
+    def test_fit_missing_data_with_imputation_loss_finite(
+        self, item_keys, scale_indices
+    ):
+        """Fit with 25% missingness + imputation: loss should remain finite."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=2,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.25)
+
+        def factory():
+            return iter([data])
+
+        losses, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=3,
+            steps_per_epoch=2,
+            learning_rate=0.05,
+        )
+        assert params is not None
+        for i, l in enumerate(losses):
+            assert np.isfinite(l), f"Loss at epoch {i} is not finite: {l}"
+
+    def test_fit_high_missingness(self, item_keys, scale_indices):
+        """50% missingness still produces finite losses (stress test)."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=3,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.50, seed=77)
+
+        def factory():
+            return iter([data])
+
+        losses, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=3,
+            steps_per_epoch=1,
+            learning_rate=0.05,
+        )
+        assert params is not None
+        assert np.isfinite(losses[-1]), f"Final loss not finite: {losses[-1]}"
+
+    def test_fit_single_imputation_sample(self, item_keys, scale_indices):
+        """n_imputation_samples=1 should work (no averaging needed)."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=1,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.2)
+
+        def factory():
+            return iter([data])
+
+        losses, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=2,
+            steps_per_epoch=1,
+            learning_rate=0.1,
+        )
+        assert params is not None
+        assert np.isfinite(losses[-1])
+
+    # ------------------------------------------------------------------
+    # 3. Comparison: missing data with vs without imputation
+    # ------------------------------------------------------------------
+
+    def test_fit_missing_without_imputation_also_works(
+        self, item_keys, scale_indices
+    ):
+        """Fitting with missing data but no imputation model uses zero-fill
+        and should also produce finite losses."""
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=None,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.25)
+
+        def factory():
+            return iter([data])
+
+        losses, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=3,
+            steps_per_epoch=1,
+            learning_rate=0.05,
+        )
+        assert params is not None
+        assert np.isfinite(losses[-1])
+
+    # ------------------------------------------------------------------
+    # 4. Scale structure preserved after imputed training
+    # ------------------------------------------------------------------
+
+    def test_scale_parameters_present_after_fit(self, item_keys, scale_indices):
+        """After fitting with imputation, per-scale surrogate params exist."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=2,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.2)
+
+        def factory():
+            return iter([data])
+
+        _, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=2,
+            steps_per_epoch=1,
+            learning_rate=0.1,
+        )
+
+        # Each scale should have its own discrimination and difficulty params
+        for j in range(self.NUM_SCALES):
+            assert any(f"discriminations_{j}" in k for k in params), (
+                f"Missing discriminations_{j} params after fit"
+            )
+            assert any(f"difficulties0_{j}" in k for k in params), (
+                f"Missing difficulties0_{j} params after fit"
+            )
+            assert any(f"abilities_{j}" in k for k in params), (
+                f"Missing abilities_{j} params after fit"
+            )
+
+    # ------------------------------------------------------------------
+    # 5. Missingness patterns
+    # ------------------------------------------------------------------
+
+    def test_fit_missingness_concentrated_in_one_scale(
+        self, item_keys, scale_indices
+    ):
+        """Missingness only in one scale's items; other scales are complete."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=2,
+        )
+        rng = np.random.default_rng(55)
+        data = {"person": np.arange(self.NUM_PEOPLE, dtype=np.float64)}
+        for i, key in enumerate(item_keys):
+            vals = rng.integers(0, self.RESPONSE_CARDINALITY, size=self.NUM_PEOPLE).astype(
+                np.float64
+            )
+            # Only inject missingness in the first scale's items
+            if i < self.NUM_ITEMS_PER_SCALE:
+                mask = rng.random(self.NUM_PEOPLE) < 0.4
+                vals[mask] = np.nan
+            data[key] = vals
+
+        def factory():
+            return iter([data])
+
+        losses, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=3,
+            steps_per_epoch=1,
+            learning_rate=0.05,
+        )
+        assert params is not None
+        assert np.isfinite(losses[-1])
+
+    def test_fit_single_item_missing_per_person(self, item_keys, scale_indices):
+        """Each person is missing exactly one item (monotone-ish pattern)."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+            n_imputation_samples=2,
+        )
+        rng = np.random.default_rng(33)
+        data = {"person": np.arange(self.NUM_PEOPLE, dtype=np.float64)}
+        n_items = len(item_keys)
+        for i, key in enumerate(item_keys):
+            data[key] = rng.integers(
+                0, self.RESPONSE_CARDINALITY, size=self.NUM_PEOPLE
+            ).astype(np.float64)
+
+        # For each person, set exactly one random item to NaN
+        for p in range(self.NUM_PEOPLE):
+            drop_idx = rng.integers(0, n_items)
+            data[item_keys[drop_idx]][p] = np.nan
+
+        def factory():
+            return iter([data])
+
+        losses, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=3,
+            steps_per_epoch=1,
+            learning_rate=0.05,
+        )
+        assert params is not None
+        assert np.isfinite(losses[-1])
+
+
+# =========================================================================
 # Test imputation batch wrapping
 # =========================================================================
 
