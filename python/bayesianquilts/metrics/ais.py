@@ -580,7 +580,7 @@ class LikelihoodDescent(SmallStepTransformation):
         else:
             grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
 
-        return grad_ll
+        return -grad_ll
 
 
 class KLDivergence(SmallStepTransformation):
