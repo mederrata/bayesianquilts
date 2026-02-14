@@ -5,6 +5,25 @@ This report documents the mathematical foundations behind the
 variational inference, stochastic imputation, and the Rao-Blackwellized
 training objective.
 
+> **A note on ignorability and misspecification.** Under the classical
+> Rubin (1976) framework, a Missing At Random (MAR) mechanism is
+> *ignorable* for likelihood-based inference --- one can maximize the
+> observed-data likelihood without modelling the missingness process.
+> However, this result assumes the analyst's model is correctly
+> specified (the *M-closed* setting). In the *M-open* regime, where the
+> true data-generating process is not contained in the model class, MAR
+> is **not sufficient for ignorability**. Misspecification introduces a
+> coupling between the missingness pattern and the estimation bias: the
+> observed-data likelihood under a wrong model no longer integrates out
+> the missing data correctly, so which values happen to be missing
+> affects the parameter estimates even when the probability of being
+> missing does not depend on the unobserved values. Because any
+> parametric IRT model is at best an approximation, we operate in the
+> M-open world and therefore **cannot simply ignore the missing data**.
+> Explicit imputation --- drawing plausible completions and averaging
+> over them --- is necessary to reduce the bias that would otherwise
+> result from dropping or zero-filling missing responses.
+
 ---
 
 ## 1. The Graded Response Model (GRM)
@@ -23,8 +42,8 @@ $$
 where the cumulative boundary probabilities are:
 
 $$
-P^*(Y_{ni} \geq k) = \sigma\bigl(\alpha_i(\theta_n - \tau_{ik})\bigr)
-= \frac{1}{1 + \exp\bigl(\alpha_i(\tau_{ik} - \theta_n)\bigr)}
+P^*(Y_{ni} \geq k) = \sigma\!\left(\alpha_i(\theta_n - \tau_{ik})\right)
+= \frac{1}{1 + \exp\!\left(\alpha_i(\tau_{ik} - \theta_n)\right)}
 $$
 
 with boundary conditions $P^*(Y_{ni} \geq 0) = 1$ and
@@ -92,13 +111,13 @@ parameters:
 The full parameter vector for scale $s$ is:
 
 $$
-\boldsymbol{\phi}_s = \bigl\{
+\boldsymbol{\phi}_s = \left\{
   \alpha_i^{(s)},\;
   \delta_{i0}^{(s)},\;
   \Delta_{ij}^{(s)},\;
   \theta_n^{(s)}
   : i \in \mathcal{S}_s,\; n = 1,\ldots,N
-\bigr\}
+\right\}
 $$
 
 ### 2.2 Joint log-probability
@@ -115,7 +134,7 @@ The log-likelihood for a batch of $N$ persons is:
 $$
 \ell(\boldsymbol{\phi}; \mathbf{Y})
 = \sum_{n=1}^{N} \sum_{s=1}^{S} \sum_{i \in \mathcal{S}_s}
-  \log P\bigl(Y_{ni} = y_{ni} \mid \boldsymbol{\phi}_s\bigr)
+  \log P(Y_{ni} = y_{ni} \mid \boldsymbol{\phi}_s)
 $$
 
 Missing responses ($y_{ni}$ is NaN or out-of-range) contribute zero to
@@ -140,8 +159,8 @@ The model is fitted by maximizing the Evidence Lower Bound (ELBO):
 $$
 \mathcal{L}(q)
 = \mathbb{E}_{q(\boldsymbol{\phi})}
-  \bigl[\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}, w)\bigr]
-- w \cdot \mathrm{KL}\bigl[q(\boldsymbol{\phi}) \,\|\, p(\boldsymbol{\phi})\bigr]
+  \left[\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}, w)\right]
+- w \cdot \mathrm{KL}\!\left[q(\boldsymbol{\phi}) \,\|\, p(\boldsymbol{\phi})\right]
 $$
 
 In practice, the loss function minimized is the negative ELBO, estimated
@@ -151,7 +170,7 @@ $$
 \hat{\mathcal{L}} = \frac{1}{S_q} \sum_{s=1}^{S_q}
 \Bigl[
   w \cdot \log q(\boldsymbol{\phi}^{(s)})
-  - \widetilde{\ell}\bigl(\boldsymbol{\phi}^{(s)}; \mathbf{Y}, w\bigr)
+  - \widetilde{\ell}(\boldsymbol{\phi}^{(s)}; \mathbf{Y}, w)
 \Bigr]
 $$
 
@@ -378,7 +397,7 @@ an associated LOO-ELPD $E_j$ and standard error $\text{SE}_j$.
 The uncertainty-penalized stacking weight for model $j$ is:
 
 $$
-\tilde{w}_j = \exp\bigl(E_j - \lambda \cdot \text{SE}_j\bigr)
+\tilde{w}_j = \exp(E_j - \lambda \cdot \text{SE}_j)
 $$
 
 where $\lambda$ is the `uncertainty_penalty` parameter (default 1.0,
@@ -470,8 +489,8 @@ which is equivalent to optimizing:
 
 $$
 \frac{1}{M} \sum_{m=1}^{M}
-\widetilde{\ell}\bigl(\boldsymbol{\phi};\, \mathbf{Y}_{\text{obs}},
-\mathbf{Y}_{\text{mis}}^{(m)},\, w\bigr)
+\widetilde{\ell}(\boldsymbol{\phi};\, \mathbf{Y}_{\text{obs}},
+\mathbf{Y}_{\text{mis}}^{(m)},\, w)
 $$
 
 Since $\widetilde{\ell}$ contains a $\log$, this averages
@@ -479,12 +498,12 @@ Since $\widetilde{\ell}$ contains a $\log$, this averages
 
 $$
 \frac{1}{M} \sum_{m=1}^{M}
-\log p\bigl(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi}\bigr)
+\log p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
+\mid \boldsymbol{\phi})
 \;\leq\;
-\log \biggl[\frac{1}{M} \sum_{m=1}^{M}
-p\bigl(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi}\bigr)\biggr]
+\log \left[\frac{1}{M} \sum_{m=1}^{M}
+p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
+\mid \boldsymbol{\phi})\right]
 $$
 
 The left side is a **lower bound** on the properly marginalized
@@ -496,18 +515,18 @@ The correct Monte Carlo estimate of the marginalized log-likelihood is:
 
 $$
 \log p(\mathbf{Y}_{\text{obs}} \mid \boldsymbol{\phi})
-\approx \log \biggl[\frac{1}{M} \sum_{m=1}^{M}
-p\bigl(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi}\bigr)\biggr]
+\approx \log \left[\frac{1}{M} \sum_{m=1}^{M}
+p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
+\mid \boldsymbol{\phi})\right]
 $$
 
 In log-space, this is computed via the log-sum-exp trick:
 
 $$
-\log \biggl[\frac{1}{M} \sum_{m=1}^{M}
-p\bigl(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi}\bigr)\biggr]
-= \mathrm{logsumexp}_{m}\bigl(\ell_m\bigr) - \log M
+\log \left[\frac{1}{M} \sum_{m=1}^{M}
+p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
+\mid \boldsymbol{\phi})\right]
+= \mathrm{logsumexp}_{m}(\ell_m) - \log M
 $$
 
 where
@@ -529,18 +548,18 @@ across imputations (it depends only on $\boldsymbol{\phi}$, not on
 $\mathbf{Y}_{\text{mis}}$), the logsumexp factors cleanly:
 
 $$
-\mathrm{logsumexp}_{m}\bigl(\widetilde{\ell}_m\bigr) - \log M
-= \mathrm{logsumexp}_{m}\bigl(C + \ell_m\bigr) - \log M
-= C + \mathrm{logsumexp}_{m}\bigl(\ell_m\bigr) - \log M
+\mathrm{logsumexp}_{m}(\widetilde{\ell}_m) - \log M
+= \mathrm{logsumexp}_{m}(C + \ell_m) - \log M
+= C + \mathrm{logsumexp}_{m}(\ell_m) - \log M
 $$
 
 where $C = w \cdot \log p(\boldsymbol{\phi})$. This equals:
 
 $$
 w \cdot \log p(\boldsymbol{\phi})
-+ \log\biggl[\frac{1}{M}\sum_{m=1}^{M}
-p\bigl(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi}\bigr)\biggr]
++ \log\left[\frac{1}{M}\sum_{m=1}^{M}
+p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
+\mid \boldsymbol{\phi})\right]
 $$
 
 which is the correct Rao-Blackwellized target. The implementation
