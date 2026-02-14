@@ -175,7 +175,7 @@ All surrogate parameters are optimized jointly via Adam with gradient
 clipping, learning rate decay, and early stopping.
 
 
-## 4. Stochastic Imputation
+## 4. The Imputation Model (MICEBayesianLOO)
 
 ### 4.1 The missing data problem
 
@@ -191,32 +191,267 @@ $$
 $$
 
 This integral is intractable for discrete ordinal responses, so we
-approximate it via Monte Carlo.
+approximate it via Monte Carlo using draws from an imputation model.
 
-### 4.2 Imputation model: MICEBayesianLOO
+### 4.2 Overview of MICEBayesianLOO
 
-The imputation distribution
-$p(\mathbf{Y}_{\text{mis}} \mid \mathbf{Y}_{\text{obs}})$ is provided
-by a `MICEBayesianLOO` model. For each item $i$ with a missing response
-for person $n$, the imputation model provides a categorical PMF:
+`MICEBayesianLOO` provides the imputation distribution
+$\hat{p}(\mathbf{Y}_{\text{mis}} \mid \mathbf{Y}_{\text{obs}})$.
+It is a library of simple Bayesian regression models --- one per
+ordered pair of variables --- whose predictions are combined at
+prediction time via Bayesian stacking.
+
+For $P$ variables the framework fits:
+
+| Model class | Count | Description |
+|---|---|---|
+| Zero-predictor | $P$ | Intercept-only model for each variable |
+| One-predictor | up to $P(P-1)$ | Predict variable $i$ from variable $j$ |
+
+Each model is fitted independently using **Pathfinder** variational
+inference (or optionally ADVI) and evaluated via **PSIS-LOO-CV**.
+
+### 4.3 The sub-model families
+
+The model family chosen for each target variable depends on its inferred
+type. For IRT items, all targets are ordinal.
+
+#### 4.3.1 Ordinal logistic regression (cumulative link model)
+
+This is the primary model used for IRT item imputation. The
+**cumulative (proportional-odds) model** defines:
 
 $$
-\hat{p}(Y_{ni} = k \mid \mathbf{Y}_{n, -i}^{\text{obs}})
-\quad\text{for}\quad k = 0, \ldots, K-1
+P(Y \leq k \mid \mathbf{x}) = \sigma(c_k - \eta),
+\qquad k = 1, \ldots, K-1
 $$
 
-This PMF is a Bayesian stacking mixture of ordinal logistic regression
-models, each predicting item $i$ from a single other observed item $j$.
-The stacking weights are determined by LOO-CV expected log pointwise
-predictive density (ELPD).
+where $\sigma(\cdot)$ is the logistic sigmoid, and the **linear
+predictor** is:
 
-At each training step, imputed values $y_{ni}^{(m)}$ are sampled from
-these PMFs independently for $m = 1, \ldots, M$, producing $M$
-completed datasets.
+$$
+\eta = \boldsymbol{\beta}^\top \mathbf{x}
+$$
 
-### 4.3 Validation checks
+The ordered cutpoints $c_1 < c_2 < \cdots < c_{K-1}$ are enforced via
+the **ascending bijector**: given unconstrained parameters
+$\mathbf{r} \in \mathbb{R}^{K-1}$,
 
-Before fitting, `validate_imputation_model()` performs five checks:
+$$
+c_1 = r_1, \qquad
+c_k = c_{k-1} + \text{softplus}(r_k) \;\text{ for } k \geq 2
+$$
+
+This ensures strict ordering. The category probabilities are:
+
+$$
+P(Y = k \mid \mathbf{x}) = P(Y \leq k) - P(Y \leq k-1)
+$$
+
+with boundary conditions $P(Y \leq 0) = 0$ and $P(Y \leq K) = 1$.
+This is implemented via TFP's `OrderedLogistic` distribution.
+
+**Priors.** The Bayesian ordinal logistic model has the following
+priors:
+
+$$
+\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0},\, \sigma_0^2 \mathbf{I}),
+\qquad
+\mathbf{r} \sim \mathcal{N}(\mathbf{0},\, 25 \mathbf{I})
+$$
+
+where $\sigma_0$ is the `prior_scale` hyperparameter (default 1.0).
+The wide prior on $\mathbf{r}$ is weakly informative for the cutpoint
+locations.
+
+**Predictor encoding.** When the predictor $j$ is itself ordinal with
+values $\{0, 1, \ldots, V\}$, it is encoded using **thermometer
+(ordinal one-hot) encoding**:
+
+$$
+\mathbf{x}(v) = [\mathbb{1}(v \geq 1),\; \mathbb{1}(v \geq 2),\; \ldots,\; \mathbb{1}(v \geq V)]
+\;\in\; \{0,1\}^V
+$$
+
+This preserves the ordinal structure: each additional unit of the
+predictor "turns on" one more indicator. For continuous predictors,
+the raw value is standardized to zero mean and unit variance.
+
+#### 4.3.2 Binary logistic regression
+
+For binary targets ($K = 2$), the model simplifies to standard
+logistic regression:
+
+$$
+P(Y = 1 \mid \mathbf{x}) = \sigma(\boldsymbol{\beta}^\top \mathbf{x} + b)
+$$
+
+$$
+\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0},\, \sigma_0^2 \mathbf{I}),
+\qquad b \sim \mathcal{N}(0, \sigma_0^2)
+$$
+
+#### 4.3.3 Linear regression
+
+For continuous targets, a Bayesian linear regression is used:
+
+$$
+Y \mid \mathbf{x} \sim \mathcal{N}(\boldsymbol{\beta}^\top \mathbf{x} + b,\; \sigma^2)
+$$
+
+$$
+\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0},\, \sigma_0^2 \mathbf{I}),
+\quad b \sim \mathcal{N}(0, \sigma_0^2),
+\quad \log \sigma \sim \mathcal{N}(\log \sigma_{\text{noise}},\, 1)
+$$
+
+This model is not used for IRT items but may appear for auxiliary
+variables in the imputation framework.
+
+### 4.4 Posterior inference with Pathfinder
+
+Each sub-model's posterior is approximated using **Pathfinder**
+(Zhang et al., 2022), a fast variational method that:
+
+1. Runs L-BFGS on the unnormalized log-posterior.
+2. At each iterate, fits a diagonal-Gaussian approximation using
+   the L-BFGS inverse-Hessian estimate.
+3. Selects the best approximation by ELBO.
+4. Draws samples from that Gaussian.
+
+Pathfinder is much faster than full ADVI or MCMC for these low-
+dimensional sub-models (typically 1--10 parameters each), making it
+feasible to fit $O(P^2)$ models.
+
+### 4.5 Model evaluation via PSIS-LOO-CV
+
+Each fitted sub-model is evaluated using **Pareto-Smoothed Importance
+Sampling Leave-One-Out** cross-validation (Vehtari et al., 2017).
+Given $S$ posterior samples and $N$ observations, the pointwise
+LOO log-predictive density is estimated as:
+
+$$
+\widehat{\text{elpd}}_{\text{LOO}}
+= \sum_{n=1}^{N} \log \hat{p}(y_n \mid y_{-n})
+$$
+
+where
+
+$$
+\hat{p}(y_n \mid y_{-n})
+= \frac{
+  \sum_{s=1}^{S} w_n^{(s)} \, p(y_n \mid \boldsymbol{\psi}^{(s)})
+}{
+  \sum_{s=1}^{S} w_n^{(s)}
+}
+$$
+
+and $w_n^{(s)}$ are Pareto-smoothed importance weights derived from
+the leave-one-out ratios $1 / p(y_n \mid \boldsymbol{\psi}^{(s)})$.
+
+The PSIS diagnostic $\hat{k}$ quantifies the reliability of the
+importance sampling approximation:
+
+| $\hat{k}$ | Interpretation |
+|---|---|
+| $< 0.5$ | Excellent; IS estimate is reliable |
+| $0.5$--$0.7$ | Acceptable; moderate IS variance |
+| $> 0.7$ | Unreliable; IS approximation breaks down |
+
+Each sub-model stores:
+- `elpd_loo_per_obs`: $\widehat{\text{elpd}}_{\text{LOO}} / N$ (normalized for comparability across different sample sizes)
+- `khat_max`: worst-case $\hat{k}$ across observations
+- `converged`: whether Pathfinder converged
+- Point estimates (`beta_mean`, `intercept_mean`, `cutpoints_mean`) for prediction
+
+### 4.6 Stacking weights at prediction time
+
+When predicting item $i$ for person $n$, the imputation model
+assembles all available sub-models (zero-predictor + one-predictor
+models for each observed item $j$) and computes **stacking weights**.
+
+Let $\mathcal{M} = \{M_0, M_1, \ldots, M_J\}$ denote the set of
+available models for target $i$, where $M_0$ is the zero-predictor
+and $M_j$ uses observed item $j$ as predictor. Each model $M_j$ has
+an associated LOO-ELPD $E_j$ and standard error $\text{SE}_j$.
+
+The uncertainty-penalized stacking weight for model $j$ is:
+
+$$
+\tilde{w}_j = \exp\bigl(E_j - \lambda \cdot \text{SE}_j\bigr)
+$$
+
+where $\lambda$ is the `uncertainty_penalty` parameter (default 1.0,
+corresponding to a roughly one-standard-error lower confidence bound).
+The normalized weights are:
+
+$$
+w_j = \frac{\tilde{w}_j}{\sum_{j'} \tilde{w}_{j'}}
+$$
+
+This is a softmax over uncertainty-adjusted ELPDs: models with higher
+predictive accuracy get more weight, and models with uncertain ELPD
+estimates are penalized.
+
+### 4.7 Constructing the imputation PMF
+
+For ordinal targets (the IRT case), each sub-model $M_j$ produces a
+categorical PMF over $\{0, \ldots, K-1\}$ via the cumulative model:
+
+$$
+p_{M_j}(Y = k \mid x_j)
+= \sigma(c_k^{(j)} - \eta_j) - \sigma(c_{k-1}^{(j)} - \eta_j)
+$$
+
+where $\eta_j = \bar{\beta}_j \cdot \tilde{x}_j + \bar{b}_j$ uses
+the posterior mean estimates $\bar{\beta}_j$, $\bar{b}_j$, and
+$\bar{\mathbf{c}}^{(j)}$ (posterior mean of the transformed cutpoints).
+The predictor value $\tilde{x}_j$ is standardized using the training
+mean and standard deviation stored in the sub-model result.
+
+The stacked imputation PMF is the **finite mixture**:
+
+$$
+\hat{p}(Y_{ni} = k \mid \mathbf{Y}_{n,-i}^{\text{obs}})
+= \sum_{j \in \mathcal{M}} w_j \; p_{M_j}(Y_{ni} = k \mid x_{nj})
+$$
+
+This is a proper categorical distribution (sums to 1). At each
+training step, the IRT model draws imputed values
+$y_{ni}^{(m)} \sim \text{Categorical}(\hat{p})$ independently for
+each missing cell and each of the $M$ imputation copies.
+
+### 4.8 Why univariate models?
+
+A natural question is why `MICEBayesianLOO` uses only **one-predictor**
+models rather than multivariate models using all observed items
+simultaneously. The reasons are:
+
+1. **Scalability**: Fitting $P^2$ tiny models (each with $\leq 10$
+   parameters) via Pathfinder is fast and embarrassingly parallel.
+   A single multivariate model for each target would have $O(PK)$
+   parameters and require more careful regularization.
+
+2. **Robustness to missingness patterns**: Each one-predictor model
+   $(i, j)$ is trained only on rows where both $i$ and $j$ are
+   observed. Different predictor models may use different subsets of
+   the data, avoiding the need to handle arbitrary missingness
+   patterns within a single model.
+
+3. **Stacking provides adaptive combination**: By weighting models
+   according to their LOO-ELPD, the framework automatically upweights
+   the most informative predictors for each target. The stacking
+   mixture can approximate multivariate predictive distributions
+   without explicitly fitting them.
+
+4. **LOO-CV diagnostics per model**: Having simple models makes PSIS
+   diagnostics interpretable. A high $\hat{k}$ for model $(i,j)$
+   directly indicates that item $j$ is a poor predictor of item $i$.
+
+### 4.9 Validation checks
+
+Before fitting the IRT model, `validate_imputation_model()` performs
+five checks:
 
 1. **Fitted**: The imputation model has been trained.
 2. **Coverage**: All IRT item keys appear in the imputation model.
@@ -411,5 +646,8 @@ imputations.
 
 - Samejima, F. (1969). Estimation of latent ability using a response pattern of graded scores. *Psychometrika Monograph Supplement*, 34(4, Pt. 2), 1--97.
 - Blei, D. M., Kucukelbir, A., & McAuliffe, J. D. (2017). Variational inference: A review for statisticians. *Journal of the American Statistical Association*, 112(518), 859--877.
+- Zhang, L., Carpenter, B., Gelman, A., & Vehtari, A. (2022). Pathfinder: Parallel quasi-Newton variational inference. *Journal of Machine Learning Research*, 23(306), 1--49.
 - Vehtari, A., Gelman, A., & Gabry, J. (2017). Practical Bayesian model evaluation using leave-one-out cross-validation and WAIC. *Statistics and Computing*, 27(5), 1413--1432.
+- Yao, Y., Vehtari, A., Simpson, D., & Gelman, A. (2018). Using stacking to average Bayesian predictive distributions. *Bayesian Analysis*, 13(3), 917--1007.
+- Agresti, A. (2010). *Analysis of Ordinal Categorical Data* (2nd ed.). Wiley.
 - Rubin, D. B. (1987). *Multiple Imputation for Nonresponse in Surveys*. Wiley.
