@@ -100,7 +100,7 @@ class MockImputationModel:
 # =========================================================================
 
 def _make_concrete_irt(item_keys, num_people=10, response_cardinality=5,
-                       imputation_model=None, n_imputation_samples=1):
+                       imputation_model=None):
     """Create a concrete IRTModel subclass for testing validation/imputation.
 
     GRModel is the simplest concrete subclass; we use it directly.
@@ -111,7 +111,6 @@ def _make_concrete_irt(item_keys, num_people=10, response_cardinality=5,
         num_people=num_people,
         response_cardinality=response_cardinality,
         imputation_model=imputation_model,
-        n_imputation_samples=n_imputation_samples,
     )
 
 
@@ -200,7 +199,7 @@ class TestValidateImputationModel:
 class TestGRModel:
 
     def _make_grm(self, num_items=10, num_people=50, response_cardinality=5,
-                  imputation_model=None, n_imputation_samples=1):
+                  imputation_model=None):
         from bayesianquilts.irt.grm import GRModel
         item_keys = [f"item_{i}" for i in range(num_items)]
         model = GRModel(
@@ -208,7 +207,6 @@ class TestGRModel:
             num_people=num_people,
             response_cardinality=response_cardinality,
             imputation_model=imputation_model,
-            n_imputation_samples=n_imputation_samples,
         )
         return model, item_keys
 
@@ -307,7 +305,6 @@ class TestGRModel:
         im = MockImputationModel(variable_names=item_keys)
         model, _ = self._make_grm(
             num_items=5, num_people=20, imputation_model=im,
-            n_imputation_samples=2,
         )
         data = self._make_synthetic_data(20, item_keys, 5, missingness_rate=0.2)
 
@@ -321,6 +318,7 @@ class TestGRModel:
             num_epochs=2,
             steps_per_epoch=1,
             learning_rate=0.1,
+            n_imputation_samples=2,
         )
         assert params is not None
         assert np.isfinite(losses[-1])
@@ -333,7 +331,7 @@ class TestGRModel:
 class TestFactorizedGRModel:
 
     def _make_fgrm(self, num_people=20, response_cardinality=5,
-                   imputation_model=None, n_imputation_samples=1):
+                   imputation_model=None):
         from bayesianquilts.irt.factorizedgrm import FactorizedGRModel
         item_keys = [f"item_{i}" for i in range(6)]
         scale_indices = [[0, 1, 2], [3, 4, 5]]
@@ -344,7 +342,6 @@ class TestFactorizedGRModel:
             num_people=num_people,
             response_cardinality=response_cardinality,
             imputation_model=imputation_model,
-            n_imputation_samples=n_imputation_samples,
         )
         return model, item_keys
 
@@ -412,7 +409,7 @@ class TestFactorizedGRModel:
         item_keys = [f"item_{i}" for i in range(6)]
         im = MockImputationModel(variable_names=item_keys)
         model, _ = self._make_fgrm(
-            imputation_model=im, n_imputation_samples=2,
+            imputation_model=im,
         )
         data = self._make_synthetic_data(20, item_keys, 5, missingness_rate=0.15)
 
@@ -426,6 +423,7 @@ class TestFactorizedGRModel:
             num_epochs=2,
             steps_per_epoch=1,
             learning_rate=0.1,
+            n_imputation_samples=2,
         )
         assert params is not None
         assert np.isfinite(losses[-1])
@@ -478,8 +476,7 @@ class TestFactorizedGRModelMissingFit:
             data[key] = vals
         return data
 
-    def _make_model(self, item_keys, scale_indices, imputation_model=None,
-                    n_imputation_samples=1):
+    def _make_model(self, item_keys, scale_indices, imputation_model=None):
         from bayesianquilts.irt.factorizedgrm import FactorizedGRModel
         return FactorizedGRModel(
             scale_indices=scale_indices,
@@ -488,7 +485,6 @@ class TestFactorizedGRModelMissingFit:
             num_people=self.NUM_PEOPLE,
             response_cardinality=self.RESPONSE_CARDINALITY,
             imputation_model=imputation_model,
-            n_imputation_samples=n_imputation_samples,
         )
 
     # ------------------------------------------------------------------
@@ -504,7 +500,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=n_samples,
         )
         data = self._make_data(item_keys, missingness_rate=0.25)
 
@@ -535,7 +530,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=1,
         )
         data = self._make_data(item_keys, missingness_rate=0.3, seed=7)
 
@@ -582,7 +576,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=2,
         )
         data = self._make_data(item_keys, missingness_rate=0.25)
 
@@ -596,6 +589,7 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=2,
             learning_rate=0.05,
+            n_imputation_samples=2,
         )
         assert params is not None
         for i, l in enumerate(losses):
@@ -606,7 +600,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=3,
         )
         data = self._make_data(item_keys, missingness_rate=0.50, seed=77)
 
@@ -620,6 +613,7 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=1,
             learning_rate=0.05,
+            n_imputation_samples=3,
         )
         assert params is not None
         assert np.isfinite(losses[-1]), f"Final loss not finite: {losses[-1]}"
@@ -629,7 +623,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=1,
         )
         data = self._make_data(item_keys, missingness_rate=0.2)
 
@@ -684,7 +677,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=2,
         )
         data = self._make_data(item_keys, missingness_rate=0.2)
 
@@ -698,6 +690,7 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=2,
             steps_per_epoch=1,
             learning_rate=0.1,
+            n_imputation_samples=2,
         )
 
         # Each scale should have its own discrimination and difficulty params
@@ -723,7 +716,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=2,
         )
         rng = np.random.default_rng(55)
         data = {"person": np.arange(self.NUM_PEOPLE, dtype=np.float64)}
@@ -747,6 +739,7 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=1,
             learning_rate=0.05,
+            n_imputation_samples=2,
         )
         assert params is not None
         assert np.isfinite(losses[-1])
@@ -756,7 +749,6 @@ class TestFactorizedGRModelMissingFit:
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
-            n_imputation_samples=2,
         )
         rng = np.random.default_rng(33)
         data = {"person": np.arange(self.NUM_PEOPLE, dtype=np.float64)}
@@ -781,6 +773,7 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=1,
             learning_rate=0.05,
+            n_imputation_samples=2,
         )
         assert params is not None
         assert np.isfinite(losses[-1])
@@ -800,7 +793,6 @@ class TestImputationBatchWrapping:
             item_keys=item_keys,
             num_people=10,
             imputation_model=im,
-            n_imputation_samples=3,
         )
 
         batch = {
