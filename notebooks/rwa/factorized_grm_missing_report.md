@@ -1,9 +1,9 @@
-# Factorized Graded Response Model with Rao-Blackwellized Imputation
+# Factorized Graded Response Model with Analytic Rao-Blackwellized Imputation
 
 This report documents the mathematical foundations behind the
 `factorized_grm_missing` notebook, covering the Graded Response Model,
-variational inference, stochastic imputation, and the Rao-Blackwellized
-training objective.
+variational inference, the imputation model, and the analytic
+Rao-Blackwellized training objective.
 
 > **A note on ignorability and misspecification.** Under the classical
 > Rubin (1976) framework, a Missing At Random (MAR) mechanism is
@@ -184,8 +184,9 @@ $$
 \log p(\mathbf{Y}_{\text{obs}} \mid \boldsymbol{\phi}) = \log \int p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}} \mid \boldsymbol{\phi}) \; p(\mathbf{Y}_{\text{mis}} \mid \mathbf{Y}_{\text{obs}}) \;\mathrm{d}\mathbf{Y}_{\text{mis}}
 $$
 
-This integral is intractable for discrete ordinal responses, so we
-approximate it via Monte Carlo using draws from an imputation model.
+For continuous missing data this integral is intractable, but for
+**discrete ordinal responses** the sum over categories is finite and
+can be computed **exactly** using the imputation model's categorical PMF.
 
 ### 4.2 Overview of MICEBayesianLOO
 
@@ -394,10 +395,10 @@ $$
 \hat{p}(Y_{ni} = k \mid \mathbf{Y}_{n,{-}i}^{\text{obs}}) = \sum_{j \in \mathcal{M}} w_j \; p_{M_j}(Y_{ni} = k \mid x_{nj})
 $$
 
-This is a proper categorical distribution (sums to 1). At each
-training step, the IRT model draws imputed values
-$y_{ni}^{(m)} \sim \text{Categorical}(\hat{p})$ independently for
-each missing cell and each of the $M$ imputation copies.
+This is a proper categorical distribution (sums to 1). Rather than
+drawing samples from $\hat{p}$, the IRT model uses this PMF directly
+to analytically marginalize the missing-cell contribution to the
+log-likelihood (Section 5).
 
 ### 4.8 Why univariate models?
 
@@ -438,148 +439,164 @@ five checks:
 5. **PSIS diagnostic**: Best model's $\hat{k} < 0.7$ (warning if not).
 
 
-## 5. Rao-Blackwellized Training Objective
+## 5. Analytic Rao-Blackwellized Training Objective
 
-### 5.1 The naive approach (averaging log-likelihoods)
+### 5.1 The problem
 
-A previous implementation yielded $M$ imputed copies as $M$ separate
-mini-batches. The optimizer then averaged gradients across these batches,
-which is equivalent to optimizing:
-
-$$
-\frac{1}{M} \sum_{m=1}^{M} \widetilde{\ell}(\boldsymbol{\phi};\, \mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)},\, w)
-$$
-
-Since $\widetilde{\ell}$ contains a $\log$, this averages
-**log-likelihoods**. By Jensen's inequality:
+The ideal target for each missing cell $(n, i)$ is the marginalized
+log-likelihood:
 
 $$
-\frac{1}{M} \sum_{m=1}^{M} \log p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi}) \;\leq\; \log \Big[\frac{1}{M} \sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big]
+\log p(Y_{ni}^{\text{obs}} \mid \boldsymbol{\phi}) = \log \sum_{k=0}^{K{-}1} q(k \mid \mathbf{Y}_{n,{-}i}^{\text{obs}}) \; p(Y_{ni}=k \mid \boldsymbol{\phi})
 $$
 
-The left side is a **lower bound** on the properly marginalized
-log-likelihood, introducing downward bias in the ELBO.
+where $q(k \mid \cdot)$ is the imputation model's categorical PMF
+(Section 4.7) and $p(Y_{ni}=k \mid \boldsymbol{\phi})$ is the IRT
+model's response probability.
 
-### 5.2 The Rao-Blackwellized approach (averaging likelihoods)
+A Monte Carlo approach would draw $M$ imputed copies from $q$ and
+average likelihoods via logsumexp. However, since $q$ is a discrete
+categorical distribution over $K$ categories, the sum over $k$ is
+**finite and tractable** --- we can compute it exactly.
 
-The correct Monte Carlo estimate of the marginalized log-likelihood is:
+### 5.2 Analytic marginalization
 
-$$
-\log p(\mathbf{Y}_{\text{obs}} \mid \boldsymbol{\phi}) \approx \log \Big[\frac{1}{M} \sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big]
-$$
+For each missing cell $(n, i)$, the imputation model provides a
+$K$-dimensional PMF $\mathbf{q}_{ni} = (q_0, \ldots, q_{K{-}1})$.
+The model's response probabilities are
+$\mathbf{p}_{ni} = (p_0, \ldots, p_{K{-}1})$ where
+$p_k = P(Y_{ni} = k \mid \boldsymbol{\phi})$.
 
-In log-space, this is computed via the log-sum-exp trick:
-
-$$
-\log \Big[\frac{1}{M} \sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big] = \mathrm{logsumexp}_{m}(\ell_m) {-} \log M
-$$
-
-where $\ell_m = \log p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})$.
-
-### 5.3 Incorporating the prior
-
-The full unnormalized log-posterior for a batch is:
+The **exact** marginalized contribution for this cell is:
 
 $$
-\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}^{(m)}, w) = w \cdot \log p(\boldsymbol{\phi}) + \ell_m(\boldsymbol{\phi})
+\ell_{ni}^{\text{RB}} = \log \sum_{k=0}^{K{-}1} q_k \cdot p_k
 $$
 
-Since the prior term $w \cdot \log p(\boldsymbol{\phi})$ is constant
-across imputations (it depends only on $\boldsymbol{\phi}$, not on
-$\mathbf{Y}_{\text{mis}}$), the logsumexp factors cleanly:
+This is computed in log-space for numerical stability:
 
 $$
-\mathrm{logsumexp}_{m}(\widetilde{\ell}_m) {-} \log M = \mathrm{logsumexp}_{m}(C + \ell_m) {-} \log M = C + \mathrm{logsumexp}_{m}(\ell_m) {-} \log M
+\ell_{ni}^{\text{RB}} = \mathrm{logsumexp}_k\big(\log q_k + \log p_k\big)
 $$
 
-where $C = w \cdot \log p(\boldsymbol{\phi})$. This equals:
+For **observed** cells, the standard log-likelihood applies:
 
 $$
-w \cdot \log p(\boldsymbol{\phi}) + \log \Big[\frac{1}{M}\sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big]
+\ell_{ni}^{\text{obs}} = \log p(Y_{ni} = y_{ni} \mid \boldsymbol{\phi})
 $$
 
-which is the correct Rao-Blackwellized target. The implementation
-therefore calls `unormalized_log_prob` on each imputed copy and applies
-`logsumexp` directly to those values.
+### 5.3 The full training objective
 
-### 5.4 Why "Rao-Blackwellization"?
+The log-likelihood for a batch combines observed and missing cells:
+
+$$
+\ell(\boldsymbol{\phi}; \mathbf{Y}) = \sum_{n=1}^{N} \sum_{i=1}^{I} \begin{cases} \log p(Y_{ni} = y_{ni} \mid \boldsymbol{\phi}) & \text{if } y_{ni} \text{ observed} \\ \mathrm{logsumexp}_k(\log q_k + \log p_k) & \text{if } y_{ni} \text{ missing} \end{cases}
+$$
+
+The unnormalized log-posterior for VI is then:
+
+$$
+\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}, w) = w \cdot \log p(\boldsymbol{\phi}) + \ell(\boldsymbol{\phi}; \mathbf{Y})
+$$
+
+### 5.4 Why this is true Rao-Blackwellization
 
 The Rao-Blackwell theorem states that conditioning an unbiased estimator
 on a sufficient statistic reduces its variance without introducing bias.
-Here, averaging **likelihoods** before taking the log is the
-Rao-Blackwellized estimator of the marginal log-likelihood under the
-imputation distribution. It has lower variance (and no Jensen bias)
-compared to averaging log-likelihoods.
+Here, instead of sampling from $q$ and evaluating a single imputed
+category (Monte Carlo), we compute the **expectation under $q$
+analytically**:
 
-### 5.5 Special cases
+$$
+\mathbb{E}_{Y \sim q}[p(Y \mid \boldsymbol{\phi})] = \sum_k q_k \, p_k
+$$
 
-- When $M = 1$: $\mathrm{logsumexp}([\ell_1]) {-} \log 1 = \ell_1$.
-  Reduces to ordinary single-imputation; no overhead.
+This is the Rao-Blackwellized estimator. Because the sum is over a
+finite discrete distribution, it is **exact** (zero variance from the
+imputation), unlike Monte Carlo which has variance proportional to
+$1/M$.
 
-- **No missing data**: Item arrays have `ndim == 1` (not stacked).
-  The wrapper falls through to `unormalized_log_prob` directly.
+### 5.5 Advantages over the Monte Carlo approach
 
-- **All copies identical** (no missing values in a batch): Since all
-  $\ell_m$ are equal, $\mathrm{logsumexp}([\ell, \ldots, \ell]) {-} \log M = \ell + \log M {-} \log M = \ell$. Correct.
+| | Monte Carlo ($M$ samples) | Analytic marginalization |
+|---|---|---|
+| **Variance** | $O(1/M)$ from imputation | Zero (exact) |
+| **Model evaluations** | $M$ per batch | 1 per batch |
+| **Parameters** | Requires choosing $M$ | None |
+| **Memory** | $O(M \times N \times I)$ stacked data | $O(N \times I \times K)$ PMF array |
+| **JIT compilation** | May retrace for different $M$ | Stable graph |
+
+### 5.6 Special cases
+
+- **No missing data**: No PMFs are needed; all cells use the standard
+  log-likelihood. When an imputation model is set but a batch has no
+  missing values, all-zero PMFs are passed (masked out by `bad_choices`).
+
+- **Uniform imputation** ($q_k = 1/K$): The contribution reduces to
+  $\log \frac{1}{K} + \log \sum_k p_k = \log \frac{1}{K} + 0 = -\log K$,
+  a constant penalty per missing cell.
 
 
 ## 6. Implementation Details
 
 ### 6.1 Data layout
 
-For a batch of $N$ persons with $M$ imputation copies:
+For a batch of $N$ persons with imputation:
 
-| Key | Shape (no missing) | Shape (with missing) |
+| Key | Shape | Description |
 |---|---|---|
-| `person` | $(N,)$ | $(N,)$ |
-| each item key | $(N,)$ | $(M, N)$ |
+| `person` | $(N,)$ | Person indices |
+| each item key | $(N,)$ | Response data (NaN for missing) |
+| `_imputation_pmfs` | $(N, I, K)$ | Imputation PMFs (zeros for observed cells) |
 
-The stacking is done in NumPy (CPU) before the batch enters the
-JIT-compiled JAX computation graph.
+The PMF array is computed in NumPy (CPU) by calling
+`_compute_batch_pmfs()` before the batch enters the JIT-compiled JAX
+computation graph. The `_imputation_pmfs` key is always present when an
+imputation model is set (even for batches with no missing values, where
+it is all zeros), to avoid JIT retrace issues from changing dict keys.
 
-### 6.2 Wrapped log-probability function
+### 6.2 Integration with `predictive_distribution`
 
-The `rao_blackwell_log_prob` closure is passed as
-`unormalized_log_prob_fn` to `_calibrate_minibatch_advi`. It detects
-stacked data via `ndim > 1` on the first item key:
+The analytic marginalization is handled directly inside
+`predictive_distribution()` in both `GRModel` and
+`FactorizedGRModel`. When `_imputation_pmfs` is present in the data
+dict:
 
 ```python
-def rao_blackwell_log_prob(data, prior_weight, **params):
-    if data[first_item].ndim > 1:
-        M = data[first_item].shape[0]
-        results = [
-            self.unormalized_log_prob(data=data_m, ...)
-            for m in range(M)
-        ]
-        return logsumexp(stack(results)) - log(M)
-    else:
-        return self.unormalized_log_prob(data=data, ...)
+imputation_pmfs = data.get('_imputation_pmfs')
+if imputation_pmfs is not None:
+    log_rp = jnp.log(jnp.maximum(response_probs, 1e-30))  # (S, N, I, K)
+    log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))   # (N, I, K)
+    rb = jax.scipy.special.logsumexp(
+        log_rp + log_q[jnp.newaxis, ...], axis=-1)          # (S, N, I)
+    log_probs = jnp.where(bad_choices[...], rb, log_probs)
+else:
+    log_probs = jnp.where(bad_choices[...], 0, log_probs)   # zero-fill fallback
 ```
 
-Since $M$ is a compile-time constant (the Python `int`
-`n_imputation_samples`), JAX unrolls the loop during tracing. The
-`logsumexp` and `log(M)` operations are standard differentiable
-primitives, so gradients flow correctly through the entire computation.
+No custom `unormalized_log_prob_fn` is needed --- the standard model
+`unormalized_log_prob` is used directly, and the PMF-weighted
+computation happens inside it.
 
 ### 6.3 Gradient considerations
 
-Let $L(\boldsymbol{\phi}) = \mathrm{logsumexp}_m(\ell_m) {-} \log M$.
-The gradient with respect to $\boldsymbol{\phi}$ is:
+The gradient of the Rao-Blackwellized contribution for missing cell
+$(n, i)$ is:
 
 $$
-\nabla_{\boldsymbol{\phi}} L = \sum_{m=1}^{M} \tilde{w}_m \nabla_{\boldsymbol{\phi}} \ell_m
+\nabla_{\boldsymbol{\phi}} \ell_{ni}^{\text{RB}} = \frac{\sum_k q_k \nabla_{\boldsymbol{\phi}} p_k}{\sum_k q_k p_k}
 $$
 
-where the softmax weights are:
+This is the gradient of a softmax-weighted sum, which JAX computes
+automatically via autodiff through the `logsumexp` primitive. The
+gradient is exact and does not depend on any Monte Carlo sampling.
 
-$$
-\tilde{w}_m = \frac{\exp(\ell_m)}{\sum_{m'} \exp(\ell_{m'})} = \frac{p(\mathbf{Y}^{(m)} \mid \boldsymbol{\phi})}{\sum_{m'} p(\mathbf{Y}^{(m')} \mid \boldsymbol{\phi})}
-$$
+### 6.4 Numerical safety
 
-This means that imputed copies with higher likelihood under the current
-parameters receive larger gradient weight --- a natural importance
-weighting effect that focuses optimization on the most plausible
-imputations.
+- `jnp.maximum(x, 1e-30)` before `jnp.log` prevents `log(0) = -inf`.
+- For observed cells, the PMFs are zero but masked out by `bad_choices`;
+  the `maximum` prevents NaN gradients from the unused branch of
+  `jnp.where`.
 
 
 ## 7. Notebook Workflow Summary
@@ -588,7 +605,7 @@ imputations.
 2. **Artificial missingness**: 15% MCAR on top of the natural ~0.3%.
 3. **Imputation model**: `MICEBayesianLOO` with Bayesian stacking of ordinal logistic regressions.
 4. **Baseline**: `FactorizedGRModel` with zero-fill for missing data (missing responses contribute 0 to $\ell$).
-5. **Imputed**: `FactorizedGRModel` with `imputation_model` and `n_imputation_samples=3`, using Rao-Blackwellized logsumexp objective.
+5. **Imputed**: `FactorizedGRModel` with `imputation_model`, using analytic Rao-Blackwellized marginalization over the imputation PMFs.
 6. **Comparison**: Training loss curves and posterior estimates for discriminations and abilities across scales.
 
 

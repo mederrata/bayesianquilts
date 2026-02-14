@@ -226,28 +226,29 @@ class IRTModel(BayesianModel):
     # Stochastic imputation in fit()
     # =========================================================================
 
-    def _impute_batch(self, batch, rng=None):
-        """Produce a single imputed copy of a batch.
+    def _compute_batch_pmfs(self, batch):
+        """Compute imputation PMFs for all missing cells in a batch.
 
-        For each item column with missing values, uses the imputation model's
-        ``predict_pmf()`` to obtain a proper ordinal categorical distribution
-        (stacked mixture of ordinal logistic PMFs) and samples from it.
+        For each missing cell (n, i), calls the imputation model's
+        ``predict_pmf()`` to obtain a K-dimensional categorical PMF.
+        Observed cells get zeros (they are masked out by ``bad_choices``
+        in the model's ``predictive_distribution``).
 
         Args:
             batch: dict mapping keys to arrays.
-            rng: numpy random Generator.
 
         Returns:
-            A copy of the batch with missing item values filled.
+            np.ndarray of shape (N, I, K) with PMFs for missing cells
+            and zeros for observed cells.
         """
-        if rng is None:
-            rng = np.random.default_rng()
+        N = len(batch[self.item_keys[0]])
+        I = self.num_items
+        K = self.response_cardinality
+        pmfs = np.zeros((N, I, K), dtype=np.float64)
 
-        imputed = {k: np.array(v, copy=True) for k, v in batch.items()}
-
-        for item_key in self.item_keys:
+        for i, item_key in enumerate(self.item_keys):
             col = np.asarray(batch[item_key], dtype=np.float64)
-            bad = np.isnan(col) | (col < 0) | (col >= self.response_cardinality)
+            bad = np.isnan(col) | (col < 0) | (col >= K)
             bad_indices = np.where(bad)[0]
             if len(bad_indices) == 0:
                 continue
@@ -259,23 +260,21 @@ class IRTModel(BayesianModel):
                     if other_key == item_key:
                         continue
                     val = float(batch[other_key][row_idx])
-                    if not (np.isnan(val) or val < 0 or val >= self.response_cardinality):
+                    if not (np.isnan(val) or val < 0 or val >= K):
                         observed_items[other_key] = val
 
                 try:
                     pmf = self.imputation_model.predict_pmf(
                         observed_items,
                         target=item_key,
-                        n_categories=self.response_cardinality,
+                        n_categories=K,
                     )
-                    sampled = rng.choice(self.response_cardinality, p=pmf)
+                    pmfs[row_idx, i, :] = pmf
                 except (ValueError, KeyError, AttributeError):
-                    # Fallback: sample uniformly if predict_pmf unavailable
-                    sampled = rng.integers(0, self.response_cardinality)
+                    # Fallback: uniform 1/K
+                    pmfs[row_idx, i, :] = 1.0 / K
 
-                imputed[item_key][row_idx] = float(sampled)
-
-        return imputed
+        return pmfs
 
     def _has_missing_values(self, batch):
         """Check if any item column in the batch has missing values."""
@@ -285,98 +284,65 @@ class IRTModel(BayesianModel):
                 return True
         return False
 
-    def fit(self, batched_data_factory, initial_values=None,
-            n_imputation_samples=1, **kwargs):
-        """Fit the IRT model with optional Rao-Blackwellized imputation.
+    def fit(self, batched_data_factory, initial_values=None, **kwargs):
+        """Fit the IRT model with optional analytic Rao-Blackwellized imputation.
 
-        If imputation_model is set, wraps the data factory to impute missing
-        values before each training step. For M>1 imputation samples, uses
-        proper Rao-Blackwellization via logsumexp over imputed copies'
-        log-likelihoods, rather than averaging log-likelihoods (which is
-        a lower bound by Jensen's inequality).
+        If imputation_model is set, wraps the data factory to attach
+        ``_imputation_pmfs`` to each batch. The model's
+        ``predictive_distribution`` uses these PMFs to analytically
+        marginalize over the imputation distribution for missing cells:
+
+            contribution = log[ sum_k q(k) * p(Y=k | phi) ]
+
+        This is exact (zero variance) and eliminates the need for M
+        Monte Carlo imputation samples.
 
         Args:
             batched_data_factory: Callable returning a data iterator.
             initial_values: Optional initial parameter values.
-            n_imputation_samples: Number of imputed copies per batch
-                with missing values (default 1).
             **kwargs: Additional args passed to _calibrate_minibatch_advi.
 
         Returns:
             (losses, params) tuple.
         """
+        # Strip deprecated n_imputation_samples if passed
+        kwargs.pop('n_imputation_samples', None)
+
         if self.imputation_model is not None:
             self.validate_imputation_model()
 
             model_ref = self
-            n_samples = n_imputation_samples
-            rng = np.random.default_rng()
-            item_keys_set = set(self.item_keys)
-
             original_factory = batched_data_factory
-
-            def _stack_imputed_copies(batch):
-                """Create M imputed copies; stack item keys to (M, N)."""
-                copies = [model_ref._impute_batch(batch, rng)
-                          for _ in range(n_samples)]
-                stacked = {}
-                for k in batch:
-                    if k in item_keys_set:
-                        stacked[k] = np.stack(
-                            [c[k] for c in copies], axis=0
-                        )
-                    else:
-                        stacked[k] = batch[k]
-                return stacked
 
             def imputing_factory():
                 def imputing_iterator():
                     iterator = original_factory()
                     try:
                         for batch in iterator:
-                            if not model_ref._has_missing_values(batch):
-                                yield batch
+                            # Always add PMFs key to avoid JIT retrace
+                            if model_ref._has_missing_values(batch):
+                                batch['_imputation_pmfs'] = model_ref._compute_batch_pmfs(batch)
                             else:
-                                yield _stack_imputed_copies(batch)
+                                N = len(batch[model_ref.item_keys[0]])
+                                batch['_imputation_pmfs'] = np.zeros(
+                                    (N, model_ref.num_items, model_ref.response_cardinality),
+                                    dtype=np.float64,
+                                )
+                            yield batch
                     except TypeError:
                         # Factory returned a single batch, not an iterator
                         batch = iterator
-                        if not model_ref._has_missing_values(batch):
-                            yield batch
+                        if model_ref._has_missing_values(batch):
+                            batch['_imputation_pmfs'] = model_ref._compute_batch_pmfs(batch)
                         else:
-                            yield _stack_imputed_copies(batch)
+                            N = len(batch[model_ref.item_keys[0]])
+                            batch['_imputation_pmfs'] = np.zeros(
+                                (N, model_ref.num_items, model_ref.response_cardinality),
+                                dtype=np.float64,
+                            )
+                        yield batch
                 return imputing_iterator()
 
-            def rao_blackwell_log_prob(data, prior_weight, **params):
-                """Rao-Blackwellized log prob: logsumexp over M copies."""
-                first_item = model_ref.item_keys[0]
-                if data[first_item].ndim > 1:
-                    M = data[first_item].shape[0]
-                    results = []
-                    for m in range(M):
-                        data_m = {
-                            k: (data[k][m] if k in item_keys_set
-                                 else data[k])
-                            for k in data
-                        }
-                        results.append(
-                            model_ref.unormalized_log_prob(
-                                data=data_m,
-                                prior_weight=prior_weight,
-                                **params,
-                            )
-                        )
-                    return jax.scipy.special.logsumexp(
-                        jnp.stack(results)
-                    ) - jnp.log(jnp.asarray(M, dtype=model_ref.dtype))
-                else:
-                    return model_ref.unormalized_log_prob(
-                        data=data,
-                        prior_weight=prior_weight,
-                        **params,
-                    )
-
-            kwargs['unormalized_log_prob_fn'] = rao_blackwell_log_prob
             return super().fit(
                 imputing_factory, initial_values=initial_values, **kwargs
             )

@@ -447,9 +447,20 @@ class GRModel(IRTModel):
         rv_responses = tfd.Categorical(probs=response_probs)
 
         log_probs = rv_responses.log_prob(choices)
-        log_probs = jnp.where(
-            bad_choices[jnp.newaxis, ...], imputed_lp, log_probs
-        )
+
+        imputation_pmfs = data.get('_imputation_pmfs')
+        if imputation_pmfs is not None:
+            # Analytic Rao-Blackwellization: log[ sum_k q(k) * p(Y=k|phi) ]
+            log_rp = jnp.log(jnp.maximum(response_probs, 1e-30))  # (S, N, I, K)
+            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))  # (N, I, K)
+            rb = jax.scipy.special.logsumexp(
+                log_rp + log_q[jnp.newaxis, ...], axis=-1
+            )  # (S, N, I)
+            log_probs = jnp.where(bad_choices[jnp.newaxis, ...], rb, log_probs)
+        else:
+            log_probs = jnp.where(
+                bad_choices[jnp.newaxis, ...], imputed_lp, log_probs
+            )
 
         log_probs = jnp.sum(log_probs, axis=-1)
 

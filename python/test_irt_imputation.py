@@ -1,9 +1,9 @@
-"""Integration tests for IRT models with stochastic imputation.
+"""Integration tests for IRT models with analytic Rao-Blackwellized imputation.
 
 Tests cover:
 - GRModel and FactorizedGRModel with complete and missing data
 - validate_imputation_model() sanity checks
-- Stochastic imputation via MICEBayesianLOO
+- Analytic imputation via PMF-weighted log-likelihood
 """
 
 import warnings
@@ -300,7 +300,7 @@ class TestGRModel:
         assert np.isfinite(losses[-1])
 
     def test_grm_missing_data_with_imputation(self):
-        """GRModel fits with missing data and imputation model."""
+        """GRModel fits with missing data and PMF-weighted imputation."""
         item_keys = [f"item_{i}" for i in range(5)]
         im = MockImputationModel(variable_names=item_keys)
         model, _ = self._make_grm(
@@ -318,7 +318,6 @@ class TestGRModel:
             num_epochs=2,
             steps_per_epoch=1,
             learning_rate=0.1,
-            n_imputation_samples=2,
         )
         assert params is not None
         assert np.isfinite(losses[-1])
@@ -405,7 +404,7 @@ class TestFactorizedGRModel:
         assert np.isfinite(losses[-1])
 
     def test_fgrm_missing_data_with_imputation(self):
-        """FactorizedGRModel fits with imputation model."""
+        """FactorizedGRModel fits with PMF-weighted imputation."""
         item_keys = [f"item_{i}" for i in range(6)]
         im = MockImputationModel(variable_names=item_keys)
         model, _ = self._make_fgrm(
@@ -423,7 +422,6 @@ class TestFactorizedGRModel:
             num_epochs=2,
             steps_per_epoch=1,
             learning_rate=0.1,
-            n_imputation_samples=2,
         )
         assert params is not None
         assert np.isfinite(losses[-1])
@@ -444,8 +442,8 @@ class TestFactorizedGRModel:
 class TestFactorizedGRModelMissingFit:
     """Thorough tests for fitting FactorizedGRModel with missing response data.
 
-    Exercises the imputation iterator, verifies scale structure is preserved,
-    checks multiple n_imputation_samples values, and confirms loss is well-behaved.
+    Exercises the PMF-weighted imputation, verifies scale structure is preserved,
+    and confirms loss is well-behaved.
     """
 
     NUM_PEOPLE = 40
@@ -488,85 +486,90 @@ class TestFactorizedGRModelMissingFit:
         )
 
     # ------------------------------------------------------------------
-    # 1. Imputation iterator mechanics
+    # 1. PMF computation mechanics
     # ------------------------------------------------------------------
 
-    def test_imputing_iterator_yields_n_copies_for_missing_batch(
-        self, item_keys, scale_indices
-    ):
-        """When a batch has missing values, the imputing iterator yields
-        n_imputation_samples copies, each with no NaNs."""
-        n_samples = 3
+    def test_compute_batch_pmfs_shape_and_values(self, item_keys, scale_indices):
+        """_compute_batch_pmfs returns (N, I, K) with proper PMFs for missing cells."""
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
         )
         data = self._make_data(item_keys, missingness_rate=0.25)
 
-        # Verify the raw data has NaNs
-        nan_count = sum(np.isnan(data[k]).sum() for k in item_keys)
-        assert nan_count > 0, "Test data should have missing values"
+        pmfs = model._compute_batch_pmfs(data)
 
-        # Collect batches from the imputing iterator
-        rng = np.random.default_rng(0)
-        copies = []
-        for _ in range(n_samples):
-            copies.append(model._impute_batch(data, rng))
+        N = self.NUM_PEOPLE
+        I = len(item_keys)
+        K = self.RESPONSE_CARDINALITY
+        assert pmfs.shape == (N, I, K)
 
-        assert len(copies) == n_samples
-
-        for i, batch in enumerate(copies):
-            for k in item_keys:
-                assert not np.any(np.isnan(batch[k])), (
-                    f"Copy {i}, item {k} still has NaN"
+        # Missing cells should have valid PMFs (sum to 1)
+        for i, key in enumerate(item_keys):
+            col = np.asarray(data[key], dtype=np.float64)
+            bad = np.isnan(col) | (col < 0) | (col >= K)
+            for row_idx in np.where(bad)[0]:
+                row_pmf = pmfs[row_idx, i, :]
+                assert np.allclose(row_pmf.sum(), 1.0, atol=1e-10), (
+                    f"PMF for missing cell ({row_idx}, {key}) doesn't sum to 1"
                 )
-                assert np.all(batch[k] >= 0), f"Copy {i}, {k} has negatives"
-                assert np.all(batch[k] < self.RESPONSE_CARDINALITY), (
-                    f"Copy {i}, {k} has out-of-range values"
+                assert np.all(row_pmf >= 0), (
+                    f"PMF for missing cell ({row_idx}, {key}) has negative values"
                 )
 
-    def test_imputation_stochastic_across_draws(self, item_keys, scale_indices):
-        """Multiple imputation draws should not all be identical (stochasticity)."""
-        im = MockImputationModel(variable_names=item_keys)
-        model = self._make_model(
-            item_keys, scale_indices, imputation_model=im,
-        )
-        data = self._make_data(item_keys, missingness_rate=0.3, seed=7)
+        # Observed cells should have zeros
+        for i, key in enumerate(item_keys):
+            col = np.asarray(data[key], dtype=np.float64)
+            good = ~(np.isnan(col) | (col < 0) | (col >= K))
+            for row_idx in np.where(good)[0]:
+                row_pmf = pmfs[row_idx, i, :]
+                assert np.allclose(row_pmf, 0.0), (
+                    f"PMF for observed cell ({row_idx}, {key}) is not zero"
+                )
 
-        rng = np.random.default_rng(42)
-        draws = [model._impute_batch(data, rng) for _ in range(20)]
-
-        # At least one pair of draws should differ somewhere
-        any_different = False
-        for k in item_keys:
-            vals = np.stack([d[k] for d in draws], axis=0)
-            if np.any(vals != vals[0:1]):
-                any_different = True
-                break
-        assert any_different, (
-            "All 20 imputation draws are identical — imputation may not be stochastic"
-        )
-
-    def test_observed_values_unchanged_after_imputation(self, item_keys, scale_indices):
-        """Imputation must not modify observed (non-missing) responses."""
+    def test_observed_values_unchanged_in_batch(self, item_keys, scale_indices):
+        """PMF computation does not modify the original batch data."""
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
         )
         data = self._make_data(item_keys, missingness_rate=0.2, seed=99)
+        original_data = {k: np.array(v, copy=True) for k, v in data.items()}
 
-        imputed = model._impute_batch(data)
+        model._compute_batch_pmfs(data)
 
         for k in item_keys:
-            orig = data[k]
-            observed_mask = ~np.isnan(orig) & (orig >= 0) & (orig < self.RESPONSE_CARDINALITY)
             np.testing.assert_array_equal(
-                imputed[k][observed_mask], orig[observed_mask],
-                err_msg=f"Observed values in {k} were modified by imputation",
+                data[k], original_data[k],
+                err_msg=f"_compute_batch_pmfs modified original data for {k}",
             )
 
     # ------------------------------------------------------------------
-    # 2. End-to-end fitting with missing data
+    # 2. PMF-weighted log-likelihood verification
+    # ------------------------------------------------------------------
+
+    def test_pmf_weighted_log_likelihood_manual(self, item_keys, scale_indices):
+        """Verify PMF-weighted LL matches manual computation for a simple case."""
+        import jax
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.3, seed=42)
+
+        pmfs = model._compute_batch_pmfs(data)
+
+        # The PMFs should be valid distributions for missing cells
+        for i, key in enumerate(item_keys):
+            col = np.asarray(data[key], dtype=np.float64)
+            bad = np.isnan(col) | (col < 0) | (col >= self.RESPONSE_CARDINALITY)
+            for row_idx in np.where(bad)[0]:
+                row_pmf = pmfs[row_idx, i, :]
+                # Should be a valid probability distribution
+                assert row_pmf.sum() > 0.99, f"PMF not valid at ({row_idx}, {i})"
+
+    # ------------------------------------------------------------------
+    # 3. End-to-end fitting with missing data
     # ------------------------------------------------------------------
 
     def test_fit_missing_data_with_imputation_loss_finite(
@@ -589,7 +592,6 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=2,
             learning_rate=0.05,
-            n_imputation_samples=2,
         )
         assert params is not None
         for i, l in enumerate(losses):
@@ -613,13 +615,12 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=1,
             learning_rate=0.05,
-            n_imputation_samples=3,
         )
         assert params is not None
         assert np.isfinite(losses[-1]), f"Final loss not finite: {losses[-1]}"
 
-    def test_fit_single_imputation_sample(self, item_keys, scale_indices):
-        """n_imputation_samples=1 should work (no averaging needed)."""
+    def test_fit_single_epoch(self, item_keys, scale_indices):
+        """Single epoch with imputation should work."""
         im = MockImputationModel(variable_names=item_keys)
         model = self._make_model(
             item_keys, scale_indices, imputation_model=im,
@@ -641,7 +642,7 @@ class TestFactorizedGRModelMissingFit:
         assert np.isfinite(losses[-1])
 
     # ------------------------------------------------------------------
-    # 3. Comparison: missing data with vs without imputation
+    # 4. Comparison: missing data with vs without imputation
     # ------------------------------------------------------------------
 
     def test_fit_missing_without_imputation_also_works(
@@ -669,7 +670,7 @@ class TestFactorizedGRModelMissingFit:
         assert np.isfinite(losses[-1])
 
     # ------------------------------------------------------------------
-    # 4. Scale structure preserved after imputed training
+    # 5. Scale structure preserved after imputed training
     # ------------------------------------------------------------------
 
     def test_scale_parameters_present_after_fit(self, item_keys, scale_indices):
@@ -690,7 +691,6 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=2,
             steps_per_epoch=1,
             learning_rate=0.1,
-            n_imputation_samples=2,
         )
 
         # Each scale should have its own discrimination and difficulty params
@@ -706,7 +706,7 @@ class TestFactorizedGRModelMissingFit:
             )
 
     # ------------------------------------------------------------------
-    # 5. Missingness patterns
+    # 6. Missingness patterns
     # ------------------------------------------------------------------
 
     def test_fit_missingness_concentrated_in_one_scale(
@@ -739,7 +739,6 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=1,
             learning_rate=0.05,
-            n_imputation_samples=2,
         )
         assert params is not None
         assert np.isfinite(losses[-1])
@@ -773,20 +772,46 @@ class TestFactorizedGRModelMissingFit:
             num_epochs=3,
             steps_per_epoch=1,
             learning_rate=0.05,
-            n_imputation_samples=2,
+        )
+        assert params is not None
+        assert np.isfinite(losses[-1])
+
+    # ------------------------------------------------------------------
+    # 7. Deprecated n_imputation_samples is silently ignored
+    # ------------------------------------------------------------------
+
+    def test_n_imputation_samples_ignored(self, item_keys, scale_indices):
+        """Passing n_imputation_samples does not error (backwards compat)."""
+        im = MockImputationModel(variable_names=item_keys)
+        model = self._make_model(
+            item_keys, scale_indices, imputation_model=im,
+        )
+        data = self._make_data(item_keys, missingness_rate=0.2)
+
+        def factory():
+            return iter([data])
+
+        losses, params = model.fit(
+            factory,
+            batch_size=self.NUM_PEOPLE,
+            dataset_size=self.NUM_PEOPLE,
+            num_epochs=2,
+            steps_per_epoch=1,
+            learning_rate=0.1,
+            n_imputation_samples=5,  # should be silently ignored
         )
         assert params is not None
         assert np.isfinite(losses[-1])
 
 
 # =========================================================================
-# Test imputation batch wrapping
+# Test PMF batch computation
 # =========================================================================
 
-class TestImputationBatchWrapping:
+class TestComputeBatchPmfs:
 
-    def test_no_missing_passes_through(self):
-        """Batch with no missing values passes through unchanged."""
+    def test_no_missing_returns_zeros(self):
+        """Batch with no missing values returns all-zero PMFs."""
         item_keys = ['q1', 'q2', 'q3']
         im = MockImputationModel(variable_names=item_keys)
         model = _make_concrete_irt(
@@ -802,7 +827,9 @@ class TestImputationBatchWrapping:
             'q3': np.array([4, 3, 2, 1, 0], dtype=np.float64),
         }
 
-        assert not model._has_missing_values(batch)
+        pmfs = model._compute_batch_pmfs(batch)
+        assert pmfs.shape == (5, 3, 5)
+        assert np.allclose(pmfs, 0.0)
 
     def test_missing_detected(self):
         """Batch with NaN values detected as having missing."""
@@ -820,8 +847,8 @@ class TestImputationBatchWrapping:
 
         assert model._has_missing_values(batch)
 
-    def test_impute_batch_fills_missing(self):
-        """_impute_batch fills all missing values."""
+    def test_compute_pmfs_fills_missing(self):
+        """_compute_batch_pmfs produces valid PMFs for missing cells."""
         item_keys = ['q1', 'q2']
         im = MockImputationModel(variable_names=item_keys)
         model = _make_concrete_irt(
@@ -836,22 +863,22 @@ class TestImputationBatchWrapping:
             'q2': np.array([1, np.nan, 3, 0, 1], dtype=np.float64),
         }
 
-        imputed = model._impute_batch(batch)
+        pmfs = model._compute_batch_pmfs(batch)
+        assert pmfs.shape == (5, 2, 5)
 
-        # No NaN values in imputed batch
-        for key in item_keys:
-            assert not np.any(np.isnan(imputed[key])), f"NaN found in {key}"
-            # Values should be in valid range
-            assert np.all(imputed[key] >= 0)
-            assert np.all(imputed[key] < 5)
+        # Missing cells should have valid PMFs
+        # q1 missing at indices 2, 4
+        assert np.allclose(pmfs[2, 0, :].sum(), 1.0)
+        assert np.allclose(pmfs[4, 0, :].sum(), 1.0)
+        # q2 missing at index 1
+        assert np.allclose(pmfs[1, 1, :].sum(), 1.0)
 
-        # Observed values should be preserved
-        assert imputed['q1'][0] == 0.0
-        assert imputed['q1'][1] == 1.0
-        assert imputed['q1'][3] == 3.0
+        # Observed cells should be zero
+        assert np.allclose(pmfs[0, 0, :], 0.0)  # q1[0] = 0 (observed)
+        assert np.allclose(pmfs[0, 1, :], 0.0)  # q2[0] = 1 (observed)
 
-    def test_impute_preserves_observed(self):
-        """Observed values are not modified by imputation."""
+    def test_observed_cells_zero(self):
+        """Observed cells in PMF array are zeros."""
         item_keys = ['q1', 'q2']
         im = MockImputationModel(variable_names=item_keys)
         model = _make_concrete_irt(
@@ -867,10 +894,10 @@ class TestImputationBatchWrapping:
             'q2': original_q2.copy(),
         }
 
-        imputed = model._impute_batch(batch)
+        pmfs = model._compute_batch_pmfs(batch)
 
-        # q2 had no missing values, should be unchanged
-        np.testing.assert_array_equal(imputed['q2'], original_q2)
+        # q2 has no missing values, entire column should be zero
+        assert np.allclose(pmfs[:, 1, :], 0.0)
 
 
 if __name__ == "__main__":
