@@ -31,38 +31,35 @@ training objective.
 ### 1.1 Samejima's GRM
 
 The Graded Response Model (Samejima, 1969) defines the probability of
-person $n$ selecting response category $k \in \{0, 1, \ldots, K-1\}$ on
+person $n$ selecting response category $k \in \lbrace 0, 1, \ldots, K{-}1 \rbrace$ on
 item $i$ as:
 
 $$
-P(Y_{ni} = k \mid \theta_n, \alpha_i, \boldsymbol{\tau}_i)
-= P^*(Y_{ni} \geq k) - P^*(Y_{ni} \geq k+1)
+P(Y_{ni} = k \mid \theta_n, \alpha_i, \boldsymbol{\tau}_i) = P^{\ast}(Y_{ni} \geq k) - P^{\ast}(Y_{ni} \geq k{+}1)
 $$
 
 where the cumulative boundary probabilities are:
 
 $$
-P^*(Y_{ni} \geq k) = \sigma\!\left(\alpha_i(\theta_n - \tau_{ik})\right)
-= \frac{1}{1 + \exp\!\left(\alpha_i(\tau_{ik} - \theta_n)\right)}
+P^{\ast}(Y_{ni} \geq k) = \sigma(\alpha_i(\theta_n - \tau_{ik})) = \frac{1}{1 + \exp(\alpha_i(\tau_{ik} - \theta_n))}
 $$
 
-with boundary conditions $P^*(Y_{ni} \geq 0) = 1$ and
-$P^*(Y_{ni} \geq K) = 0$, and where:
+with boundary conditions $P^{\ast}(Y_{ni} \geq 0) = 1$ and
+$P^{\ast}(Y_{ni} \geq K) = 0$, and where:
 
 | Symbol | Description |
 |---|---|
 | $\theta_n \in \mathbb{R}$ | Latent ability of person $n$ |
 | $\alpha_i > 0$ | Discrimination of item $i$ |
-| $\tau_{i1} < \tau_{i2} < \cdots < \tau_{i,K-1}$ | Ordered difficulty thresholds for item $i$ |
+| $\tau_{i1} < \tau_{i2} < \cdots < \tau_{i,K{-}1}$ | Ordered difficulty thresholds for item $i$ |
 
 ### 1.2 Difficulty parameterization
 
-To enforce the ordering constraint $\tau_{i1} < \cdots < \tau_{i,K-1}$,
+To enforce the ordering constraint $\tau_{i1} < \cdots < \tau_{i,K{-}1}$,
 the model uses a cumulative-sum parameterization:
 
 $$
-\tau_{i1} = \delta_{i0}, \qquad
-\tau_{ik} = \delta_{i0} + \sum_{j=1}^{k-1} \Delta_{ij}, \quad k \geq 2
+\tau_{i1} = \delta_{i0}, \qquad \tau_{ik} = \delta_{i0} + \sum_{j=1}^{k{-}1} \Delta_{ij}, \quad k \geq 2
 $$
 
 where $\delta_{i0} \in \mathbb{R}$ is a free base difficulty and
@@ -81,15 +78,14 @@ discrimination vector $\boldsymbol{\alpha}_i \in \mathbb{R}_+^D$. The
 GRM probability becomes a discrimination-weighted mixture:
 
 $$
-P(Y_{ni} = k \mid \boldsymbol{\theta}_n, \boldsymbol{\alpha}_i, \boldsymbol{\tau}_i)
-= \sum_{d=1}^{D} w_{id} \, P_d(Y_{ni} = k)
+P(Y_{ni} = k \mid \boldsymbol{\theta}_n, \boldsymbol{\alpha}_i, \boldsymbol{\tau}_i) = \sum_{d=1}^{D} w_{id} \, P_d(Y_{ni} = k)
 $$
 
 where $P_d(Y_{ni} = k)$ is the GRM probability using dimension $d$
 alone, and the weights are:
 
 $$
-w_{id} = \frac{|\alpha_{id}|}{\sum_{d'=1}^{D} |\alpha_{id'}|}
+w_{id} = \frac{\lvert\alpha_{id}\rvert}{\sum_{d'=1}^{D} \lvert\alpha_{id'}\rvert}
 $$
 
 
@@ -111,13 +107,7 @@ parameters:
 The full parameter vector for scale $s$ is:
 
 $$
-\boldsymbol{\phi}_s = \left\{
-  \alpha_i^{(s)},\;
-  \delta_{i0}^{(s)},\;
-  \Delta_{ij}^{(s)},\;
-  \theta_n^{(s)}
-  : i \in \mathcal{S}_s,\; n = 1,\ldots,N
-\right\}
+\boldsymbol{\phi}_s = \lbrace \alpha_i^{(s)}, \delta_{i0}^{(s)}, \Delta_{ij}^{(s)}, \theta_n^{(s)} : i \in \mathcal{S}_s, n = 1,\ldots,N \rbrace
 $$
 
 ### 2.2 Joint log-probability
@@ -125,25 +115,20 @@ $$
 The joint prior factorizes across scales:
 
 $$
-\log p(\boldsymbol{\phi})
-= \sum_{s=1}^{S} \log p(\boldsymbol{\phi}_s)
+\log p(\boldsymbol{\phi}) = \sum_{s=1}^{S} \log p(\boldsymbol{\phi}_s)
 $$
 
 The log-likelihood for a batch of $N$ persons is:
 
 $$
-\ell(\boldsymbol{\phi}; \mathbf{Y})
-= \sum_{n=1}^{N} \sum_{s=1}^{S} \sum_{i \in \mathcal{S}_s}
-  \log P(Y_{ni} = y_{ni} \mid \boldsymbol{\phi}_s)
+\ell(\boldsymbol{\phi}; \mathbf{Y}) = \sum_{n=1}^{N} \sum_{s=1}^{S} \sum_{i \in \mathcal{S}_s} \log P(Y_{ni} = y_{ni} \mid \boldsymbol{\phi}_s)
 $$
 
 Missing responses ($y_{ni}$ is NaN or out-of-range) contribute zero to
 the log-likelihood. The unnormalized log-posterior used as the VI target is:
 
 $$
-\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}, w)
-= w \cdot \log p(\boldsymbol{\phi})
-+ \ell(\boldsymbol{\phi}; \mathbf{Y})
+\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}, w) = w \cdot \log p(\boldsymbol{\phi}) + \ell(\boldsymbol{\phi}; \mathbf{Y})
 $$
 
 where $w = B / N_{\text{total}}$ is the prior weight (batch size divided
@@ -157,21 +142,14 @@ by dataset size), ensuring proper scaling in minibatch training.
 The model is fitted by maximizing the Evidence Lower Bound (ELBO):
 
 $$
-\mathcal{L}(q)
-= \mathbb{E}_{q(\boldsymbol{\phi})}
-  \left[\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}, w)\right]
-- w \cdot \mathrm{KL}\!\left[q(\boldsymbol{\phi}) \,\|\, p(\boldsymbol{\phi})\right]
+\mathcal{L}(q) = \mathbb{E}_{q(\boldsymbol{\phi})}[\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}, w)] \;{-}\; w \cdot \mathrm{KL}[q(\boldsymbol{\phi}) \,\lVert\, p(\boldsymbol{\phi})]
 $$
 
 In practice, the loss function minimized is the negative ELBO, estimated
 via Monte Carlo:
 
 $$
-\hat{\mathcal{L}} = \frac{1}{S_q} \sum_{s=1}^{S_q}
-\Bigl[
-  w \cdot \log q(\boldsymbol{\phi}^{(s)})
-  - \widetilde{\ell}(\boldsymbol{\phi}^{(s)}; \mathbf{Y}, w)
-\Bigr]
+\hat{\mathcal{L}} = \frac{1}{S_q} \sum_{s=1}^{S_q} \big[ w \cdot \log q(\boldsymbol{\phi}^{(s)}) \;{-}\; \widetilde{\ell}(\boldsymbol{\phi}^{(s)}; \mathbf{Y}, w) \big]
 $$
 
 where $\boldsymbol{\phi}^{(1)}, \ldots, \boldsymbol{\phi}^{(S_q)}$ are
@@ -203,10 +181,7 @@ denote the complete response matrix partitioned into observed and missing
 entries. The ideal target log-probability marginalizes over the missing data:
 
 $$
-\log p(\mathbf{Y}_{\text{obs}} \mid \boldsymbol{\phi})
-= \log \int p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}} \mid \boldsymbol{\phi})\;
-  p(\mathbf{Y}_{\text{mis}} \mid \mathbf{Y}_{\text{obs}})
-  \;\mathrm{d}\mathbf{Y}_{\text{mis}}
+\log p(\mathbf{Y}_{\text{obs}} \mid \boldsymbol{\phi}) = \log \int p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}} \mid \boldsymbol{\phi}) \; p(\mathbf{Y}_{\text{mis}} \mid \mathbf{Y}_{\text{obs}}) \;\mathrm{d}\mathbf{Y}_{\text{mis}}
 $$
 
 This integral is intractable for discrete ordinal responses, so we
@@ -225,7 +200,7 @@ For $P$ variables the framework fits:
 | Model class | Count | Description |
 |---|---|---|
 | Zero-predictor | $P$ | Intercept-only model for each variable |
-| One-predictor | up to $P(P-1)$ | Predict variable $i$ from variable $j$ |
+| One-predictor | up to $P(P{-}1)$ | Predict variable $i$ from variable $j$ |
 
 Each model is fitted independently using **Pathfinder** variational
 inference (or optionally ADVI) and evaluated via **PSIS-LOO-CV**.
@@ -241,8 +216,7 @@ This is the primary model used for IRT item imputation. The
 **cumulative (proportional-odds) model** defines:
 
 $$
-P(Y \leq k \mid \mathbf{x}) = \sigma(c_k - \eta),
-\qquad k = 1, \ldots, K-1
+P(Y \leq k \mid \mathbf{x}) = \sigma(c_k {-} \eta), \qquad k = 1, \ldots, K{-}1
 $$
 
 where $\sigma(\cdot)$ is the logistic sigmoid, and the **linear
@@ -252,19 +226,18 @@ $$
 \eta = \boldsymbol{\beta}^\top \mathbf{x}
 $$
 
-The ordered cutpoints $c_1 < c_2 < \cdots < c_{K-1}$ are enforced via
+The ordered cutpoints $c_1 < c_2 < \cdots < c_{K{-}1}$ are enforced via
 the **ascending bijector**: given unconstrained parameters
-$\mathbf{r} \in \mathbb{R}^{K-1}$,
+$\mathbf{r} \in \mathbb{R}^{K{-}1}$,
 
 $$
-c_1 = r_1, \qquad
-c_k = c_{k-1} + \text{softplus}(r_k) \;\text{ for } k \geq 2
+c_1 = r_1, \qquad c_k = c_{k{-}1} + \text{softplus}(r_k) \;\text{ for } k \geq 2
 $$
 
 This ensures strict ordering. The category probabilities are:
 
 $$
-P(Y = k \mid \mathbf{x}) = P(Y \leq k) - P(Y \leq k-1)
+P(Y = k \mid \mathbf{x}) = P(Y \leq k) {-} P(Y \leq k{-}1)
 $$
 
 with boundary conditions $P(Y \leq 0) = 0$ and $P(Y \leq K) = 1$.
@@ -274,9 +247,7 @@ This is implemented via TFP's `OrderedLogistic` distribution.
 priors:
 
 $$
-\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0},\, \sigma_0^2 \mathbf{I}),
-\qquad
-\mathbf{r} \sim \mathcal{N}(\mathbf{0},\, 25 \mathbf{I})
+\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0}, \sigma_0^2 \mathbf{I}), \qquad \mathbf{r} \sim \mathcal{N}(\mathbf{0}, 25 \mathbf{I})
 $$
 
 where $\sigma_0$ is the `prior_scale` hyperparameter (default 1.0).
@@ -284,12 +255,11 @@ The wide prior on $\mathbf{r}$ is weakly informative for the cutpoint
 locations.
 
 **Predictor encoding.** When the predictor $j$ is itself ordinal with
-values $\{0, 1, \ldots, V\}$, it is encoded using **thermometer
+values $\lbrace 0, 1, \ldots, V \rbrace$, it is encoded using **thermometer
 (ordinal one-hot) encoding**:
 
 $$
-\mathbf{x}(v) = [\mathbb{1}(v \geq 1),\; \mathbb{1}(v \geq 2),\; \ldots,\; \mathbb{1}(v \geq V)]
-\;\in\; \{0,1\}^V
+\mathbf{x}(v) = [\mathbb{1}(v \geq 1), \mathbb{1}(v \geq 2), \ldots, \mathbb{1}(v \geq V)] \in \lbrace 0,1 \rbrace^V
 $$
 
 This preserves the ordinal structure: each additional unit of the
@@ -306,8 +276,7 @@ P(Y = 1 \mid \mathbf{x}) = \sigma(\boldsymbol{\beta}^\top \mathbf{x} + b)
 $$
 
 $$
-\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0},\, \sigma_0^2 \mathbf{I}),
-\qquad b \sim \mathcal{N}(0, \sigma_0^2)
+\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0}, \sigma_0^2 \mathbf{I}), \qquad b \sim \mathcal{N}(0, \sigma_0^2)
 $$
 
 #### 4.3.3 Linear regression
@@ -315,13 +284,11 @@ $$
 For continuous targets, a Bayesian linear regression is used:
 
 $$
-Y \mid \mathbf{x} \sim \mathcal{N}(\boldsymbol{\beta}^\top \mathbf{x} + b,\; \sigma^2)
+Y \mid \mathbf{x} \sim \mathcal{N}(\boldsymbol{\beta}^\top \mathbf{x} + b, \sigma^2)
 $$
 
 $$
-\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0},\, \sigma_0^2 \mathbf{I}),
-\quad b \sim \mathcal{N}(0, \sigma_0^2),
-\quad \log \sigma \sim \mathcal{N}(\log \sigma_{\text{noise}},\, 1)
+\boldsymbol{\beta} \sim \mathcal{N}(\mathbf{0}, \sigma_0^2 \mathbf{I}), \quad b \sim \mathcal{N}(0, \sigma_0^2), \quad \log \sigma \sim \mathcal{N}(\log \sigma_{\text{noise}}, 1)
 $$
 
 This model is not used for IRT items but may appear for auxiliary
@@ -350,19 +317,13 @@ Given $S$ posterior samples and $N$ observations, the pointwise
 LOO log-predictive density is estimated as:
 
 $$
-\widehat{\text{elpd}}_{\text{LOO}}
-= \sum_{n=1}^{N} \log \hat{p}(y_n \mid y_{-n})
+\widehat{\text{elpd}}_{\text{LOO}} = \sum_{n=1}^{N} \log \hat{p}(y_n \mid y_{-n})
 $$
 
 where
 
 $$
-\hat{p}(y_n \mid y_{-n})
-= \frac{
-  \sum_{s=1}^{S} w_n^{(s)} \, p(y_n \mid \boldsymbol{\psi}^{(s)})
-}{
-  \sum_{s=1}^{S} w_n^{(s)}
-}
+\hat{p}(y_n \mid y_{-n}) = \frac{\sum_{s=1}^{S} w_n^{(s)} p(y_n \mid \boldsymbol{\psi}^{(s)})}{\sum_{s=1}^{S} w_n^{(s)}}
 $$
 
 and $w_n^{(s)}$ are Pareto-smoothed importance weights derived from
@@ -374,11 +335,11 @@ importance sampling approximation:
 | $\hat{k}$ | Interpretation |
 |---|---|
 | $< 0.5$ | Excellent; IS estimate is reliable |
-| $0.5$--$0.7$ | Acceptable; moderate IS variance |
+| $0.5$ to $0.7$ | Acceptable; moderate IS variance |
 | $> 0.7$ | Unreliable; IS approximation breaks down |
 
 Each sub-model stores:
-- `elpd_loo_per_obs`: $\widehat{\text{elpd}}_{\text{LOO}} / N$ (normalized for comparability across different sample sizes)
+- `elpd_loo_per_obs`: the per-observation ELPD (normalized for comparability)
 - `khat_max`: worst-case $\hat{k}$ across observations
 - `converged`: whether Pathfinder converged
 - Point estimates (`beta_mean`, `intercept_mean`, `cutpoints_mean`) for prediction
@@ -389,7 +350,7 @@ When predicting item $i$ for person $n$, the imputation model
 assembles all available sub-models (zero-predictor + one-predictor
 models for each observed item $j$) and computes **stacking weights**.
 
-Let $\mathcal{M} = \{M_0, M_1, \ldots, M_J\}$ denote the set of
+Let $\mathcal{M} = \lbrace M_0, M_1, \ldots, M_J \rbrace$ denote the set of
 available models for target $i$, where $M_0$ is the zero-predictor
 and $M_j$ uses observed item $j$ as predictor. Each model $M_j$ has
 an associated LOO-ELPD $E_j$ and standard error $\text{SE}_j$.
@@ -397,7 +358,7 @@ an associated LOO-ELPD $E_j$ and standard error $\text{SE}_j$.
 The uncertainty-penalized stacking weight for model $j$ is:
 
 $$
-\tilde{w}_j = \exp(E_j - \lambda \cdot \text{SE}_j)
+\tilde{w}_j = \exp(E_j {-} \lambda \cdot \text{SE}_j)
 $$
 
 where $\lambda$ is the `uncertainty_penalty` parameter (default 1.0,
@@ -415,11 +376,10 @@ estimates are penalized.
 ### 4.7 Constructing the imputation PMF
 
 For ordinal targets (the IRT case), each sub-model $M_j$ produces a
-categorical PMF over $\{0, \ldots, K-1\}$ via the cumulative model:
+categorical PMF over $\lbrace 0, \ldots, K{-}1 \rbrace$ via the cumulative model:
 
 $$
-p_{M_j}(Y = k \mid x_j)
-= \sigma(c_k^{(j)} - \eta_j) - \sigma(c_{k-1}^{(j)} - \eta_j)
+p_{M_j}(Y = k \mid x_j) = \sigma(c_k^{(j)} {-} \eta_j) {-} \sigma(c_{k{-}1}^{(j)} {-} \eta_j)
 $$
 
 where $\eta_j = \bar{\beta}_j \cdot \tilde{x}_j + \bar{b}_j$ uses
@@ -431,8 +391,7 @@ mean and standard deviation stored in the sub-model result.
 The stacked imputation PMF is the **finite mixture**:
 
 $$
-\hat{p}(Y_{ni} = k \mid \mathbf{Y}_{n,-i}^{\text{obs}})
-= \sum_{j \in \mathcal{M}} w_j \; p_{M_j}(Y_{ni} = k \mid x_{nj})
+\hat{p}(Y_{ni} = k \mid \mathbf{Y}_{n,{-}i}^{\text{obs}}) = \sum_{j \in \mathcal{M}} w_j \; p_{M_j}(Y_{ni} = k \mid x_{nj})
 $$
 
 This is a proper categorical distribution (sums to 1). At each
@@ -446,7 +405,7 @@ A natural question is why `MICEBayesianLOO` uses only **one-predictor**
 models rather than multivariate models using all observed items
 simultaneously. The reasons are:
 
-1. **Scalability**: Fitting $P^2$ tiny models (each with $\leq 10$
+1. **Scalability**: Fitting $P^2$ tiny models (each with 10 or fewer
    parameters) via Pathfinder is fast and embarrassingly parallel.
    A single multivariate model for each target would have $O(PK)$
    parameters and require more careful regularization.
@@ -476,7 +435,7 @@ five checks:
 2. **Coverage**: All IRT item keys appear in the imputation model.
 3. **Variable type**: Items must be ordinal or binary (not continuous).
 4. **Convergence**: At least one converged sub-model per item (warning if not).
-5. **PSIS $\hat{k}$**: Best model's $\hat{k} < 0.7$ (warning if not).
+5. **PSIS diagnostic**: Best model's $\hat{k} < 0.7$ (warning if not).
 
 
 ## 5. Rao-Blackwellized Training Objective
@@ -488,22 +447,14 @@ mini-batches. The optimizer then averaged gradients across these batches,
 which is equivalent to optimizing:
 
 $$
-\frac{1}{M} \sum_{m=1}^{M}
-\widetilde{\ell}(\boldsymbol{\phi};\, \mathbf{Y}_{\text{obs}},
-\mathbf{Y}_{\text{mis}}^{(m)},\, w)
+\frac{1}{M} \sum_{m=1}^{M} \widetilde{\ell}(\boldsymbol{\phi};\, \mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)},\, w)
 $$
 
 Since $\widetilde{\ell}$ contains a $\log$, this averages
 **log-likelihoods**. By Jensen's inequality:
 
 $$
-\frac{1}{M} \sum_{m=1}^{M}
-\log p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi})
-\;\leq\;
-\log \left[\frac{1}{M} \sum_{m=1}^{M}
-p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi})\right]
+\frac{1}{M} \sum_{m=1}^{M} \log p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi}) \;\leq\; \log \Big[\frac{1}{M} \sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big]
 $$
 
 The left side is a **lower bound** on the properly marginalized
@@ -514,33 +465,23 @@ log-likelihood, introducing downward bias in the ELBO.
 The correct Monte Carlo estimate of the marginalized log-likelihood is:
 
 $$
-\log p(\mathbf{Y}_{\text{obs}} \mid \boldsymbol{\phi})
-\approx \log \left[\frac{1}{M} \sum_{m=1}^{M}
-p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi})\right]
+\log p(\mathbf{Y}_{\text{obs}} \mid \boldsymbol{\phi}) \approx \log \Big[\frac{1}{M} \sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big]
 $$
 
 In log-space, this is computed via the log-sum-exp trick:
 
 $$
-\log \left[\frac{1}{M} \sum_{m=1}^{M}
-p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi})\right]
-= \mathrm{logsumexp}_{m}(\ell_m) - \log M
+\log \Big[\frac{1}{M} \sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big] = \mathrm{logsumexp}_{m}(\ell_m) {-} \log M
 $$
 
-where
-$\ell_m = \log p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi})$.
+where $\ell_m = \log p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})$.
 
 ### 5.3 Incorporating the prior
 
 The full unnormalized log-posterior for a batch is:
 
 $$
-\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}^{(m)}, w)
-= w \cdot \log p(\boldsymbol{\phi})
-+ \ell_m(\boldsymbol{\phi})
+\widetilde{\ell}(\boldsymbol{\phi}; \mathbf{Y}^{(m)}, w) = w \cdot \log p(\boldsymbol{\phi}) + \ell_m(\boldsymbol{\phi})
 $$
 
 Since the prior term $w \cdot \log p(\boldsymbol{\phi})$ is constant
@@ -548,18 +489,13 @@ across imputations (it depends only on $\boldsymbol{\phi}$, not on
 $\mathbf{Y}_{\text{mis}}$), the logsumexp factors cleanly:
 
 $$
-\mathrm{logsumexp}_{m}(\widetilde{\ell}_m) - \log M
-= \mathrm{logsumexp}_{m}(C + \ell_m) - \log M
-= C + \mathrm{logsumexp}_{m}(\ell_m) - \log M
+\mathrm{logsumexp}_{m}(\widetilde{\ell}_m) {-} \log M = \mathrm{logsumexp}_{m}(C + \ell_m) {-} \log M = C + \mathrm{logsumexp}_{m}(\ell_m) {-} \log M
 $$
 
 where $C = w \cdot \log p(\boldsymbol{\phi})$. This equals:
 
 $$
-w \cdot \log p(\boldsymbol{\phi})
-+ \log\left[\frac{1}{M}\sum_{m=1}^{M}
-p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)}
-\mid \boldsymbol{\phi})\right]
+w \cdot \log p(\boldsymbol{\phi}) + \log \Big[\frac{1}{M}\sum_{m=1}^{M} p(\mathbf{Y}_{\text{obs}}, \mathbf{Y}_{\text{mis}}^{(m)} \mid \boldsymbol{\phi})\Big]
 $$
 
 which is the correct Rao-Blackwellized target. The implementation
@@ -577,15 +513,14 @@ compared to averaging log-likelihoods.
 
 ### 5.5 Special cases
 
-- **$M = 1$**: $\mathrm{logsumexp}([\ell_1]) - \log 1 = \ell_1$.
+- When $M = 1$: $\mathrm{logsumexp}([\ell_1]) {-} \log 1 = \ell_1$.
   Reduces to ordinary single-imputation; no overhead.
 
 - **No missing data**: Item arrays have `ndim == 1` (not stacked).
   The wrapper falls through to `unormalized_log_prob` directly.
 
 - **All copies identical** (no missing values in a batch): Since all
-  $\ell_m$ are equal, $\mathrm{logsumexp}([\ell, \ldots, \ell]) - \log M
-  = \ell + \log M - \log M = \ell$. Correct.
+  $\ell_m$ are equal, $\mathrm{logsumexp}([\ell, \ldots, \ell]) {-} \log M = \ell + \log M {-} \log M = \ell$. Correct.
 
 
 ## 6. Implementation Details
@@ -628,21 +563,17 @@ primitives, so gradients flow correctly through the entire computation.
 
 ### 6.3 Gradient considerations
 
-Let $L(\boldsymbol{\phi}) = \mathrm{logsumexp}_m(\ell_m) - \log M$.
+Let $L(\boldsymbol{\phi}) = \mathrm{logsumexp}_m(\ell_m) {-} \log M$.
 The gradient with respect to $\boldsymbol{\phi}$ is:
 
 $$
-\nabla_{\boldsymbol{\phi}} L
-= \sum_{m=1}^{M} \tilde{w}_m \,\nabla_{\boldsymbol{\phi}} \ell_m
+\nabla_{\boldsymbol{\phi}} L = \sum_{m=1}^{M} \tilde{w}_m \nabla_{\boldsymbol{\phi}} \ell_m
 $$
 
 where the softmax weights are:
 
 $$
-\tilde{w}_m
-= \frac{\exp(\ell_m)}{\sum_{m'} \exp(\ell_{m'})}
-= \frac{p(\mathbf{Y}^{(m)} \mid \boldsymbol{\phi})}
-       {\sum_{m'} p(\mathbf{Y}^{(m')} \mid \boldsymbol{\phi})}
+\tilde{w}_m = \frac{\exp(\ell_m)}{\sum_{m'} \exp(\ell_{m'})} = \frac{p(\mathbf{Y}^{(m)} \mid \boldsymbol{\phi})}{\sum_{m'} p(\mathbf{Y}^{(m')} \mid \boldsymbol{\phi})}
 $$
 
 This means that imputed copies with higher likelihood under the current
