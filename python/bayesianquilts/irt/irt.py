@@ -1,6 +1,7 @@
 import warnings
 from typing import Any
 
+import jax
 import numpy as np
 import jax.numpy as jnp
 from flax import nnx
@@ -286,17 +287,19 @@ class IRTModel(BayesianModel):
 
     def fit(self, batched_data_factory, initial_values=None,
             n_imputation_samples=1, **kwargs):
-        """Fit the IRT model with optional stochastic imputation.
+        """Fit the IRT model with optional Rao-Blackwellized imputation.
 
         If imputation_model is set, wraps the data factory to impute missing
-        values before each training step. For batches with no missing values,
-        passes data through unchanged.
+        values before each training step. For M>1 imputation samples, uses
+        proper Rao-Blackwellization via logsumexp over imputed copies'
+        log-likelihoods, rather than averaging log-likelihoods (which is
+        a lower bound by Jensen's inequality).
 
         Args:
             batched_data_factory: Callable returning a data iterator.
             initial_values: Optional initial parameter values.
-            n_imputation_samples: Number of imputed copies to yield per
-                batch with missing values (default 1).
+            n_imputation_samples: Number of imputed copies per batch
+                with missing values (default 1).
             **kwargs: Additional args passed to _calibrate_minibatch_advi.
 
         Returns:
@@ -308,8 +311,23 @@ class IRTModel(BayesianModel):
             model_ref = self
             n_samples = n_imputation_samples
             rng = np.random.default_rng()
+            item_keys_set = set(self.item_keys)
 
             original_factory = batched_data_factory
+
+            def _stack_imputed_copies(batch):
+                """Create M imputed copies; stack item keys to (M, N)."""
+                copies = [model_ref._impute_batch(batch, rng)
+                          for _ in range(n_samples)]
+                stacked = {}
+                for k in batch:
+                    if k in item_keys_set:
+                        stacked[k] = np.stack(
+                            [c[k] for c in copies], axis=0
+                        )
+                    else:
+                        stacked[k] = batch[k]
+                return stacked
 
             def imputing_factory():
                 def imputing_iterator():
@@ -319,19 +337,50 @@ class IRTModel(BayesianModel):
                             if not model_ref._has_missing_values(batch):
                                 yield batch
                             else:
-                                # Yield n_imputation_samples imputed copies
-                                for _ in range(n_samples):
-                                    yield model_ref._impute_batch(batch, rng)
+                                yield _stack_imputed_copies(batch)
                     except TypeError:
                         # Factory returned a single batch, not an iterator
                         batch = iterator
                         if not model_ref._has_missing_values(batch):
                             yield batch
                         else:
-                            for _ in range(n_samples):
-                                yield model_ref._impute_batch(batch, rng)
+                            yield _stack_imputed_copies(batch)
                 return imputing_iterator()
 
-            return super().fit(imputing_factory, initial_values=initial_values, **kwargs)
+            def rao_blackwell_log_prob(data, prior_weight, **params):
+                """Rao-Blackwellized log prob: logsumexp over M copies."""
+                first_item = model_ref.item_keys[0]
+                if data[first_item].ndim > 1:
+                    M = data[first_item].shape[0]
+                    results = []
+                    for m in range(M):
+                        data_m = {
+                            k: (data[k][m] if k in item_keys_set
+                                 else data[k])
+                            for k in data
+                        }
+                        results.append(
+                            model_ref.unormalized_log_prob(
+                                data=data_m,
+                                prior_weight=prior_weight,
+                                **params,
+                            )
+                        )
+                    return jax.scipy.special.logsumexp(
+                        jnp.stack(results)
+                    ) - jnp.log(jnp.asarray(M, dtype=model_ref.dtype))
+                else:
+                    return model_ref.unormalized_log_prob(
+                        data=data,
+                        prior_weight=prior_weight,
+                        **params,
+                    )
+
+            kwargs['unormalized_log_prob_fn'] = rao_blackwell_log_prob
+            return super().fit(
+                imputing_factory, initial_values=initial_values, **kwargs
+            )
         else:
-            return super().fit(batched_data_factory, initial_values=initial_values, **kwargs)
+            return super().fit(
+                batched_data_factory, initial_values=initial_values, **kwargs
+            )
