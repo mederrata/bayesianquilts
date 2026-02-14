@@ -35,7 +35,6 @@ class IRTModel(BayesianModel):
             include_independent=False,
             vi_mode='advi',
             imputation_model=None,
-            n_imputation_samples=1,
             dtype=tf.float64):
         super(IRTModel, self).__init__(dtype=dtype)
 
@@ -58,7 +57,6 @@ class IRTModel(BayesianModel):
         self.num_groups = num_groups
 
         self.imputation_model = imputation_model
-        self.n_imputation_samples = n_imputation_samples
 
         self.set_dimension(dim, decay)
 
@@ -286,7 +284,8 @@ class IRTModel(BayesianModel):
                 return True
         return False
 
-    def fit(self, batched_data_factory, initial_values=None, **kwargs):
+    def fit(self, batched_data_factory, initial_values=None,
+            n_imputation_samples=1, **kwargs):
         """Fit the IRT model with optional stochastic imputation.
 
         If imputation_model is set, wraps the data factory to impute missing
@@ -296,6 +295,8 @@ class IRTModel(BayesianModel):
         Args:
             batched_data_factory: Callable returning a data iterator.
             initial_values: Optional initial parameter values.
+            n_imputation_samples: Number of imputed copies to yield per
+                batch with missing values (default 1).
             **kwargs: Additional args passed to _calibrate_minibatch_advi.
 
         Returns:
@@ -305,7 +306,7 @@ class IRTModel(BayesianModel):
             self.validate_imputation_model()
 
             model_ref = self
-            n_samples = self.n_imputation_samples
+            n_samples = n_imputation_samples
             rng = np.random.default_rng()
 
             original_factory = batched_data_factory
