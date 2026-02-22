@@ -76,7 +76,7 @@ class FactorizedGRModel(IRTModel):
     def grm_model_prob(self, abilities, discriminations, difficulties):
         logits = difficulties - abilities  # N x D x I x K-1
         logits = logits * discriminations
-        probs = 1.0 / (1 + jnp.exp(logits))
+        probs = jax.nn.sigmoid(-logits)
         probs = jnp.pad(
             probs,
             ([(0, 0)] * (len(probs.shape) - 1) + [(1, 0)]),
