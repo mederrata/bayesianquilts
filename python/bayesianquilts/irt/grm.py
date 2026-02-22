@@ -376,7 +376,7 @@ class GRModel(IRTModel):
             )
         offsets = difficulties - abilities  # N x D x I x K-1
         scaled = offsets * discriminations
-        logits = 1.0 / (1 + jnp.exp(scaled))
+        logits = jax.nn.sigmoid(-scaled)
         logits = jnp.pad(
             logits,
             ([(0, 0)] * (len(logits.shape) - 1) + [(1, 0)]),
