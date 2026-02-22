@@ -128,6 +128,7 @@ def training_loop(
     clip_norm: float | None = None,
     nan_recovery_strategy: str = "adaptive",
     max_nan_recoveries: int = 10,
+    zero_nan_grads: bool = False,
     verbose: bool = True,
 ):
     """
@@ -169,6 +170,10 @@ def training_loop(
         "reset_to_best", "partial_reset", "gaussian_noise" (default: "adaptive")
     max_nan_recoveries : int, optional
         Maximum number of NaN recovery attempts before stopping (default: 10)
+    zero_nan_grads : bool, optional
+        If True, replace NaN values in gradients with zeros before applying them.
+        This can prevent training from crashing due to occasional bad batches,
+        but may hide underlying numerical instability issues (default: False).
     verbose : bool, optional
         Whether to print progress and logs (default: True)
 
@@ -315,6 +320,11 @@ def training_loop(
 
                         # Only accumulate gradients for selected keys
                         filtered_grads = filter_params(grads[0])
+                        if zero_nan_grads:
+                            filtered_grads = jax.tree_util.tree_map(
+                                lambda g: jnp.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0), filtered_grads
+                            )
+                        
                         grad_accumulator = jax.tree_util.tree_map(
                             lambda acc, g: acc + g, grad_accumulator, filtered_grads
                         )

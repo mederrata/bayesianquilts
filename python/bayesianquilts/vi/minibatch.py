@@ -120,6 +120,7 @@ def minibatch_fit_surrogate_posterior(
     name=None,
     test_fn=None,
     clip_norm: float = None,
+    zero_nan_grads: bool = False,
     **kwargs,
 ):
     if initial_values is None:
@@ -157,5 +158,6 @@ def minibatch_fit_surrogate_posterior(
         patience=patience,
         lr_decay_factor=lr_decay_factor,
         clip_norm=clip_norm,
+        zero_nan_grads=zero_nan_grads,
         **kwargs,
     )
