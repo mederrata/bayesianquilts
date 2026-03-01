@@ -1,6 +1,10 @@
+import pathlib
+
+import h5py
 import jax
 import jax.numpy as jnp
 import numpy as np
+import yaml
 from typing import Any
 
 from flax import nnx
@@ -31,9 +35,51 @@ class NeuralGRModel(IRTModel):
     response_type = "polytomous"
     nn_hidden_sizes: Any = nnx.data(None)
 
-    def __init__(self, *args, nn_hidden_sizes=(32, 32), **kwargs):
+    def __init__(
+        self,
+        item_keys,
+        num_people,
+        nn_hidden_sizes=(32, 32),
+        num_groups=None,
+        data=None,
+        person_key="person",
+        dim=1,
+        decay=0.25,
+        positive_discriminations=True,
+        missing_val=-9999,
+        full_rank=False,
+        eta_scale=1e-2,
+        kappa_scale=1e-2,
+        weight_exponent=1.0,
+        response_cardinality=5,
+        discrimination_guess=None,
+        include_independent=False,
+        vi_mode='advi',
+        imputation_model=None,
+        dtype=jnp.float64,
+    ):
         self.nn_hidden_sizes = nn_hidden_sizes
-        super(NeuralGRModel, self).__init__(*args, **kwargs)
+        super(NeuralGRModel, self).__init__(
+            item_keys=item_keys,
+            num_people=num_people,
+            num_groups=num_groups,
+            data=data,
+            person_key=person_key,
+            dim=dim,
+            decay=decay,
+            positive_discriminations=positive_discriminations,
+            missing_val=missing_val,
+            full_rank=full_rank,
+            eta_scale=eta_scale,
+            kappa_scale=kappa_scale,
+            weight_exponent=weight_exponent,
+            response_cardinality=response_cardinality,
+            discrimination_guess=discrimination_guess,
+            include_independent=include_independent,
+            vi_mode=vi_mode,
+            imputation_model=imputation_model,
+            dtype=dtype,
+        )
         self.create_distributions()
 
     def _monotone_forward(self, z, nn_params):
@@ -447,6 +493,62 @@ class NeuralGRModel(IRTModel):
         return jnp.astype(prior_weight, log_prior.dtype) * (log_prior - entropy) + jnp.sum(
             log_likelihood, axis=-1
         )
+
+    def save_to_disk(self, path):
+        """Save NeuralGRModel to disk (YAML config + HDF5 params)."""
+        path = pathlib.Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        config = {
+            '_class_name': 'NeuralGRModel',
+            'item_keys': list(self.item_keys),
+            'num_people': int(self.num_people),
+            'nn_hidden_sizes': list(self.nn_hidden_sizes),
+            'dim': int(self.dimensions),
+            'decay': float(self.dimensional_decay),
+            'positive_discriminations': bool(self.positive_discriminations),
+            'missing_val': int(self.missing_val),
+            'full_rank': bool(self.full_rank),
+            'eta_scale': float(self.eta_scale),
+            'kappa_scale': float(self.kappa_scale.flatten()[0]) if hasattr(self.kappa_scale, 'flatten') else float(self.kappa_scale),
+            'weight_exponent': float(self.weight_exponent),
+            'response_cardinality': int(self.response_cardinality),
+            'include_independent': bool(self.include_independent),
+            'vi_mode': str(self.vi_mode),
+            'dtype': 'float64' if self.dtype == jnp.float64 else 'float32',
+        }
+        with open(path / 'config.yaml', 'w') as f:
+            yaml.dump(config, f, default_flow_style=False)
+
+        with h5py.File(path / 'params.h5', 'w') as f:
+            if self.params is not None and hasattr(self.params, 'items'):
+                grp = f.create_group('params')
+                for k, v in self.params.items():
+                    arr = np.array(v)
+                    if arr.size > 0:
+                        grp.create_dataset(k, data=arr)
+
+    @classmethod
+    def load_from_disk(cls, path):
+        """Load NeuralGRModel from disk."""
+        path = pathlib.Path(path)
+        with open(path / 'config.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+
+        config.pop('_class_name', None)
+        dtype_str = config.pop('dtype', 'float64')
+        dtype = jnp.float64 if dtype_str == 'float64' else jnp.float32
+        config['nn_hidden_sizes'] = tuple(config.get('nn_hidden_sizes', [32, 32]))
+        config['dtype'] = dtype
+
+        instance = cls(**config)
+
+        if (path / 'params.h5').exists():
+            with h5py.File(path / 'params.h5', 'r') as f:
+                if 'params' in f:
+                    instance.params = {k: jnp.array(v) for k, v in f['params'].items()}
+
+        return instance
 
     def simulate_data(self, abilities=None):
         """Generate synthetic response data from the fitted model.
