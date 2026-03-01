@@ -133,13 +133,28 @@ dmypy.json
 #scanpy cache directory
 /cache
 .DS_Store
-<<<<<<< HEAD
-
 *.pdf
 *.html
 *.gz
 ovarian_data.json
-
-=======
 .env*
->>>>>>> origin/ais
+
+# Fitted models and checkpoints
+grm_baseline/
+grm_imputed/
+mice_loo_model.yaml
+
+# Downloaded datasets (auto-fetched from openpsychometrics.org)
+notebooks/irt/*/RWAS/
+notebooks/irt/*/RWAS.zip
+notebooks/irt/*/EQSQ/
+notebooks/irt/*/EQSQ.zip
+notebooks/irt/*/duckworth-grit-scale-data/
+notebooks/irt/*/duckworth-grit-scale-data.zip
+notebooks/irt/*/NPI/
+notebooks/irt/*/NPI.zip
+notebooks/irt/*/WPI/
+notebooks/irt/*/WPI.zip
+notebooks/irt/*/TMA/
+notebooks/irt/*/TMA.zip
+*.h5

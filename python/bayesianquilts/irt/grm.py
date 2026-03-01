@@ -738,7 +738,9 @@ class GRModel(IRTModel):
 
         self.surrogate_distribution_generator, self.surrogate_parameter_initializer = (
             build_factored_surrogate_posterior_generator(
-                self.joint_prior_distribution, dtype=self.dtype
+                self.joint_prior_distribution,
+                bijectors=self.bijectors,
+                dtype=self.dtype,
             )
         )
         self.params = self.surrogate_parameter_initializer()
