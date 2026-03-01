@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import jax
 import jax.numpy as jnp
+import h5py
 jax.config.update("jax_enable_x64", True)
 import jax.flatten_util
 import yaml
@@ -2319,6 +2320,208 @@ class MICEBayesianLOO(MICELogistic):
         
         # Restore prediction graph
         instance.prediction_graph = state.get('prediction_graph', {})
+
+        return instance
+
+    def save_to_disk(self, path: Union[str, Path]) -> None:
+        """Save using YAML config + HDF5 parameters (BayesianModel-style).
+
+        Creates a directory at `path` containing:
+        - config.yaml: configuration and metadata
+        - params.h5: numerical arrays (beta_mean, intercept_mean, cutpoints_mean)
+
+        Args:
+            path: Directory path to save model artifacts.
+        """
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Config YAML
+        config = {
+            'version': '2.0',
+            'config': {
+                'prior_scale': float(self.prior_scale),
+                'noise_scale': float(self.noise_scale),
+                'pathfinder_num_samples': int(self.pathfinder_num_samples),
+                'pathfinder_maxiter': int(self.pathfinder_maxiter),
+                'min_obs': int(self.min_obs),
+                'n_imputations': int(self.n_imputations),
+                'max_iter': int(self.max_iter),
+                'random_state': int(self.random_state),
+            },
+            'data': {
+                'variable_names': list(self.variable_names),
+                'variable_types': {int(k): v for k, v in self.variable_types.items()},
+                'n_obs_total': int(self.n_obs_total),
+            },
+            'prediction_graph': self.prediction_graph,
+            # Store result metadata (non-numerical) in YAML
+            'zero_predictor_meta': {},
+            'univariate_meta': [],
+        }
+
+        for k, v in self.zero_predictor_results.items():
+            config['zero_predictor_meta'][int(k)] = {
+                'n_obs': int(v.n_obs),
+                'elpd_loo': float(v.elpd_loo),
+                'elpd_loo_per_obs': float(v.elpd_loo_per_obs),
+                'elpd_loo_per_obs_se': float(v.elpd_loo_per_obs_se),
+                'khat_max': float(v.khat_max),
+                'khat_mean': float(v.khat_mean),
+                'predictor_idx': None if v.predictor_idx is None else int(v.predictor_idx),
+                'target_idx': int(v.target_idx),
+                'converged': bool(v.converged),
+                'predictor_mean': None if v.predictor_mean is None else float(v.predictor_mean),
+                'predictor_std': None if v.predictor_std is None else float(v.predictor_std),
+            }
+
+        for (t_idx, p_idx), v in self.univariate_results.items():
+            config['univariate_meta'].append({
+                'target_idx': int(t_idx),
+                'predictor_idx': int(p_idx),
+                'n_obs': int(v.n_obs),
+                'elpd_loo': float(v.elpd_loo),
+                'elpd_loo_per_obs': float(v.elpd_loo_per_obs),
+                'elpd_loo_per_obs_se': float(v.elpd_loo_per_obs_se),
+                'khat_max': float(v.khat_max),
+                'khat_mean': float(v.khat_mean),
+                'converged': bool(v.converged),
+                'predictor_mean': None if v.predictor_mean is None else float(v.predictor_mean),
+                'predictor_std': None if v.predictor_std is None else float(v.predictor_std),
+            })
+
+        with open(path / 'config.yaml', 'w') as f:
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+
+        # 2. HDF5 numerical arrays
+        with h5py.File(path / 'params.h5', 'w') as f:
+            for k, v in self.zero_predictor_results.items():
+                grp = f.create_group(f'zero_predictor/{int(k)}')
+                if v.beta_mean is not None:
+                    grp.create_dataset('beta_mean', data=np.atleast_1d(np.asarray(v.beta_mean)))
+                if v.intercept_mean is not None:
+                    grp.create_dataset('intercept_mean', data=np.atleast_1d(np.asarray(v.intercept_mean)))
+                if v.cutpoints_mean is not None:
+                    grp.create_dataset('cutpoints_mean', data=np.asarray(v.cutpoints_mean))
+
+            for (t_idx, p_idx), v in self.univariate_results.items():
+                grp = f.create_group(f'univariate/{int(t_idx)}_{int(p_idx)}')
+                if v.beta_mean is not None:
+                    grp.create_dataset('beta_mean', data=np.atleast_1d(np.asarray(v.beta_mean)))
+                if v.intercept_mean is not None:
+                    grp.create_dataset('intercept_mean', data=np.atleast_1d(np.asarray(v.intercept_mean)))
+                if v.cutpoints_mean is not None:
+                    grp.create_dataset('cutpoints_mean', data=np.asarray(v.cutpoints_mean))
+
+    @classmethod
+    def load_from_disk(cls, path: Union[str, Path]) -> 'MICEBayesianLOO':
+        """Load model from YAML config + HDF5 parameters (BayesianModel-style).
+
+        Args:
+            path: Directory path containing config.yaml and params.h5.
+
+        Returns:
+            Loaded MICEBayesianLOO instance.
+        """
+        path = Path(path)
+
+        with open(path / 'config.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+
+        version = config.get('version', '2.0')
+
+        cfg = config['config']
+        instance = cls(
+            n_imputations=cfg.get('n_imputations', 5),
+            max_iter=cfg.get('max_iter', 5),
+            random_state=cfg.get('random_state', 42),
+            prior_scale=cfg.get('prior_scale', 1.0),
+            noise_scale=cfg.get('noise_scale', 1.0),
+            pathfinder_num_samples=cfg.get('pathfinder_num_samples', 200),
+            pathfinder_maxiter=cfg.get('pathfinder_maxiter', 100),
+            min_obs=cfg.get('min_obs', 5),
+            verbose=False,
+        )
+
+        data = config['data']
+        instance.variable_names = data['variable_names']
+        instance.variable_types = {int(k): v for k, v in data['variable_types'].items()}
+        instance.n_obs_total = data['n_obs_total']
+        instance.prediction_graph = config.get('prediction_graph', {})
+
+        # Load numerical arrays from HDF5
+        h5_path = path / 'params.h5'
+        h5_data = {}
+        if h5_path.exists():
+            with h5py.File(h5_path, 'r') as f:
+                def _read_group(grp):
+                    result = {}
+                    for key in grp:
+                        result[key] = np.array(grp[key])
+                    return result
+
+                if 'zero_predictor' in f:
+                    for k in f['zero_predictor']:
+                        h5_data[('zp', int(k))] = _read_group(f[f'zero_predictor/{k}'])
+                if 'univariate' in f:
+                    for k in f['univariate']:
+                        t_idx, p_idx = k.split('_')
+                        h5_data[('uv', int(t_idx), int(p_idx))] = _read_group(f[f'univariate/{k}'])
+
+        # Restore zero-predictor results
+        for k_str, meta in config.get('zero_predictor_meta', {}).items():
+            k = int(k_str)
+            arrays = h5_data.get(('zp', k), {})
+            beta_mean = arrays.get('beta_mean')
+            if beta_mean is not None and beta_mean.ndim == 1 and beta_mean.shape[0] == 1:
+                beta_mean = float(beta_mean[0])
+            intercept_mean = arrays.get('intercept_mean')
+            if intercept_mean is not None and intercept_mean.ndim == 1 and intercept_mean.shape[0] == 1:
+                intercept_mean = float(intercept_mean[0])
+            instance.zero_predictor_results[k] = UnivariateModelResult(
+                n_obs=meta['n_obs'],
+                elpd_loo=meta['elpd_loo'],
+                elpd_loo_per_obs=meta['elpd_loo_per_obs'],
+                elpd_loo_per_obs_se=meta['elpd_loo_per_obs_se'],
+                khat_max=meta['khat_max'],
+                khat_mean=meta['khat_mean'],
+                predictor_idx=meta.get('predictor_idx'),
+                target_idx=meta['target_idx'],
+                converged=meta['converged'],
+                predictor_mean=meta.get('predictor_mean'),
+                predictor_std=meta.get('predictor_std'),
+                beta_mean=beta_mean,
+                intercept_mean=intercept_mean,
+                cutpoints_mean=arrays.get('cutpoints_mean'),
+            )
+
+        # Restore univariate results
+        for item in config.get('univariate_meta', []):
+            t_idx = int(item['target_idx'])
+            p_idx = int(item['predictor_idx'])
+            arrays = h5_data.get(('uv', t_idx, p_idx), {})
+            beta_mean = arrays.get('beta_mean')
+            if beta_mean is not None and beta_mean.ndim == 1 and beta_mean.shape[0] == 1:
+                beta_mean = float(beta_mean[0])
+            intercept_mean = arrays.get('intercept_mean')
+            if intercept_mean is not None and intercept_mean.ndim == 1 and intercept_mean.shape[0] == 1:
+                intercept_mean = float(intercept_mean[0])
+            instance.univariate_results[(t_idx, p_idx)] = UnivariateModelResult(
+                n_obs=item['n_obs'],
+                elpd_loo=item['elpd_loo'],
+                elpd_loo_per_obs=item['elpd_loo_per_obs'],
+                elpd_loo_per_obs_se=item['elpd_loo_per_obs_se'],
+                khat_max=item['khat_max'],
+                khat_mean=item['khat_mean'],
+                predictor_idx=p_idx,
+                target_idx=t_idx,
+                converged=item['converged'],
+                predictor_mean=item.get('predictor_mean'),
+                predictor_std=item.get('predictor_std'),
+                beta_mean=beta_mean,
+                intercept_mean=intercept_mean,
+                cutpoints_mean=arrays.get('cutpoints_mean'),
+            )
 
         return instance
 
