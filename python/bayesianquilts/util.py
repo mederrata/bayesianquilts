@@ -264,7 +264,7 @@ def training_loop(
                         params_have_issues, param_location = check_nan_inf(params, "parameters")
 
                         # Handle NaN/Inf issues
-                        if loss_has_issues or grads_have_issues or params_have_issues:
+                        if loss_has_issues or (grads_have_issues and not zero_nan_grads) or params_have_issues:
                             if nan_recovery_count >= max_nan_recoveries:
                                 print(f"❌ Maximum NaN recovery attempts ({max_nan_recoveries}) exceeded. Stopping training.")
                                 return epoch_losses, params
