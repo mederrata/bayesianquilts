@@ -123,7 +123,7 @@ def training_loop(
     patience: int = 3,
     lr_decay_factor: float = 0.5,
     learning_rate: float = 0.001,
-    checkpoint_dir: str = "/tmp/checkpoints",
+    checkpoint_dir: str | None = None,
     optimize_keys: list[str] | None = None,
     clip_norm: float | None = None,
     nan_recovery_strategy: str = "adaptive",
@@ -361,9 +361,19 @@ def training_loop(
                     nan_recovery_count = 0  # Reset NaN recovery count on improvement
                     # Save the best model parameters
                     if checkpoint_dir is not None:
+                        # Filter out zero-size arrays (e.g., ddifficulties
+                        # for binary items) that Orbax cannot serialize.
+                        def _filter_zero_size(tree):
+                            return jax.tree_util.tree_map(
+                                lambda x: x if (
+                                    not hasattr(x, 'size') or x.size > 0
+                                ) else None,
+                                tree,
+                            )
+
                         ckpt = {
-                            "params": params,
-                            "opt_state": opt_state,
+                            "params": _filter_zero_size(params),
+                            "opt_state": _filter_zero_size(opt_state),
                             "epoch": epoch,
                             "best_loss": best_loss,
                         }
