@@ -1,0 +1,21 @@
+{
+  "dataset": "npi",
+  "num_people": 11243,
+  "num_items": 40,
+  "response_cardinality": 2,
+  "missingness_rate": 0.2,
+  "baseline": {
+    "spearman_r": -0.0046158813861134325,
+    "spearman_p": 0.6245698594862662,
+    "kendall_tau": -0.0030981106779868627,
+    "kendall_p": 0.622241304339912,
+    "rmse": 0.462226186758499
+  },
+  "imputed": {
+    "spearman_r": -0.008024323701698838,
+    "spearman_p": 0.3949013973426101,
+    "kendall_tau": -0.005328030077676433,
+    "kendall_p": 0.3968341981751091,
+    "rmse": 0.4519933236618289
+  }
+}

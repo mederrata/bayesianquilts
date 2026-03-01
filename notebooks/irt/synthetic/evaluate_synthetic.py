@@ -19,9 +19,9 @@ import numpy as np
 import pandas as pd
 
 
-def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, batch_size=256,
-                 missingness_rate=0.2, nn_hidden_sizes=(32, 32), dim=1,
-                 kappa_scale=0.1, patience=10):
+def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
+                 batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(32, 32),
+                 dim=1, kappa_scale=0.1, patience=10):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -52,6 +52,10 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, batch_size=256,
 
     output_dir = Path(output_dir) / dataset_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Default GRM learning rate to the same as NeuralGRM if not specified
+    if grm_lr is None:
+        grm_lr = lr
 
     # 1. Load real data
     print(f"\n{'='*60}")
@@ -110,6 +114,10 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, batch_size=256,
         fit_zero_predictors=True,
         seed=42,
     )
+    # Override variable types: IRT items are binary (K=2) or ordinal (K>2)
+    for idx in range(len(item_keys)):
+        vtype = 'binary' if response_cardinality == 2 else 'ordinal'
+        mice_loo.variable_types[idx] = vtype
     mice_loo.save_to_disk(output_dir / "imputation_model")
     print(f"  Imputation model saved ({len(mice_loo.univariate_results)} univariate models)")
 
@@ -119,7 +127,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, batch_size=256,
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_baseline",
         dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=lr, patience=patience, kappa_scale=kappa_scale,
+        learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
     )
 
     # 7. Fit imputed GRM on synthetic data
@@ -129,7 +137,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, batch_size=256,
         save_dir=output_dir / "grm_imputed",
         imputation_model=mice_loo,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=lr, patience=patience, kappa_scale=kappa_scale,
+        learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
     )
 
     # 8. Compare ability ordering preservation
@@ -185,7 +193,9 @@ def main():
     )
     parser.add_argument("--output-dir", default="./results", help="Output directory")
     parser.add_argument("--epochs", type=int, default=500, help="Training epochs")
-    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="NeuralGRM learning rate")
+    parser.add_argument("--grm-lr", type=float, default=None,
+                        help="GRM learning rate (defaults to --lr if not set)")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--missingness", type=float, default=0.2,
                         help="MCAR missingness rate")
@@ -210,6 +220,7 @@ def main():
             output_dir=args.output_dir,
             epochs=args.epochs,
             lr=args.lr,
+            grm_lr=args.grm_lr,
             batch_size=args.batch_size,
             missingness_rate=args.missingness,
             nn_hidden_sizes=tuple(args.hidden_sizes),

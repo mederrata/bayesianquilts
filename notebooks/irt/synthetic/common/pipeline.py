@@ -253,6 +253,9 @@ def generate_synthetic_data(model, item_keys, response_cardinality,
     if responses.ndim > 2:
         responses = responses.reshape(responses.shape[0], -1)
 
+    # Ensure integer responses in valid range
+    responses = np.clip(responses, 0, response_cardinality - 1).astype(np.int32)
+
     N, I = responses.shape
     data_dict = {'person': np.arange(N, dtype=np.float64)}
 

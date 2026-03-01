@@ -18,6 +18,7 @@ import polars as pl
 # =========================================================================
 
 item_keys = [f"Q{i}" for i in range(1, 23)]
+response_cardinality = 9
 
 item_text = [
     'The established authorities generally turn out to be right about things, while the radicals and protestors are usually just "loud mouths" showing off their ignorance.',

@@ -164,8 +164,9 @@ class NeuralGRModel(IRTModel):
         offsets = difficulties - abilities  # (..., N, D, I, K-1)
         scaled = offsets * discriminations  # (..., N, D, I, K-1)
 
-        # Apply monotone NN instead of sigmoid
-        cum_probs = self._monotone_forward(scaled, nn_params)  # P(Y >= k)
+        # Apply monotone NN to -scaled (matching GRM's sigmoid(-scaled) convention)
+        # so that P(Y >= k) increases with ability (theta) and decreases with threshold (b_k)
+        cum_probs = self._monotone_forward(-scaled, nn_params)  # P(Y >= k)
 
         # Pad: P(Y >= 0) = 1 on left, P(Y >= K) = 0 on right
         cum_probs = jnp.pad(
@@ -554,7 +555,7 @@ class NeuralGRModel(IRTModel):
         """Generate synthetic response data from the fitted model.
 
         Uses calibrated_expectations for NN weights and item parameters.
-        Returns (N, I) integer response matrix.
+        Returns (N, I) integer response matrix with values in [0, K-1].
         """
         discrimination = self.calibrated_expectations['discriminations']
         if abilities is None:
@@ -572,6 +573,12 @@ class NeuralGRModel(IRTModel):
             self.calibrated_expectations['ddifficulties'],
             nn_params,
         )
+        # Ensure valid probability simplex
+        probs = jnp.clip(probs, 1e-10, None)
+        probs = probs / jnp.sum(probs, axis=-1, keepdims=True)
+
         response_rv = tfd.Categorical(probs=probs)
         responses = response_rv.sample(seed=jax.random.PRNGKey(0))
-        return responses
+        # Ensure integer responses in valid range
+        responses = jnp.clip(responses, 0, self.response_cardinality - 1).astype(jnp.int32)
+        return np.array(responses)
