@@ -45,26 +45,43 @@ class NeuralGRModel(IRTModel):
         Forward: h = relu(softplus(W1) @ z + b1); ... ; out = sigmoid(softplus(Wn) @ h + bn)
 
         Args:
-            z: Array of any shape. The NN operates on the last dimension (size 1).
+            z: Array of any shape (batch..., spatial...). The NN operates elementwise
+                over the spatial dims. Batch dims must match the leading dims of the weights.
             nn_params: Dict with keys nn_w0, nn_b0, nn_w1, nn_b1, ..., nn_wL, nn_bL.
+                Weights may have extra leading batch dims (e.g., sample dim from surrogate).
 
         Returns:
             Array of same shape as z, with values in (0, 1).
         """
         original_shape = z.shape
-        h = z[..., jnp.newaxis]  # (..., 1)
 
-        n_layers = (len(nn_params)) // 2
+        # Determine batch dims from weight shape: w has (batch..., fan_out, fan_in)
+        w0 = nn_params['nn_w0']
+        n_batch_dims = w0.ndim - 2
+        batch_shape = z.shape[:n_batch_dims]
+        spatial_shape = z.shape[n_batch_dims:]
+        flat_size = 1
+        for s in spatial_shape:
+            flat_size *= s
+
+        # Flatten spatial dims: (batch..., M, 1) where M = product of spatial dims
+        h = z.reshape(*batch_shape, flat_size, 1)
+
+        n_layers = len(nn_params) // 2
         for i in range(n_layers):
-            w = jax.nn.softplus(nn_params[f'nn_w{i}'])  # (fan_out, fan_in)
-            b = nn_params[f'nn_b{i}']  # (fan_out,)
-            # h: (..., fan_in), w: (fan_out, fan_in) -> (..., fan_out)
-            h = jnp.einsum('...j,ij->...i', h, w) + b
+            w = jax.nn.softplus(nn_params[f'nn_w{i}'])  # (batch..., fan_out, fan_in)
+            b = nn_params[f'nn_b{i}']  # (batch..., fan_out)
+            # h: (batch..., M, fan_in) @ w_T: (batch..., fan_in, fan_out)
+            #  -> (batch..., M, fan_out)
+            w_T = jnp.swapaxes(w, -1, -2)
+            h = jnp.matmul(h, w_T) + b[..., jnp.newaxis, :]
+
             if i < n_layers - 1:
                 h = jax.nn.relu(h)
             else:
                 h = jax.nn.sigmoid(h)
 
+        # h: (batch..., M, 1) -> reshape to original
         return h.reshape(original_shape)
 
     def _get_nn_param_names(self):
