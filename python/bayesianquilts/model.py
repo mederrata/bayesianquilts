@@ -324,7 +324,9 @@ class BayesianModel(nnx.Module, ABC):
             if self.params is not None and hasattr(self.params, "items"):
                 grp = f.create_group("params")
                 for k, v in self.params.items():
-                    grp.create_dataset(k, data=np.array(v))
+                    arr = np.array(v)
+                    if arr.size > 0:
+                        grp.create_dataset(k, data=arr)
             
             if self.mcmc_samples is not None and hasattr(self.mcmc_samples, "items"):
                 grp = f.create_group("mcmc_samples")
