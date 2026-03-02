@@ -21,7 +21,8 @@ import pandas as pd
 
 def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
                  batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(32,),
-                 dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10):
+                 dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
+                 lr_decay_factor=0.9, clip_norm=1.0):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -77,6 +78,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         patience=patience,
         kappa_scale=kappa_scale,
         eta_scale=eta_scale,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
     )
 
     # 3. Get true abilities
@@ -129,6 +132,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         save_dir=output_dir / "grm_baseline",
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
+        lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
     )
 
     # 7. Fit imputed GRM on synthetic data
@@ -139,6 +143,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         imputation_model=mice_loo,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
+        lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
     )
 
     # 8. Compare ability ordering preservation
@@ -157,6 +162,19 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         'missingness_rate': missingness_rate,
         'baseline': baseline_metrics,
         'imputed': imputed_metrics,
+        'hyperparameters': {
+            'epochs': epochs,
+            'lr': lr,
+            'grm_lr': grm_lr,
+            'batch_size': batch_size,
+            'nn_hidden_sizes': list(nn_hidden_sizes),
+            'dim': dim,
+            'kappa_scale': kappa_scale,
+            'eta_scale': eta_scale,
+            'patience': patience,
+            'lr_decay_factor': lr_decay_factor,
+            'clip_norm': clip_norm,
+        },
     }
 
     print(f"\n  Baseline:  Spearman r = {baseline_metrics['spearman_r']:.4f}, "
@@ -177,6 +195,15 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     with open(output_dir / 'results.json', 'w') as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {output_dir / 'results.json'}")
+
+    # Save abilities for manuscript figure generation
+    np.savez(
+        output_dir / 'abilities.npz',
+        true=true_abilities,
+        baseline=baseline_abilities,
+        imputed=imputed_abilities,
+    )
+    print(f"Abilities saved to {output_dir / 'abilities.npz'}")
 
     return results
 
@@ -208,6 +235,10 @@ def main():
     parser.add_argument("--eta-scale", type=float, default=0.1,
                         help="Eta scale for horseshoe prior (local shrinkage)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
+    parser.add_argument("--lr-decay-factor", type=float, default=0.9,
+                        help="LR decay factor on plateau (default 0.9)")
+    parser.add_argument("--clip-norm", type=float, default=1.0,
+                        help="Gradient clipping norm (default 1.0)")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -231,6 +262,8 @@ def main():
             kappa_scale=args.kappa_scale,
             eta_scale=args.eta_scale,
             patience=args.patience,
+            lr_decay_factor=args.lr_decay_factor,
+            clip_norm=args.clip_norm,
         )
         all_results[ds] = results
 

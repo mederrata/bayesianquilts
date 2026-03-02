@@ -1,0 +1,36 @@
+{
+  "dataset": "rwa",
+  "num_people": 9881,
+  "num_items": 22,
+  "response_cardinality": 9,
+  "missingness_rate": 0.2,
+  "baseline": {
+    "spearman_r": 0.19116048196734337,
+    "spearman_p": 5.798841601887134e-82,
+    "kendall_tau": 0.12802573294266548,
+    "kendall_p": 3.3089116913854933e-81,
+    "rmse": 0.29885994408874017
+  },
+  "imputed": {
+    "spearman_r": 0.15453071184219214,
+    "spearman_p": 7.336023686140985e-54,
+    "kendall_tau": 0.10334191453191767,
+    "kendall_p": 1.4904847980447277e-53,
+    "rmse": 0.2937921930734458
+  },
+  "hyperparameters": {
+    "epochs": 2000,
+    "lr": 5e-05,
+    "grm_lr": 5e-05,
+    "batch_size": 256,
+    "nn_hidden_sizes": [
+      32
+    ],
+    "dim": 1,
+    "kappa_scale": 0.5,
+    "eta_scale": 0.1,
+    "patience": 50,
+    "lr_decay_factor": 0.9,
+    "clip_norm": 1.0
+  }
+}

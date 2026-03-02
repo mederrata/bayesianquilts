@@ -102,6 +102,7 @@ def fit_neural_grm(
     nn_hidden_sizes=(32,), dim=1, batch_size=256,
     num_epochs=500, learning_rate=2e-4, patience=10,
     kappa_scale=0.5, eta_scale=0.1,
+    lr_decay_factor=0.9, clip_norm=1.0,
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
 
@@ -132,6 +133,8 @@ def fit_neural_grm(
         steps_per_epoch=steps_per_epoch,
         learning_rate=learning_rate,
         patience=patience,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
         zero_nan_grads=True,
     )
 
@@ -147,6 +150,7 @@ def fit_grm_baseline(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     dim=1, batch_size=256, num_epochs=500, learning_rate=2e-4,
     patience=10, kappa_scale=0.1,
+    lr_decay_factor=0.9, clip_norm=1.0,
 ):
     """Fit a standard GRM (no imputation) and save to disk.
 
@@ -175,6 +179,8 @@ def fit_grm_baseline(
         steps_per_epoch=steps_per_epoch,
         learning_rate=learning_rate,
         patience=patience,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
         zero_nan_grads=True,
     )
 
@@ -190,6 +196,7 @@ def fit_grm_imputed(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     imputation_model, dim=1, batch_size=256, num_epochs=500,
     learning_rate=2e-4, patience=10, kappa_scale=0.1,
+    lr_decay_factor=0.9, clip_norm=1.0,
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
 
@@ -220,6 +227,8 @@ def fit_grm_imputed(
         steps_per_epoch=steps_per_epoch,
         learning_rate=learning_rate,
         patience=patience,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
         zero_nan_grads=True,
     )
 

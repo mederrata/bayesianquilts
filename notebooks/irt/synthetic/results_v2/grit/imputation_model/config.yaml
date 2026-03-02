@@ -37,1599 +37,1599 @@ data:
     11: ordinal
 prediction_graph:
   GS1:
-  - GS5
-  - GS6
-  - GS4
-  - GS2
   - GS11
+  - GS2
   - GS9
   - GS7
-  - GS12
-  - GS10
+  - GS5
   - GS8
+  - GS10
+  - GS4
   - GS3
+  - GS6
+  - GS12
   GS10:
   - GS4
-  - GS7
-  - GS9
-  - GS8
-  - GS3
-  - GS1
-  - GS5
-  - GS6
   - GS2
+  - GS1
+  - GS8
   - GS11
+  - GS5
   - GS12
+  - GS9
+  - GS3
+  - GS7
+  - GS6
   GS11:
   - GS12
-  - GS6
-  - GS2
-  - GS5
-  - GS9
   - GS1
-  - GS4
-  - GS3
-  - GS7
+  - GS9
+  - GS6
   - GS8
+  - GS5
   - GS10
+  - GS3
+  - GS2
+  - GS4
+  - GS7
   GS12:
   - GS11
-  - GS6
   - GS9
   - GS7
-  - GS3
+  - GS6
   - GS8
+  - GS3
   - GS5
-  - GS1
-  - GS2
   - GS4
   - GS10
+  - GS2
+  - GS1
   GS2:
   - GS7
   - GS3
   - GS6
-  - GS11
   - GS1
   - GS9
-  - GS8
-  - GS12
   - GS10
+  - GS8
+  - GS11
   - GS4
+  - GS12
   - GS5
   GS3:
   - GS2
-  - GS7
-  - GS12
   - GS4
-  - GS8
-  - GS10
-  - GS9
-  - GS5
-  - GS11
-  - GS6
-  - GS1
-  GS4:
-  - GS10
-  - GS9
-  - GS1
-  - GS3
-  - GS5
-  - GS6
-  - GS11
   - GS12
   - GS7
+  - GS11
+  - GS5
+  - GS1
+  - GS10
   - GS8
+  - GS9
+  - GS6
+  GS4:
+  - GS9
+  - GS10
+  - GS5
+  - GS3
+  - GS8
+  - GS6
+  - GS1
+  - GS12
   - GS2
+  - GS11
+  - GS7
   GS5:
   - GS7
-  - GS1
-  - GS11
   - GS4
   - GS9
+  - GS1
+  - GS11
   - GS12
   - GS3
   - GS10
-  - GS6
-  - GS2
   - GS8
+  - GS2
+  - GS6
   GS6:
-  - GS12
-  - GS1
   - GS2
+  - GS12
   - GS11
   - GS8
-  - GS4
   - GS9
-  - GS3
-  - GS10
+  - GS4
   - GS7
-  - GS5
-  GS7:
-  - GS5
-  - GS2
-  - GS3
-  - GS12
-  - GS10
   - GS1
-  - GS9
-  - GS4
+  - GS5
+  - GS3
+  - GS10
+  GS7:
+  - GS2
+  - GS5
+  - GS12
+  - GS1
+  - GS3
   - GS6
   - GS11
+  - GS9
+  - GS10
+  - GS4
   - GS8
   GS8:
-  - GS9
-  - GS12
   - GS6
-  - GS3
-  - GS10
-  - GS2
-  - GS1
-  - GS4
   - GS11
-  - GS7
+  - GS12
+  - GS1
+  - GS10
+  - GS4
+  - GS2
   - GS5
+  - GS9
+  - GS3
+  - GS7
   GS9:
   - GS4
   - GS12
+  - GS11
+  - GS1
+  - GS2
+  - GS5
+  - GS6
   - GS10
   - GS8
-  - GS11
-  - GS2
-  - GS1
-  - GS5
   - GS3
-  - GS6
   - GS7
 univariate_meta:
 - converged: true
-  elpd_loo: -678.2242874446763
-  elpd_loo_per_obs: -0.24635825915171677
-  elpd_loo_per_obs_se: 0.0043057144739110315
-  khat_max: 0.8173708316869788
-  khat_mean: 0.010732761427120596
-  n_obs: 2753
-  predictor_idx: 4
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 0
-- converged: true
-  elpd_loo: -690.3429552904872
-  elpd_loo_per_obs: -0.2494013566800893
-  elpd_loo_per_obs_se: 0.0043943908198552616
-  khat_max: 0.5088988098621842
-  khat_mean: 0.1759000295656254
-  n_obs: 2768
-  predictor_idx: 5
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 0
-- converged: true
-  elpd_loo: -695.2310242819307
-  elpd_loo_per_obs: -0.24900824651931613
-  elpd_loo_per_obs_se: 0.004193890531001638
-  khat_max: 0.5060197595080178
-  khat_mean: 0.1696553207571157
-  n_obs: 2792
-  predictor_idx: 3
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 0
-- converged: true
-  elpd_loo: -668.9067631257677
-  elpd_loo_per_obs: -0.23940829030986677
-  elpd_loo_per_obs_se: 0.004075256364052158
-  khat_max: 0.5687980147203112
-  khat_mean: 0.17959679406105208
-  n_obs: 2794
-  predictor_idx: 1
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 0
-- converged: true
-  elpd_loo: -671.9304149047125
-  elpd_loo_per_obs: -0.24292495115860901
-  elpd_loo_per_obs_se: 0.004478691026567213
-  khat_max: 0.286796015106922
-  khat_mean: 0.03770674679457153
+  elpd_loo: -682.8517231088839
+  elpd_loo_per_obs: -0.2468733633799291
+  elpd_loo_per_obs_se: 0.00449543255877795
+  khat_max: 0.3468677978097322
+  khat_mean: 0.0850865096403106
   n_obs: 2766
   predictor_idx: 10
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 0
 - converged: true
-  elpd_loo: -665.5180326736037
-  elpd_loo_per_obs: -0.2438688283890083
-  elpd_loo_per_obs_se: 0.004240355381600352
-  khat_max: 0.32632636062837606
-  khat_mean: 0.07114696905182843
+  elpd_loo: -669.0871018444276
+  elpd_loo_per_obs: -0.239472835305808
+  elpd_loo_per_obs_se: 0.0042525180106513134
+  khat_max: 0.5069386793772572
+  khat_mean: 0.08739922209571162
+  n_obs: 2794
+  predictor_idx: 1
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 0
+- converged: true
+  elpd_loo: -661.2039973664448
+  elpd_loo_per_obs: -0.24228801662383467
+  elpd_loo_per_obs_se: 0.004182891017477293
+  khat_max: 0.38111235297860035
+  khat_mean: -0.008999552151561214
   n_obs: 2729
   predictor_idx: 8
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 0
 - converged: true
-  elpd_loo: -687.8896131711203
-  elpd_loo_per_obs: -0.24770961943504513
-  elpd_loo_per_obs_se: 0.004427887416517171
-  khat_max: 0.39536554652351497
-  khat_mean: 0.12094070822771694
+  elpd_loo: -681.9970659228243
+  elpd_loo_per_obs: -0.24558770829053808
+  elpd_loo_per_obs_se: 0.00464054327060587
+  khat_max: 0.36695908730247184
+  khat_mean: 0.079683707011383
   n_obs: 2777
   predictor_idx: 6
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 0
 - converged: true
-  elpd_loo: -675.3819730070907
-  elpd_loo_per_obs: -0.24452642035014144
-  elpd_loo_per_obs_se: 0.004256562787989123
-  khat_max: 0.7109682477809665
-  khat_mean: 0.23848699239583449
-  n_obs: 2762
-  predictor_idx: 11
+  elpd_loo: -675.803043049452
+  elpd_loo_per_obs: -0.24547876609133742
+  elpd_loo_per_obs_se: 0.0042846256542922075
+  khat_max: 0.623851164875021
+  khat_mean: 0.07677596254888411
+  n_obs: 2753
+  predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 0
 - converged: true
-  elpd_loo: -673.260035541717
-  elpd_loo_per_obs: -0.24670576604679992
-  elpd_loo_per_obs_se: 0.004810414544804541
-  khat_max: 0.5617035141152418
-  khat_mean: 0.04293552480473371
-  n_obs: 2729
-  predictor_idx: 9
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 0
-- converged: true
-  elpd_loo: -652.9513035099596
-  elpd_loo_per_obs: -0.24067501050864712
-  elpd_loo_per_obs_se: 0.00400833108111757
-  khat_max: 0.30124715444395367
-  khat_mean: 0.057058878902209925
+  elpd_loo: -642.2587967618108
+  elpd_loo_per_obs: -0.23673379902757494
+  elpd_loo_per_obs_se: 0.003930409949683026
+  khat_max: 0.4038707464268317
+  khat_mean: 0.012873778850013751
   n_obs: 2713
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 0
 - converged: true
-  elpd_loo: -691.8689072927716
-  elpd_loo_per_obs: -0.2513145322530954
-  elpd_loo_per_obs_se: 0.004293284748580241
-  khat_max: 0.3035616199813418
-  khat_mean: -0.016702898571395258
+  elpd_loo: -670.5340255316719
+  elpd_loo_per_obs: -0.2457068616825474
+  elpd_loo_per_obs_se: 0.004783253074171988
+  khat_max: 0.4052688682361413
+  khat_mean: 0.06014771872507403
+  n_obs: 2729
+  predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 0
+- converged: true
+  elpd_loo: -690.9441050835969
+  elpd_loo_per_obs: -0.24747281700701895
+  elpd_loo_per_obs_se: 0.00416099028450255
+  khat_max: 0.31629507336600976
+  khat_mean: 0.08174712645075845
+  n_obs: 2792
+  predictor_idx: 3
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 0
+- converged: true
+  elpd_loo: -682.3038595875543
+  elpd_loo_per_obs: -0.24784012335181774
+  elpd_loo_per_obs_se: 0.004214570985548846
+  khat_max: 0.2831838045175245
+  khat_mean: 0.04938350678659144
   n_obs: 2753
   predictor_idx: 2
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 0
 - converged: true
-  elpd_loo: -762.3491792578731
-  elpd_loo_per_obs: -0.2730477003072611
-  elpd_loo_per_obs_se: 0.003405075956341968
-  khat_max: 0.40385482487771074
-  khat_mean: 0.10229608037088393
+  elpd_loo: -685.9195124990667
+  elpd_loo_per_obs: -0.24780329208781313
+  elpd_loo_per_obs_se: 0.004413246333242413
+  khat_max: 0.4703326830162291
+  khat_mean: 0.15653459790671392
+  n_obs: 2768
+  predictor_idx: 5
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 0
+- converged: true
+  elpd_loo: -674.3206968684086
+  elpd_loo_per_obs: -0.24414217844620154
+  elpd_loo_per_obs_se: 0.004195234359619051
+  khat_max: 0.6524756424297741
+  khat_mean: 0.1316076610546169
+  n_obs: 2762
+  predictor_idx: 11
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 0
+- converged: true
+  elpd_loo: -745.3420424777069
+  elpd_loo_per_obs: -0.26695631893900673
+  elpd_loo_per_obs_se: 0.0037041620235563496
+  khat_max: 0.43354252181124486
+  khat_mean: 0.03772565779960588
   n_obs: 2792
   predictor_idx: 6
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -767.7777265286056
-  elpd_loo_per_obs: -0.2769760918212863
-  elpd_loo_per_obs_se: 0.0034380202620631164
-  khat_max: 0.46797136849834353
-  khat_mean: 0.08712293091571827
+  elpd_loo: -752.1151792679029
+  elpd_loo_per_obs: -0.27132582224671825
+  elpd_loo_per_obs_se: 0.0037308594244399623
+  khat_max: 0.4915378278439415
+  khat_mean: 0.050840058687158636
   n_obs: 2772
   predictor_idx: 2
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -758.5956327537081
-  elpd_loo_per_obs: -0.27366364817954836
-  elpd_loo_per_obs_se: 0.0034270382965215615
-  khat_max: 0.3869331441214592
-  khat_mean: 0.044910230624987474
+  elpd_loo: -744.7866102008772
+  elpd_loo_per_obs: -0.26868203831200477
+  elpd_loo_per_obs_se: 0.0036492779669934305
+  khat_max: 0.3864566858879222
+  khat_mean: 0.07814417588183861
   n_obs: 2772
   predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -754.1113135961043
-  elpd_loo_per_obs: -0.27136067419795046
-  elpd_loo_per_obs_se: 0.00347587762877013
-  khat_max: 0.5706458242762776
-  khat_mean: 0.08778402794687212
-  n_obs: 2779
-  predictor_idx: 10
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 1
-- converged: true
-  elpd_loo: -765.8333502806936
-  elpd_loo_per_obs: -0.2740992663853592
-  elpd_loo_per_obs_se: 0.0032024836147825603
-  khat_max: 0.7678765850117598
-  khat_mean: 0.10132370552394639
+  elpd_loo: -746.7542302850754
+  elpd_loo_per_obs: -0.26727066223517376
+  elpd_loo_per_obs_se: 0.003601925094333998
+  khat_max: 0.5361440350298013
+  khat_mean: -0.022979632002503154
   n_obs: 2794
   predictor_idx: 0
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -751.3126937667703
-  elpd_loo_per_obs: -0.2757110802813836
-  elpd_loo_per_obs_se: 0.0035793353823400692
-  khat_max: 0.36640305197735257
-  khat_mean: 0.08371997791184824
+  elpd_loo: -728.6580485304771
+  elpd_loo_per_obs: -0.26739744900200996
+  elpd_loo_per_obs_se: 0.003710788223453739
+  khat_max: 0.3507961458951053
+  khat_mean: 0.05602962282666178
   n_obs: 2725
   predictor_idx: 8
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -768.119112617042
-  elpd_loo_per_obs: -0.28302104370561604
-  elpd_loo_per_obs_se: 0.003189029080305557
-  khat_max: 0.4512480901083634
-  khat_mean: 0.004955932988780279
+  elpd_loo: -757.5884694296645
+  elpd_loo_per_obs: -0.2766941086302646
+  elpd_loo_per_obs_se: 0.0035986089499411727
+  khat_max: 0.2731956321524389
+  khat_mean: -0.02066735231291721
+  n_obs: 2738
+  predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 1
+- converged: true
+  elpd_loo: -752.805723738809
+  elpd_loo_per_obs: -0.2773786749221846
+  elpd_loo_per_obs_se: 0.003606300094838214
+  khat_max: 0.3820542423884292
+  khat_mean: 0.019575844375934348
   n_obs: 2714
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -761.3175534105055
-  elpd_loo_per_obs: -0.2773470139928982
-  elpd_loo_per_obs_se: 0.0033070509726576274
-  khat_max: 0.3726819582409254
-  khat_mean: 0.1308041105103287
+  elpd_loo: -738.687163471025
+  elpd_loo_per_obs: -0.26581042226377294
+  elpd_loo_per_obs_se: 0.003569521531956633
+  khat_max: 0.3358129174675982
+  khat_mean: 0.09546824466112917
+  n_obs: 2779
+  predictor_idx: 10
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 1
+- converged: true
+  elpd_loo: -743.0766744332893
+  elpd_loo_per_obs: -0.26729376778175873
+  elpd_loo_per_obs_se: 0.003583189135440262
+  khat_max: 0.46750299419800023
+  khat_mean: 0.06393905582499926
+  n_obs: 2780
+  predictor_idx: 3
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 1
+- converged: true
+  elpd_loo: -737.1004636630928
+  elpd_loo_per_obs: -0.2685247590758079
+  elpd_loo_per_obs_se: 0.0037848403446464683
+  khat_max: 0.6259902034676625
+  khat_mean: 0.13147792902904973
   n_obs: 2745
   predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -771.9865649071236
-  elpd_loo_per_obs: -0.2819527264087376
-  elpd_loo_per_obs_se: 0.0031828120369183214
-  khat_max: 0.3282636181904035
-  khat_mean: 0.02674717578513458
-  n_obs: 2738
-  predictor_idx: 9
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 1
-- converged: true
-  elpd_loo: -759.7071462034837
-  elpd_loo_per_obs: -0.27327595187175674
-  elpd_loo_per_obs_se: 0.003258440478275664
-  khat_max: 0.5702509638578654
-  khat_mean: 0.06050148498782732
-  n_obs: 2780
-  predictor_idx: 3
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 1
-- converged: true
-  elpd_loo: -752.9596162211806
-  elpd_loo_per_obs: -0.2737039680920322
-  elpd_loo_per_obs_se: 0.0037260642143193477
-  khat_max: 0.4995539582404497
-  khat_mean: 0.14921828972251916
+  elpd_loo: -735.4962615502968
+  elpd_loo_per_obs: -0.26735596566713804
+  elpd_loo_per_obs_se: 0.00389247365826938
+  khat_max: 0.4785433393675106
+  khat_mean: 0.12791967659095596
   n_obs: 2751
   predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 1
 - converged: true
-  elpd_loo: -772.201875821778
-  elpd_loo_per_obs: -0.2785721052748117
-  elpd_loo_per_obs_se: 0.0033776441573936996
-  khat_max: 0.37839667955182477
-  khat_mean: -0.07957064339448065
+  elpd_loo: -765.7821027124569
+  elpd_loo_per_obs: -0.27625616980968865
+  elpd_loo_per_obs_se: 0.0035059077414781067
+  khat_max: 0.2787840958051137
+  khat_mean: 0.01013110508389082
   n_obs: 2772
   predictor_idx: 1
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 2
 - converged: true
-  elpd_loo: -785.5674133628155
-  elpd_loo_per_obs: -0.286912860979845
-  elpd_loo_per_obs_se: 0.002993860067743864
-  khat_max: 0.5377968877009603
-  khat_mean: 0.10454900516169033
-  n_obs: 2738
-  predictor_idx: 6
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 2
-- converged: true
-  elpd_loo: -788.8598228855369
-  elpd_loo_per_obs: -0.28917148932754283
-  elpd_loo_per_obs_se: 0.0028621284663832044
-  khat_max: 0.2784457115998213
-  khat_mean: 0.0561086580624317
-  n_obs: 2728
-  predictor_idx: 11
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 2
-- converged: true
-  elpd_loo: -795.508184718577
-  elpd_loo_per_obs: -0.2872907853804901
-  elpd_loo_per_obs_se: 0.0026711949785521547
-  khat_max: 0.5408058536954545
-  khat_mean: 0.09759100511447881
+  elpd_loo: -796.9141669157616
+  elpd_loo_per_obs: -0.2877985434870934
+  elpd_loo_per_obs_se: 0.0026446317513767986
+  khat_max: 0.3756989906320892
+  khat_mean: 0.07796929689157686
   n_obs: 2769
   predictor_idx: 3
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 2
 - converged: true
-  elpd_loo: -788.6971462910385
-  elpd_loo_per_obs: -0.29157010953457985
-  elpd_loo_per_obs_se: 0.002745694363962872
-  khat_max: 0.5587242975870451
-  khat_mean: 0.04059570473568237
-  n_obs: 2705
-  predictor_idx: 7
+  elpd_loo: -784.3945255212024
+  elpd_loo_per_obs: -0.2875346501177428
+  elpd_loo_per_obs_se: 0.003017980425003033
+  khat_max: 0.4690815405660944
+  khat_mean: 0.15184109368364196
+  n_obs: 2728
+  predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 2
 - converged: true
-  elpd_loo: -784.288056079524
-  elpd_loo_per_obs: -0.28887221218398673
-  elpd_loo_per_obs_se: 0.0030392127329408256
-  khat_max: 0.4812973818190359
-  khat_mean: 0.012161656057040044
-  n_obs: 2715
-  predictor_idx: 9
+  elpd_loo: -787.3642659051343
+  elpd_loo_per_obs: -0.28756912560450487
+  elpd_loo_per_obs_se: 0.0029662612401519
+  khat_max: 0.41366239669418237
+  khat_mean: 0.06927945835140306
+  n_obs: 2738
+  predictor_idx: 6
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 2
 - converged: true
-  elpd_loo: -791.0217585253558
-  elpd_loo_per_obs: -0.2925376325907381
-  elpd_loo_per_obs_se: 0.0028886402612741937
-  khat_max: 0.2573615872555405
-  khat_mean: 0.06204955556124252
-  n_obs: 2704
-  predictor_idx: 8
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 2
-- converged: true
-  elpd_loo: -790.5480837695143
-  elpd_loo_per_obs: -0.29021588978322843
-  elpd_loo_per_obs_se: 0.002708028349269661
-  khat_max: 0.4400693048764618
-  khat_mean: 0.14926008862178008
-  n_obs: 2724
-  predictor_idx: 4
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 2
-- converged: true
-  elpd_loo: -785.080064268839
-  elpd_loo_per_obs: -0.2819971495218531
-  elpd_loo_per_obs_se: 0.0028340677939577967
-  khat_max: 1.5487456660893586
-  khat_mean: 0.1939776269117388
+  elpd_loo: -781.7022065694713
+  elpd_loo_per_obs: -0.2807838385666204
+  elpd_loo_per_obs_se: 0.0029807519742906193
+  khat_max: 0.43511133869866614
+  khat_mean: 0.09028381798888904
   n_obs: 2784
   predictor_idx: 10
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 2
 - converged: true
-  elpd_loo: -791.2802840926172
-  elpd_loo_per_obs: -0.2900587551659154
-  elpd_loo_per_obs_se: 0.0028472747618664665
-  khat_max: 0.24360223202297349
-  khat_mean: 0.022206214181955494
+  elpd_loo: -780.9991373662934
+  elpd_loo_per_obs: -0.2867104028510622
+  elpd_loo_per_obs_se: 0.003012046011121198
+  khat_max: 0.6927141388214919
+  khat_mean: 0.1308529175415954
+  n_obs: 2724
+  predictor_idx: 4
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 2
+- converged: true
+  elpd_loo: -781.6360315915254
+  elpd_loo_per_obs: -0.2839215516133401
+  elpd_loo_per_obs_se: 0.0030556621917378337
+  khat_max: 0.3419139609871459
+  khat_mean: 0.17007996719553387
+  n_obs: 2753
+  predictor_idx: 0
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 2
+- converged: true
+  elpd_loo: -781.5352899114677
+  elpd_loo_per_obs: -0.2878583019931741
+  elpd_loo_per_obs_se: 0.003131170509446627
+  khat_max: 0.4039282304130861
+  khat_mean: 0.042213604804792006
+  n_obs: 2715
+  predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 2
+- converged: true
+  elpd_loo: -779.8418495489273
+  elpd_loo_per_obs: -0.2882964323655923
+  elpd_loo_per_obs_se: 0.003019639488054779
+  khat_max: 0.3359256131481091
+  khat_mean: 0.032126747176515945
+  n_obs: 2705
+  predictor_idx: 7
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 2
+- converged: true
+  elpd_loo: -787.5743719981416
+  elpd_loo_per_obs: -0.2912627115377743
+  elpd_loo_per_obs_se: 0.0029851053096467974
+  khat_max: 0.4932482130579293
+  khat_mean: 0.15885533753734404
+  n_obs: 2704
+  predictor_idx: 8
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 2
+- converged: true
+  elpd_loo: -782.5238634111975
+  elpd_loo_per_obs: -0.286848923537829
+  elpd_loo_per_obs_se: 0.003171402133997786
+  khat_max: 0.2681918553860414
+  khat_mean: 0.041426802753282484
   n_obs: 2728
   predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 2
 - converged: true
-  elpd_loo: -786.5602768293796
-  elpd_loo_per_obs: -0.28571023495436965
-  elpd_loo_per_obs_se: 0.0029010888600281416
-  khat_max: 0.4307661653885554
-  khat_mean: 0.11326735176132434
-  n_obs: 2753
-  predictor_idx: 0
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 2
-- converged: true
-  elpd_loo: -768.3948366721776
-  elpd_loo_per_obs: -0.2806409191644184
-  elpd_loo_per_obs_se: 0.0033611402098042676
-  khat_max: 0.45087281426550274
-  khat_mean: 0.07254610604032205
-  n_obs: 2738
-  predictor_idx: 9
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 3
-- converged: true
-  elpd_loo: -780.0606956881851
-  elpd_loo_per_obs: -0.28657630260403566
-  elpd_loo_per_obs_se: 0.0031662322703150027
-  khat_max: 0.5048192495949805
-  khat_mean: 0.10542067717434879
+  elpd_loo: -777.4622366510914
+  elpd_loo_per_obs: -0.2856216887035604
+  elpd_loo_per_obs_se: 0.003232831992232716
+  khat_max: 0.4490541591321323
+  khat_mean: 0.0720177805933675
   n_obs: 2722
   predictor_idx: 8
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 3
 - converged: true
-  elpd_loo: -773.6194253727045
-  elpd_loo_per_obs: -0.2770843214085618
-  elpd_loo_per_obs_se: 0.0030389682729655824
-  khat_max: 0.5054222217212954
-  khat_mean: 0.12776306423691208
-  n_obs: 2792
-  predictor_idx: 0
+  elpd_loo: -767.2722254592509
+  elpd_loo_per_obs: -0.2802309077645182
+  elpd_loo_per_obs_se: 0.003316908150637305
+  khat_max: 0.40345068363269865
+  khat_mean: 0.07941877196604985
+  n_obs: 2738
+  predictor_idx: 9
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 3
 - converged: true
-  elpd_loo: -767.3557369263951
-  elpd_loo_per_obs: -0.2771237764270116
-  elpd_loo_per_obs_se: 0.003243236144271039
-  khat_max: 0.4825455597646987
-  khat_mean: 0.06724668510049066
-  n_obs: 2769
-  predictor_idx: 2
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 3
-- converged: true
-  elpd_loo: -784.0510405979172
-  elpd_loo_per_obs: -0.2841794275454575
-  elpd_loo_per_obs_se: 0.002879581983830161
-  khat_max: 0.3639087157119466
-  khat_mean: 0.10833785466287613
+  elpd_loo: -784.8525064692323
+  elpd_loo_per_obs: -0.28446991898123675
+  elpd_loo_per_obs_se: 0.0028348939344142636
+  khat_max: 0.6549323673892682
+  khat_mean: 0.07089402113504578
   n_obs: 2759
   predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 3
 - converged: true
-  elpd_loo: -784.2481274606724
-  elpd_loo_per_obs: -0.28363404248125584
-  elpd_loo_per_obs_se: 0.0030399251742049393
-  khat_max: 0.26010424717516
-  khat_mean: 0.07526938528298084
-  n_obs: 2765
-  predictor_idx: 5
+  elpd_loo: -762.5837284794354
+  elpd_loo_per_obs: -0.2754004075404245
+  elpd_loo_per_obs_se: 0.0034356858207397196
+  khat_max: 0.45559056634561024
+  khat_mean: 0.05545535130884256
+  n_obs: 2769
+  predictor_idx: 2
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 3
 - converged: true
-  elpd_loo: -777.6753614987272
-  elpd_loo_per_obs: -0.28014242128916683
-  elpd_loo_per_obs_se: 0.0029734204651204574
-  khat_max: 0.41884540802955605
-  khat_mean: -0.03067444700761398
-  n_obs: 2776
-  predictor_idx: 10
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 3
-- converged: true
-  elpd_loo: -780.1044470696755
-  elpd_loo_per_obs: -0.284294623567666
-  elpd_loo_per_obs_se: 0.0028231843582545604
-  khat_max: 0.7629905126936996
-  khat_mean: 0.08704831163684201
-  n_obs: 2744
-  predictor_idx: 11
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 3
-- converged: true
-  elpd_loo: -777.7505167954835
-  elpd_loo_per_obs: -0.27976637294801565
-  elpd_loo_per_obs_se: 0.003089404917643323
-  khat_max: 0.2314527460796107
-  khat_mean: -0.021933522922959442
-  n_obs: 2780
-  predictor_idx: 6
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 3
-- converged: true
-  elpd_loo: -781.2801560597788
-  elpd_loo_per_obs: -0.28524284631609303
-  elpd_loo_per_obs_se: 0.003109261519616666
-  khat_max: 0.415240595614924
-  khat_mean: 0.018663175334381624
+  elpd_loo: -775.0575281331539
+  elpd_loo_per_obs: -0.2829709850796473
+  elpd_loo_per_obs_se: 0.0032491719792683937
+  khat_max: 0.4146650083722035
+  khat_mean: 0.11791166131047753
   n_obs: 2739
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 3
 - converged: true
-  elpd_loo: -767.2995071421287
-  elpd_loo_per_obs: -0.27600701695760027
-  elpd_loo_per_obs_se: 0.003515753174271069
-  khat_max: 0.3557088316687361
-  khat_mean: -0.04223940517906632
+  elpd_loo: -779.1879330444185
+  elpd_loo_per_obs: -0.28180395408478065
+  elpd_loo_per_obs_se: 0.0032081274521573487
+  khat_max: 0.5423018390639845
+  khat_mean: 0.038620033635268565
+  n_obs: 2765
+  predictor_idx: 5
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 3
+- converged: true
+  elpd_loo: -770.1000418616471
+  elpd_loo_per_obs: -0.2758237972283836
+  elpd_loo_per_obs_se: 0.0031996773229265346
+  khat_max: 0.3349358729958061
+  khat_mean: 0.07231148214458209
+  n_obs: 2792
+  predictor_idx: 0
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 3
+- converged: true
+  elpd_loo: -779.0395275311024
+  elpd_loo_per_obs: -0.28390653335681576
+  elpd_loo_per_obs_se: 0.0028200133126499894
+  khat_max: 0.7447449068306262
+  khat_mean: 0.1176758596817159
+  n_obs: 2744
+  predictor_idx: 11
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 3
+- converged: true
+  elpd_loo: -755.1811666411684
+  elpd_loo_per_obs: -0.27164790166948505
+  elpd_loo_per_obs_se: 0.00371738646423707
+  khat_max: 0.20002219045894076
+  khat_mean: -0.07276042610144612
   n_obs: 2780
   predictor_idx: 1
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 3
 - converged: true
-  elpd_loo: -803.0187784670311
-  elpd_loo_per_obs: -0.2930725468857778
-  elpd_loo_per_obs_se: 0.0022719718433386465
-  khat_max: 0.3043385082412638
-  khat_mean: 0.029346883836038208
+  elpd_loo: -769.5321896989071
+  elpd_loo_per_obs: -0.27720900205292043
+  elpd_loo_per_obs_se: 0.0031689563802956813
+  khat_max: 0.238601355191533
+  khat_mean: 0.04280754014019074
+  n_obs: 2776
+  predictor_idx: 10
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 3
+- converged: true
+  elpd_loo: -775.111761166707
+  elpd_loo_per_obs: -0.2788171802757939
+  elpd_loo_per_obs_se: 0.003261508069973846
+  khat_max: 0.46637430773647504
+  khat_mean: 0.09326859022582382
+  n_obs: 2780
+  predictor_idx: 6
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 3
+- converged: true
+  elpd_loo: -794.5379907606474
+  elpd_loo_per_obs: -0.2899773688907472
+  elpd_loo_per_obs_se: 0.002556728168924071
+  khat_max: 0.3224778645553924
+  khat_mean: 0.04317163584420795
   n_obs: 2740
   predictor_idx: 6
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 4
 - converged: true
-  elpd_loo: -804.1561938214093
-  elpd_loo_per_obs: -0.2921017776321864
-  elpd_loo_per_obs_se: 0.0022383978752430226
-  khat_max: 0.5342279317336439
-  khat_mean: 0.11237199948239422
-  n_obs: 2753
-  predictor_idx: 0
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 4
-- converged: true
-  elpd_loo: -812.8601259360369
-  elpd_loo_per_obs: -0.2943012765879931
-  elpd_loo_per_obs_se: 0.001744360196887046
-  khat_max: 0.6102398277936041
-  khat_mean: 0.037406126493739464
-  n_obs: 2762
-  predictor_idx: 10
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 4
-- converged: true
-  elpd_loo: -795.6071564954359
-  elpd_loo_per_obs: -0.28836794363734536
-  elpd_loo_per_obs_se: 0.0024015256626200923
-  khat_max: 0.42220714088366196
-  khat_mean: 0.09221665560693508
+  elpd_loo: -788.3953046970257
+  elpd_loo_per_obs: -0.28575400677674
+  elpd_loo_per_obs_se: 0.0026519312854266764
+  khat_max: 0.3893841675146934
+  khat_mean: 0.03162421357491624
   n_obs: 2759
   predictor_idx: 3
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 4
 - converged: true
-  elpd_loo: -801.8542584354376
-  elpd_loo_per_obs: -0.298087084920237
-  elpd_loo_per_obs_se: 0.0024838683850496564
-  khat_max: 0.3263506800667709
-  khat_mean: 0.03679019206326928
+  elpd_loo: -799.3519400322537
+  elpd_loo_per_obs: -0.29715685503057754
+  elpd_loo_per_obs_se: 0.002632210985919822
+  khat_max: 0.5712869351072327
+  khat_mean: 0.05536841379199129
   n_obs: 2690
   predictor_idx: 8
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 4
 - converged: true
-  elpd_loo: -810.1550265406545
-  elpd_loo_per_obs: -0.2998353170024628
-  elpd_loo_per_obs_se: 0.0019054142581900913
-  khat_max: 0.33241951327652997
-  khat_mean: 0.0907318172434393
+  elpd_loo: -793.0203077908845
+  elpd_loo_per_obs: -0.28805677725785855
+  elpd_loo_per_obs_se: 0.002631111281866592
+  khat_max: 0.3532092122748337
+  khat_mean: 0.02911385534036048
+  n_obs: 2753
+  predictor_idx: 0
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 4
+- converged: true
+  elpd_loo: -805.4938714471638
+  elpd_loo_per_obs: -0.2916342764109934
+  elpd_loo_per_obs_se: 0.0021244889240358516
+  khat_max: 0.4146396198401205
+  khat_mean: 0.024514043739734565
+  n_obs: 2762
+  predictor_idx: 10
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 4
+- converged: true
+  elpd_loo: -800.4201388969079
+  elpd_loo_per_obs: -0.29623247183453294
+  elpd_loo_per_obs_se: 0.0023761590610395958
+  khat_max: 0.5798609151030174
+  khat_mean: 0.08502459346019915
   n_obs: 2702
   predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 4
 - converged: true
-  elpd_loo: -804.4744685465216
-  elpd_loo_per_obs: -0.29532836583939853
-  elpd_loo_per_obs_se: 0.0022474507336465777
-  khat_max: 0.8145425927722397
-  khat_mean: 0.14183732294442192
+  elpd_loo: -799.466019795456
+  elpd_loo_per_obs: -0.2934897282655859
+  elpd_loo_per_obs_se: 0.00242978183413439
+  khat_max: 0.3233694885770344
+  khat_mean: 0.17107354593418145
   n_obs: 2724
   predictor_idx: 2
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 4
 - converged: true
-  elpd_loo: -813.660169159763
-  elpd_loo_per_obs: -0.29924978637725747
-  elpd_loo_per_obs_se: 0.0017101649143087525
-  khat_max: 0.36745602132478244
-  khat_mean: 0.04724431359213181
+  elpd_loo: -807.2126797945264
+  elpd_loo_per_obs: -0.296878514084048
+  elpd_loo_per_obs_se: 0.0020234853822890665
+  khat_max: 0.31014074227986455
+  khat_mean: 0.06338952079519783
   n_obs: 2719
   predictor_idx: 9
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 4
 - converged: true
-  elpd_loo: -811.4059997799225
-  elpd_loo_per_obs: -0.2958096973313607
-  elpd_loo_per_obs_se: 0.0018027815305367658
-  khat_max: 0.400751256786847
-  khat_mean: 0.031603557488068285
-  n_obs: 2743
-  predictor_idx: 5
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 4
-- converged: true
-  elpd_loo: -815.647464336673
-  elpd_loo_per_obs: -0.2964912629359044
-  elpd_loo_per_obs_se: 0.0015503530763709076
-  khat_max: 0.43346382508708214
-  khat_mean: 0.14288157516769961
-  n_obs: 2751
-  predictor_idx: 1
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 4
-- converged: true
-  elpd_loo: -812.887319006745
-  elpd_loo_per_obs: -0.3019640858123124
-  elpd_loo_per_obs_se: 0.0017063378273019616
-  khat_max: 0.4189922298250679
-  khat_mean: 0.05748762452173222
+  elpd_loo: -804.7782857898325
+  elpd_loo_per_obs: -0.2989518149293583
+  elpd_loo_per_obs_se: 0.002124621460412098
+  khat_max: 0.3965966066876111
+  khat_mean: 0.052996878846906625
   n_obs: 2692
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 4
 - converged: true
-  elpd_loo: -642.449552407216
-  elpd_loo_per_obs: -0.2354157392477889
-  elpd_loo_per_obs_se: 0.005448059525002748
-  khat_max: 0.37272591414804035
-  khat_mean: 0.11782670891575238
+  elpd_loo: -805.6839321019288
+  elpd_loo_per_obs: -0.29286947731804025
+  elpd_loo_per_obs_se: 0.002154009802545322
+  khat_max: 0.5236609289089837
+  khat_mean: 0.05385053332475703
+  n_obs: 2751
+  predictor_idx: 1
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 4
+- converged: true
+  elpd_loo: -808.0849488190552
+  elpd_loo_per_obs: -0.29459896056108464
+  elpd_loo_per_obs_se: 0.0019524695113373976
+  khat_max: 0.3101056378210686
+  khat_mean: 0.036769982439497306
+  n_obs: 2743
+  predictor_idx: 5
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 4
+- converged: true
+  elpd_loo: -645.1948596169875
+  elpd_loo_per_obs: -0.2327542783611066
+  elpd_loo_per_obs_se: 0.005641323480897494
+  khat_max: 0.5774872779516367
+  khat_mean: 0.11220054599835155
+  n_obs: 2772
+  predictor_idx: 1
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 5
+- converged: true
+  elpd_loo: -630.55707791962
+  elpd_loo_per_obs: -0.23105792521788934
+  elpd_loo_per_obs_se: 0.005501101641262892
+  khat_max: 0.43835420265443725
+  khat_mean: 0.14008228699054157
   n_obs: 2729
   predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 5
 - converged: true
-  elpd_loo: -646.6842715220503
-  elpd_loo_per_obs: -0.23362871080998926
-  elpd_loo_per_obs_se: 0.005733047468715701
-  khat_max: 0.3564995512839124
-  khat_mean: 0.19924378877919438
+  elpd_loo: -657.0011398445971
+  elpd_loo_per_obs: -0.2370133982123366
+  elpd_loo_per_obs_se: 0.005341707044764901
+  khat_max: 0.3510561544620604
+  khat_mean: 0.09238184708730238
+  n_obs: 2772
+  predictor_idx: 10
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 5
+- converged: true
+  elpd_loo: -652.4751125838845
+  elpd_loo_per_obs: -0.23908945129493753
+  elpd_loo_per_obs_se: 0.005138250895363752
+  khat_max: 0.4021353561536054
+  khat_mean: 0.16281944607566476
+  n_obs: 2729
+  predictor_idx: 7
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 5
+- converged: true
+  elpd_loo: -625.6772462573042
+  elpd_loo_per_obs: -0.23062191163188508
+  elpd_loo_per_obs_se: 0.005902728118066549
+  khat_max: 0.40031843294713454
+  khat_mean: 0.0197912386817054
+  n_obs: 2713
+  predictor_idx: 8
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 5
+- converged: true
+  elpd_loo: -629.3276032641661
+  elpd_loo_per_obs: -0.22760491980620837
+  elpd_loo_per_obs_se: 0.005730530947370083
+  khat_max: 0.3104546255296543
+  khat_mean: -0.02689460266290986
+  n_obs: 2765
+  predictor_idx: 3
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 5
+- converged: true
+  elpd_loo: -623.1919426749415
+  elpd_loo_per_obs: -0.22777483284902833
+  elpd_loo_per_obs_se: 0.005674143310450731
+  khat_max: 0.427016455499847
+  khat_mean: 0.11720263665596506
+  n_obs: 2736
+  predictor_idx: 6
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 5
+- converged: true
+  elpd_loo: -645.2129838203297
+  elpd_loo_per_obs: -0.23309717623566822
+  elpd_loo_per_obs_se: 0.005779716856741386
+  khat_max: 0.4338855151172045
+  khat_mean: 0.053351101297419296
   n_obs: 2768
   predictor_idx: 0
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 5
 - converged: true
-  elpd_loo: -662.4559062489302
-  elpd_loo_per_obs: -0.23898120716050872
-  elpd_loo_per_obs_se: 0.005498049772061981
-  khat_max: 0.4187245288997352
-  khat_mean: 0.07640659918064466
-  n_obs: 2772
-  predictor_idx: 1
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -663.9149513397394
-  elpd_loo_per_obs: -0.23950755820336922
-  elpd_loo_per_obs_se: 0.005297620404736632
-  khat_max: 0.3382808336713531
-  khat_mean: 0.1172074282155178
-  n_obs: 2772
-  predictor_idx: 10
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -667.0855821558152
-  elpd_loo_per_obs: -0.24444323274306165
-  elpd_loo_per_obs_se: 0.0050630531734987775
-  khat_max: 0.37690402062154027
-  khat_mean: 0.1268214858844624
-  n_obs: 2729
-  predictor_idx: 7
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -635.0442874489069
-  elpd_loo_per_obs: -0.22967243669038223
-  elpd_loo_per_obs_se: 0.005744972189743725
-  khat_max: 0.49824892561679
-  khat_mean: -0.06173382974076444
-  n_obs: 2765
-  predictor_idx: 3
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -628.547603315553
-  elpd_loo_per_obs: -0.2316799127591423
-  elpd_loo_per_obs_se: 0.005911908266158157
-  khat_max: 0.495712941164396
-  khat_mean: 0.08654498011315875
-  n_obs: 2713
-  predictor_idx: 8
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -648.6360193320602
-  elpd_loo_per_obs: -0.23776980180793994
-  elpd_loo_per_obs_se: 0.005169270498433925
-  khat_max: 0.3618169426735688
-  khat_mean: 0.11904250238935823
-  n_obs: 2728
-  predictor_idx: 2
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -630.4722191665556
-  elpd_loo_per_obs: -0.23230369166048476
-  elpd_loo_per_obs_se: 0.005780111647670738
-  khat_max: 0.43838271328229317
-  khat_mean: 0.08583460223287584
-  n_obs: 2714
-  predictor_idx: 9
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -632.0741019422361
-  elpd_loo_per_obs: -0.23102123608999858
-  elpd_loo_per_obs_se: 0.005739751559164906
-  khat_max: 0.3034270358478432
-  khat_mean: 0.044953384940737064
-  n_obs: 2736
-  predictor_idx: 6
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 5
-- converged: true
-  elpd_loo: -654.8709888927557
-  elpd_loo_per_obs: -0.2387426135226962
-  elpd_loo_per_obs_se: 0.0056907171444263455
-  khat_max: 0.492449752256775
-  khat_mean: 0.11800416147097731
+  elpd_loo: -650.3323077033297
+  elpd_loo_per_obs: -0.2370879721849543
+  elpd_loo_per_obs_se: 0.005788475627351897
+  khat_max: 0.5960352956483241
+  khat_mean: 0.0854366493277939
   n_obs: 2743
   predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 5
 - converged: true
-  elpd_loo: -796.9009905800978
-  elpd_loo_per_obs: -0.2908397775839773
-  elpd_loo_per_obs_se: 0.0026381771684776765
-  khat_max: 0.5922725508077308
-  khat_mean: 0.06290908541252815
-  n_obs: 2740
-  predictor_idx: 4
+  elpd_loo: -629.7141168513319
+  elpd_loo_per_obs: -0.23083362054667594
+  elpd_loo_per_obs_se: 0.005163167708848254
+  khat_max: 0.6294636419606379
+  khat_mean: 0.07932879028510348
+  n_obs: 2728
+  predictor_idx: 2
   predictor_mean: 0.0
   predictor_std: 1.0
-  target_idx: 6
+  target_idx: 5
 - converged: true
-  elpd_loo: -799.2698982653278
-  elpd_loo_per_obs: -0.28627145353342687
-  elpd_loo_per_obs_se: 0.0023876807203320957
-  khat_max: 0.46635604733137725
-  khat_mean: 0.14226685120601099
+  elpd_loo: -625.642555324932
+  elpd_loo_per_obs: -0.23052415450439648
+  elpd_loo_per_obs_se: 0.0058332093206474814
+  khat_max: 0.5062465998779409
+  khat_mean: 0.11684127381681245
+  n_obs: 2714
+  predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 5
+- converged: true
+  elpd_loo: -786.5563249371987
+  elpd_loo_per_obs: -0.2817178814244981
+  elpd_loo_per_obs_se: 0.0029491441634686218
+  khat_max: 0.43928191548636575
+  khat_mean: 0.10977450434346267
   n_obs: 2792
   predictor_idx: 1
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -794.2499793841539
-  elpd_loo_per_obs: -0.29008399539231333
-  elpd_loo_per_obs_se: 0.0027150216779515558
-  khat_max: 0.3336608276701637
-  khat_mean: 0.0649098902045215
-  n_obs: 2738
-  predictor_idx: 2
+  elpd_loo: -787.134263496696
+  elpd_loo_per_obs: -0.2872752786484292
+  elpd_loo_per_obs_se: 0.0030448248148056663
+  khat_max: 0.25021477899597255
+  khat_mean: 0.07939951548041013
+  n_obs: 2740
+  predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -797.1360848291964
-  elpd_loo_per_obs: -0.2899731119786091
-  elpd_loo_per_obs_se: 0.0026162943661681365
-  khat_max: 0.4398419083771028
-  khat_mean: 0.05416094991042495
+  elpd_loo: -780.7744151870479
+  elpd_loo_per_obs: -0.28402124961333136
+  elpd_loo_per_obs_se: 0.0032178772606576266
+  khat_max: 0.2777418487600977
+  khat_mean: 0.06759039888411213
   n_obs: 2749
   predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -800.9113752330343
-  elpd_loo_per_obs: -0.2941283052636924
-  elpd_loo_per_obs_se: 0.0024896866699865134
-  khat_max: 0.48043558138502496
-  khat_mean: 0.08091087993378275
-  n_obs: 2723
-  predictor_idx: 9
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 6
-- converged: true
-  elpd_loo: -786.3644895760051
-  elpd_loo_per_obs: -0.2831705039884786
-  elpd_loo_per_obs_se: 0.002913357762393255
-  khat_max: 0.40619287062483567
-  khat_mean: 0.09176371070110564
+  elpd_loo: -770.5701823567183
+  elpd_loo_per_obs: -0.27748296087746427
+  elpd_loo_per_obs_se: 0.003496554904749813
+  khat_max: 0.7340644750299015
+  khat_mean: 0.168405963566171
   n_obs: 2777
   predictor_idx: 0
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -789.9906062064997
-  elpd_loo_per_obs: -0.28884482859469823
-  elpd_loo_per_obs_se: 0.00282687668186976
-  khat_max: 0.3532601811614602
-  khat_mean: 0.09778109795693282
-  n_obs: 2735
-  predictor_idx: 8
+  elpd_loo: -787.3634746408283
+  elpd_loo_per_obs: -0.2875688366109672
+  elpd_loo_per_obs_se: 0.0031047842804275776
+  khat_max: 0.3575452151493995
+  khat_mean: 0.05238659731134637
+  n_obs: 2738
+  predictor_idx: 2
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -799.8718675924582
-  elpd_loo_per_obs: -0.2877236933785821
-  elpd_loo_per_obs_se: 0.0025011685163146527
-  khat_max: 0.2793576054164348
-  khat_mean: 0.1064822982561301
-  n_obs: 2780
-  predictor_idx: 3
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 6
-- converged: true
-  elpd_loo: -800.5810345981412
-  elpd_loo_per_obs: -0.2926100272654025
-  elpd_loo_per_obs_se: 0.002360646415128818
-  khat_max: 0.3475886444273738
-  khat_mean: 0.05648212248775656
+  elpd_loo: -790.1221953042199
+  elpd_loo_per_obs: -0.28878735208487566
+  elpd_loo_per_obs_se: 0.0028005730626950993
+  khat_max: 0.4132689075752327
+  khat_mean: 0.13243449525200846
   n_obs: 2736
   predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -790.6938011928883
-  elpd_loo_per_obs: -0.2843199572789961
-  elpd_loo_per_obs_se: 0.0027570815980467686
-  khat_max: 0.4450904772559323
-  khat_mean: 0.11581734206271375
+  elpd_loo: -778.1072940675973
+  elpd_loo_per_obs: -0.2797940647492259
+  elpd_loo_per_obs_se: 0.003208326569665318
+  khat_max: 0.4653677599682896
+  khat_mean: 0.09690337857338477
   n_obs: 2781
   predictor_idx: 10
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -801.6867058939016
-  elpd_loo_per_obs: -0.2967012234988533
-  elpd_loo_per_obs_se: 0.0024276908435678837
-  khat_max: 0.33601568289921663
-  khat_mean: 0.12647207381258393
+  elpd_loo: -782.1905603408792
+  elpd_loo_per_obs: -0.28599289226357555
+  elpd_loo_per_obs_se: 0.0030787470255049906
+  khat_max: 0.3833335992359087
+  khat_mean: 0.08242315592570408
+  n_obs: 2735
+  predictor_idx: 8
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 6
+- converged: true
+  elpd_loo: -780.2884731979365
+  elpd_loo_per_obs: -0.2865547092170167
+  elpd_loo_per_obs_se: 0.003280218333253613
+  khat_max: 0.6365232851028526
+  khat_mean: 0.03126292935465356
+  n_obs: 2723
+  predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 6
+- converged: true
+  elpd_loo: -767.7679108544856
+  elpd_loo_per_obs: -0.2761755075016135
+  elpd_loo_per_obs_se: 0.00352086422070803
+  khat_max: 0.44590496370633237
+  khat_mean: -0.002027833998400819
+  n_obs: 2780
+  predictor_idx: 3
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 6
+- converged: true
+  elpd_loo: -792.8147665854572
+  elpd_loo_per_obs: -0.29341775225220473
+  elpd_loo_per_obs_se: 0.00281175918857155
+  khat_max: 0.43944199974704545
+  khat_mean: 0.1573127085537343
   n_obs: 2702
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 6
 - converged: true
-  elpd_loo: -809.0652243133966
-  elpd_loo_per_obs: -0.3015524503590744
-  elpd_loo_per_obs_se: 0.0021081148679158116
-  khat_max: 0.5182020355686325
-  khat_mean: 0.12298937185539185
-  n_obs: 2683
-  predictor_idx: 8
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 7
-- converged: true
-  elpd_loo: -812.6678899210443
-  elpd_loo_per_obs: -0.30391469331377874
-  elpd_loo_per_obs_se: 0.0018214702408669138
-  khat_max: 0.7274128162539315
-  khat_mean: 0.1292121077160337
-  n_obs: 2674
-  predictor_idx: 11
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 7
-- converged: true
-  elpd_loo: -807.3794035062949
-  elpd_loo_per_obs: -0.29585174184913704
-  elpd_loo_per_obs_se: 0.002095479338127362
-  khat_max: 0.4270687057962874
-  khat_mean: 0.10915765355630655
+  elpd_loo: -803.2497085121964
+  elpd_loo_per_obs: -0.2943384787512629
+  elpd_loo_per_obs_se: 0.002327278292709676
+  khat_max: 0.3540483584804867
+  khat_mean: 0.08722890706712894
   n_obs: 2729
   predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 7
 - converged: true
-  elpd_loo: -817.4856949984223
-  elpd_loo_per_obs: -0.3022128262471062
-  elpd_loo_per_obs_se: 0.0015059313683592718
-  khat_max: 0.23005429577433495
-  khat_mean: 0.021747804857763377
-  n_obs: 2705
-  predictor_idx: 2
+  elpd_loo: -799.7385804255405
+  elpd_loo_per_obs: -0.2953244388572897
+  elpd_loo_per_obs_se: 0.0025391503250348146
+  khat_max: 0.5234086376563483
+  khat_mean: 0.011141064650466576
+  n_obs: 2708
+  predictor_idx: 10
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 7
 - converged: true
-  elpd_loo: -810.4590549953562
-  elpd_loo_per_obs: -0.30050391360599044
-  elpd_loo_per_obs_se: 0.0019868435855604607
-  khat_max: 0.5593712798895769
-  khat_mean: 0.05124774628314971
-  n_obs: 2697
-  predictor_idx: 9
+  elpd_loo: -810.4996251866829
+  elpd_loo_per_obs: -0.30310382392920077
+  elpd_loo_per_obs_se: 0.001985170065327301
+  khat_max: 0.38997929235550477
+  khat_mean: 0.12556873853200573
+  n_obs: 2674
+  predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 7
 - converged: true
-  elpd_loo: -804.9380465393153
-  elpd_loo_per_obs: -0.2965873421294456
-  elpd_loo_per_obs_se: 0.0021758437381056953
-  khat_max: 0.3615097954667684
-  khat_mean: 0.060157837649128146
-  n_obs: 2714
-  predictor_idx: 1
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 7
-- converged: true
-  elpd_loo: -803.653044211398
-  elpd_loo_per_obs: -0.29622301666472467
-  elpd_loo_per_obs_se: 0.0023687725439374293
-  khat_max: 0.4737067659118408
-  khat_mean: 0.003050165403880283
+  elpd_loo: -801.1725598816622
+  elpd_loo_per_obs: -0.29530872092947374
+  elpd_loo_per_obs_se: 0.0024228566195541204
+  khat_max: 0.7781776887007381
+  khat_mean: 0.05920724961648427
   n_obs: 2713
   predictor_idx: 0
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 7
 - converged: true
-  elpd_loo: -802.7650057729479
-  elpd_loo_per_obs: -0.2930868951343366
-  elpd_loo_per_obs_se: 0.0022866818228680866
-  khat_max: 0.35813486909075914
-  khat_mean: 0.08747506313353665
+  elpd_loo: -808.3186940805992
+  elpd_loo_per_obs: -0.2997103055545418
+  elpd_loo_per_obs_se: 0.002067499846305036
+  khat_max: 0.27304400146354924
+  khat_mean: 0.09369514651197107
+  n_obs: 2697
+  predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 7
+- converged: true
+  elpd_loo: -792.1441583605289
+  elpd_loo_per_obs: -0.28920925825503063
+  elpd_loo_per_obs_se: 0.0027699828181213604
+  khat_max: 0.38898412380420283
+  khat_mean: 0.036365833986278115
   n_obs: 2739
   predictor_idx: 3
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 7
 - converged: true
-  elpd_loo: -806.4722542427498
-  elpd_loo_per_obs: -0.2978110244618722
-  elpd_loo_per_obs_se: 0.0021951080232116057
-  khat_max: 0.39181388265325195
-  khat_mean: 0.03301454068286442
-  n_obs: 2708
-  predictor_idx: 10
+  elpd_loo: -796.7809488628543
+  elpd_loo_per_obs: -0.29358177924202444
+  elpd_loo_per_obs_se: 0.00253345308371455
+  khat_max: 0.39057566612122363
+  khat_mean: 0.06090072772393675
+  n_obs: 2714
+  predictor_idx: 1
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 7
 - converged: true
-  elpd_loo: -809.4749390730276
-  elpd_loo_per_obs: -0.2995836191980117
-  elpd_loo_per_obs_se: 0.002010257121403089
-  khat_max: 0.5331980938899065
-  khat_mean: 0.10083857501112392
-  n_obs: 2702
-  predictor_idx: 6
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 7
-- converged: true
-  elpd_loo: -807.8242149775015
-  elpd_loo_per_obs: -0.3000832893675711
-  elpd_loo_per_obs_se: 0.0020852748048092954
-  khat_max: 0.29909690637561037
-  khat_mean: 0.06883534259857949
+  elpd_loo: -803.3724289063296
+  elpd_loo_per_obs: -0.29842957983147456
+  elpd_loo_per_obs_se: 0.002303350859573414
+  khat_max: 0.6733412747369568
+  khat_mean: 0.10919995224214749
   n_obs: 2692
   predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 7
 - converged: true
-  elpd_loo: -761.2747547959009
-  elpd_loo_per_obs: -0.2796747813357461
-  elpd_loo_per_obs_se: 0.0034971665080888023
-  khat_max: 0.3742474058154628
-  khat_mean: 0.10722045573450664
+  elpd_loo: -806.1928543389756
+  elpd_loo_per_obs: -0.30048186892992007
+  elpd_loo_per_obs_se: 0.002294068286904757
+  khat_max: 0.632364826988434
+  khat_mean: 0.11430988164147368
+  n_obs: 2683
+  predictor_idx: 8
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 7
+- converged: true
+  elpd_loo: -813.1608869343387
+  elpd_loo_per_obs: -0.300614006260384
+  elpd_loo_per_obs_se: 0.0017607179784523246
+  khat_max: 0.4149416256151972
+  khat_mean: 0.09975883110302362
+  n_obs: 2705
+  predictor_idx: 2
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 7
+- converged: true
+  elpd_loo: -807.786773689186
+  elpd_loo_per_obs: -0.298958835562245
+  elpd_loo_per_obs_se: 0.0020983173182617053
+  khat_max: 0.4187966822316719
+  khat_mean: 0.11628355896468424
+  n_obs: 2702
+  predictor_idx: 6
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 7
+- converged: true
+  elpd_loo: -757.6629632461181
+  elpd_loo_per_obs: -0.278347892448978
+  elpd_loo_per_obs_se: 0.003541014335480127
+  khat_max: 0.5564676667184348
+  khat_mean: 0.11491287542573346
   n_obs: 2722
   predictor_idx: 3
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 8
 - converged: true
-  elpd_loo: -758.2690504481893
-  elpd_loo_per_obs: -0.28001072763965634
-  elpd_loo_per_obs_se: 0.0033291938248916878
-  khat_max: 0.4123036950684697
-  khat_mean: 0.0618811823746675
+  elpd_loo: -754.3981115468745
+  elpd_loo_per_obs: -0.27858128195970255
+  elpd_loo_per_obs_se: 0.0033395309893215664
+  khat_max: 0.4272925212606896
+  khat_mean: 0.04162518109457685
   n_obs: 2708
   predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 8
 - converged: true
-  elpd_loo: -759.0187549958704
-  elpd_loo_per_obs: -0.28502394104238465
-  elpd_loo_per_obs_se: 0.003640767157485546
-  khat_max: 0.6189912886654445
-  khat_mean: -0.0075142391127438046
-  n_obs: 2663
-  predictor_idx: 9
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 8
-- converged: true
-  elpd_loo: -754.4052433951211
-  elpd_loo_per_obs: -0.28117974036344434
-  elpd_loo_per_obs_se: 0.003526164048844202
-  khat_max: 0.4638869796861693
-  khat_mean: 0.06503694997442885
-  n_obs: 2683
-  predictor_idx: 7
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 8
-- converged: true
-  elpd_loo: -751.5119623228713
-  elpd_loo_per_obs: -0.27659623199222355
-  elpd_loo_per_obs_se: 0.0035417708296092746
-  khat_max: 0.3101461390476369
-  khat_mean: 0.061330940510340576
+  elpd_loo: -756.0783418414942
+  elpd_loo_per_obs: -0.27827690167151053
+  elpd_loo_per_obs_se: 0.003431288628711596
+  khat_max: 0.40529154405713275
+  khat_mean: 0.020744335171901336
   n_obs: 2717
   predictor_idx: 10
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 8
 - converged: true
-  elpd_loo: -752.2917274850635
-  elpd_loo_per_obs: -0.27607035871011504
-  elpd_loo_per_obs_se: 0.0036735948006388188
-  khat_max: 0.42380210479739266
-  khat_mean: -0.011660095276254598
+  elpd_loo: -756.4489127511433
+  elpd_loo_per_obs: -0.27718904827817636
+  elpd_loo_per_obs_se: 0.0034692239454341516
+  khat_max: 0.3847997758493382
+  khat_mean: 0.06809648679072772
+  n_obs: 2729
+  predictor_idx: 0
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 8
+- converged: true
+  elpd_loo: -750.8090954849802
+  elpd_loo_per_obs: -0.2755262735724698
+  elpd_loo_per_obs_se: 0.0036902989081745966
+  khat_max: 0.4077119054840031
+  khat_mean: -0.006870716983217639
   n_obs: 2725
   predictor_idx: 1
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 8
 - converged: true
-  elpd_loo: -757.3086378225124
-  elpd_loo_per_obs: -0.27750408128344173
-  elpd_loo_per_obs_se: 0.0034498377913731093
-  khat_max: 0.362597111072442
-  khat_mean: 0.11077786764980832
-  n_obs: 2729
-  predictor_idx: 0
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 8
-- converged: true
-  elpd_loo: -768.2474521975719
-  elpd_loo_per_obs: -0.2855938484005843
-  elpd_loo_per_obs_se: 0.003488110284788149
-  khat_max: 0.4251137946604522
-  khat_mean: 0.13441510713718063
+  elpd_loo: -769.1687774144073
+  elpd_loo_per_obs: -0.2859363484811923
+  elpd_loo_per_obs_se: 0.003469483753547138
+  khat_max: 0.3881973634356087
+  khat_mean: 0.11842877946125671
   n_obs: 2690
   predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 8
 - converged: true
-  elpd_loo: -754.0285437770112
-  elpd_loo_per_obs: -0.27885670997670536
-  elpd_loo_per_obs_se: 0.003733383521152563
-  khat_max: 0.5151543053283165
-  khat_mean: 0.022168578027628446
-  n_obs: 2704
-  predictor_idx: 2
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 8
-- converged: true
-  elpd_loo: -764.0416916966693
-  elpd_loo_per_obs: -0.2816224444145482
-  elpd_loo_per_obs_se: 0.0032729996865446176
-  khat_max: 0.25284418347329973
-  khat_mean: 0.042277876018725284
+  elpd_loo: -763.4175534878551
+  elpd_loo_per_obs: -0.2813923897854239
+  elpd_loo_per_obs_se: 0.0033192482527315006
+  khat_max: 0.30373278165428585
+  khat_mean: 0.032782873894919407
   n_obs: 2713
   predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 8
 - converged: true
-  elpd_loo: -756.6832231590374
-  elpd_loo_per_obs: -0.2766666263835603
-  elpd_loo_per_obs_se: 0.003632720677221511
-  khat_max: 0.35488446795617146
-  khat_mean: 0.109662501391491
+  elpd_loo: -762.4976764068655
+  elpd_loo_per_obs: -0.2863303328602574
+  elpd_loo_per_obs_se: 0.003488102696794988
+  khat_max: 0.4588304037484665
+  khat_mean: 0.03494075312587144
+  n_obs: 2663
+  predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 8
+- converged: true
+  elpd_loo: -750.3353398105177
+  elpd_loo_per_obs: -0.279662817670711
+  elpd_loo_per_obs_se: 0.003472447914222265
+  khat_max: 0.3475060458577943
+  khat_mean: 0.07082661581543842
+  n_obs: 2683
+  predictor_idx: 7
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 8
+- converged: true
+  elpd_loo: -755.6079405699415
+  elpd_loo_per_obs: -0.27944080642379493
+  elpd_loo_per_obs_se: 0.003639620392149688
+  khat_max: 0.3529319366599284
+  khat_mean: 0.059097607495430915
+  n_obs: 2704
+  predictor_idx: 2
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 8
+- converged: true
+  elpd_loo: -761.1712754092142
+  elpd_loo_per_obs: -0.27830759612768347
+  elpd_loo_per_obs_se: 0.0034547624237943084
+  khat_max: 0.5024110420874657
+  khat_mean: 0.20811316614533615
   n_obs: 2735
   predictor_idx: 6
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 8
 - converged: true
-  elpd_loo: -760.2210228652807
-  elpd_loo_per_obs: -0.2776555963715415
-  elpd_loo_per_obs_se: 0.0040103776807304085
-  khat_max: 0.39562719329186447
-  khat_mean: 0.10847601602055482
+  elpd_loo: -766.2396823299288
+  elpd_loo_per_obs: -0.2798537919393458
+  elpd_loo_per_obs_se: 0.003760160085486625
+  khat_max: 0.46499804368915587
+  khat_mean: 0.12456347630666398
   n_obs: 2738
   predictor_idx: 3
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 9
 - converged: true
-  elpd_loo: -791.5614130117203
-  elpd_loo_per_obs: -0.2906946063208668
-  elpd_loo_per_obs_se: 0.0027719122986598153
-  khat_max: 0.629196119611635
-  khat_mean: 0.08571464041343459
-  n_obs: 2723
-  predictor_idx: 6
+  elpd_loo: -782.1788651005697
+  elpd_loo_per_obs: -0.285675261176249
+  elpd_loo_per_obs_se: 0.0031899746735751023
+  khat_max: 0.5705303365812214
+  khat_mean: 0.11226753339223192
+  n_obs: 2738
+  predictor_idx: 1
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 9
 - converged: true
-  elpd_loo: -784.203139563411
-  elpd_loo_per_obs: -0.2944810888334251
-  elpd_loo_per_obs_se: 0.003172785523932443
-  khat_max: 0.541869187607764
-  khat_mean: 0.06291547849205062
-  n_obs: 2663
-  predictor_idx: 8
+  elpd_loo: -798.9302727740193
+  elpd_loo_per_obs: -0.29275568808135555
+  elpd_loo_per_obs_se: 0.002498381089956077
+  khat_max: 0.2396839798687938
+  khat_mean: 0.03938938246624598
+  n_obs: 2729
+  predictor_idx: 0
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 9
 - converged: true
-  elpd_loo: -785.5412192988183
-  elpd_loo_per_obs: -0.29126481991057407
-  elpd_loo_per_obs_se: 0.0030209974932657955
-  khat_max: 0.4913193868507413
-  khat_mean: 0.15876858566376525
+  elpd_loo: -791.359245133011
+  elpd_loo_per_obs: -0.29342204120615906
+  elpd_loo_per_obs_se: 0.0026563059476203176
+  khat_max: 0.538574379057479
+  khat_mean: 0.1304982028498685
   n_obs: 2697
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 9
 - converged: true
-  elpd_loo: -783.940402114466
-  elpd_loo_per_obs: -0.28874416284142396
-  elpd_loo_per_obs_se: 0.003250833254513456
-  khat_max: 0.41782473183641833
-  khat_mean: 0.16170977524132468
-  n_obs: 2715
-  predictor_idx: 2
+  elpd_loo: -801.7176207814002
+  elpd_loo_per_obs: -0.29323980277300665
+  elpd_loo_per_obs_se: 0.0024766565414830275
+  khat_max: 0.27779788254010834
+  khat_mean: 0.07103179280912378
+  n_obs: 2734
+  predictor_idx: 10
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 9
 - converged: true
-  elpd_loo: -799.1963761216507
-  elpd_loo_per_obs: -0.2928531975528218
-  elpd_loo_per_obs_se: 0.002547967163136839
-  khat_max: 0.41649629904581076
-  khat_mean: 0.050664915785326295
-  n_obs: 2729
-  predictor_idx: 0
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 9
-- converged: true
-  elpd_loo: -784.3482454805792
-  elpd_loo_per_obs: -0.2884693804636187
-  elpd_loo_per_obs_se: 0.003055444812328221
-  khat_max: 0.3669136911485815
-  khat_mean: 0.11645603065000622
+  elpd_loo: -789.459564164804
+  elpd_loo_per_obs: -0.2903492328667907
+  elpd_loo_per_obs_se: 0.002791459140169444
+  khat_max: 0.2889920940976001
+  khat_mean: 0.09771724063836346
   n_obs: 2719
   predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 9
 - converged: true
-  elpd_loo: -786.3781155985304
-  elpd_loo_per_obs: -0.28974875298398317
-  elpd_loo_per_obs_se: 0.003141698428421916
-  khat_max: 0.4053033093684878
-  khat_mean: 0.10707782070926103
+  elpd_loo: -799.203327933727
+  elpd_loo_per_obs: -0.29721209666557347
+  elpd_loo_per_obs_se: 0.0025262018787353046
+  khat_max: 0.5497549601352876
+  khat_mean: 0.11609731687389346
+  n_obs: 2689
+  predictor_idx: 11
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 9
+- converged: true
+  elpd_loo: -786.1024835660081
+  elpd_loo_per_obs: -0.29519432353210967
+  elpd_loo_per_obs_se: 0.0030727279807584895
+  khat_max: 0.27051986932616384
+  khat_mean: 0.017972037737457966
+  n_obs: 2663
+  predictor_idx: 8
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 9
+- converged: true
+  elpd_loo: -795.2675710680592
+  elpd_loo_per_obs: -0.29291623243759085
+  elpd_loo_per_obs_se: 0.0028339653846661352
+  khat_max: 0.5219579215829837
+  khat_mean: 0.16450347962936618
+  n_obs: 2715
+  predictor_idx: 2
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 9
+- converged: true
+  elpd_loo: -795.27151663405
+  elpd_loo_per_obs: -0.29205711224166364
+  elpd_loo_per_obs_se: 0.0025552530065734796
+  khat_max: 0.3763266976281059
+  khat_mean: 0.11353194492784081
+  n_obs: 2723
+  predictor_idx: 6
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 9
+- converged: true
+  elpd_loo: -790.2144852088127
+  elpd_loo_per_obs: -0.2911623011086266
+  elpd_loo_per_obs_se: 0.0029402845334917343
+  khat_max: 0.47847670441987833
+  khat_mean: 0.07987827763480201
   n_obs: 2714
   predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 9
 - converged: true
-  elpd_loo: -779.1979379109603
-  elpd_loo_per_obs: -0.2845865368557196
-  elpd_loo_per_obs_se: 0.003372397657336419
-  khat_max: 0.48205204728081696
-  khat_mean: 0.11202501302777038
-  n_obs: 2738
-  predictor_idx: 1
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 9
-- converged: true
-  elpd_loo: -804.118181542231
-  elpd_loo_per_obs: -0.29411784255385187
-  elpd_loo_per_obs_se: 0.0023915683979362653
-  khat_max: 0.5175428936864567
-  khat_mean: 0.09686720099959034
-  n_obs: 2734
-  predictor_idx: 10
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 9
-- converged: true
-  elpd_loo: -797.1163520773288
-  elpd_loo_per_obs: -0.2964359806907136
-  elpd_loo_per_obs_se: 0.002717997576191349
-  khat_max: 0.6857838894911099
-  khat_mean: 0.08862914930486918
-  n_obs: 2689
-  predictor_idx: 11
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 9
-- converged: true
-  elpd_loo: -767.3461309852753
-  elpd_loo_per_obs: -0.2810791688590752
-  elpd_loo_per_obs_se: 0.003532119497536231
-  khat_max: 0.29965438223622615
-  khat_mean: 0.0001454310980258922
+  elpd_loo: -752.8356116648414
+  elpd_loo_per_obs: -0.27576396031679173
+  elpd_loo_per_obs_se: 0.0038434689051337753
+  khat_max: 0.4314937886186305
+  khat_mean: 0.053936822752729964
   n_obs: 2730
   predictor_idx: 11
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 10
 - converged: true
-  elpd_loo: -762.2542404419455
-  elpd_loo_per_obs: -0.27498349222292406
-  elpd_loo_per_obs_se: 0.0034858424756832552
-  khat_max: 0.35768575197497454
-  khat_mean: 0.04705556982994412
-  n_obs: 2772
-  predictor_idx: 5
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 10
-- converged: true
-  elpd_loo: -757.4397924065985
-  elpd_loo_per_obs: -0.2725583995705644
-  elpd_loo_per_obs_se: 0.003872241489212954
-  khat_max: 0.47051022090868844
-  khat_mean: 0.05324704960457258
-  n_obs: 2779
-  predictor_idx: 1
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 10
-- converged: true
-  elpd_loo: -781.9082206602632
-  elpd_loo_per_obs: -0.28309493868945085
-  elpd_loo_per_obs_se: 0.003164199767176815
-  khat_max: 0.32243674057546606
-  khat_mean: 0.07706652846659012
-  n_obs: 2762
-  predictor_idx: 4
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 10
-- converged: true
-  elpd_loo: -767.6471602117214
-  elpd_loo_per_obs: -0.28253483997486983
-  elpd_loo_per_obs_se: 0.0036877520813195217
-  khat_max: 0.3202568071185464
-  khat_mean: 0.09886325953045771
-  n_obs: 2717
-  predictor_idx: 8
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 10
-- converged: true
-  elpd_loo: -755.4409486733613
-  elpd_loo_per_obs: -0.273116756570268
-  elpd_loo_per_obs_se: 0.003973628077890818
-  khat_max: 0.47618007214717195
-  khat_mean: 0.10223745780154649
+  elpd_loo: -737.9359598494542
+  elpd_loo_per_obs: -0.2667881272051534
+  elpd_loo_per_obs_se: 0.0042721943111281935
+  khat_max: 0.4066485746469395
+  khat_mean: 0.09450781967303487
   n_obs: 2766
   predictor_idx: 0
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 10
 - converged: true
-  elpd_loo: -772.3052001402311
-  elpd_loo_per_obs: -0.27820792512256165
-  elpd_loo_per_obs_se: 0.003352058441653495
-  khat_max: 0.32411969248261074
-  khat_mean: 0.09475894927684518
-  n_obs: 2776
-  predictor_idx: 3
+  elpd_loo: -740.6181009078493
+  elpd_loo_per_obs: -0.27258671362084996
+  elpd_loo_per_obs_se: 0.004127402768641902
+  khat_max: 0.28805370382360695
+  khat_mean: 0.08726608162649799
+  n_obs: 2717
+  predictor_idx: 8
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 10
 - converged: true
-  elpd_loo: -775.1600212891101
-  elpd_loo_per_obs: -0.27843391569292747
-  elpd_loo_per_obs_se: 0.003302064623374481
-  khat_max: 0.3826683227640759
-  khat_mean: -0.0579065822515903
-  n_obs: 2784
-  predictor_idx: 2
+  elpd_loo: -739.3656053498619
+  elpd_loo_per_obs: -0.26672640885637156
+  elpd_loo_per_obs_se: 0.0038645539243262568
+  khat_max: 0.4741204478702197
+  khat_mean: 0.09564480734274375
+  n_obs: 2772
+  predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 10
 - converged: true
-  elpd_loo: -769.3650875943841
-  elpd_loo_per_obs: -0.27665051693433446
-  elpd_loo_per_obs_se: 0.0034551030027698357
-  khat_max: 0.2588198732049084
-  khat_mean: 0.06195466368416674
-  n_obs: 2781
-  predictor_idx: 6
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 10
-- converged: true
-  elpd_loo: -770.9147565570486
-  elpd_loo_per_obs: -0.28468048617320846
-  elpd_loo_per_obs_se: 0.003644870702090399
-  khat_max: 0.45300930972591236
-  khat_mean: 0.10333915898361652
+  elpd_loo: -754.35760268966
+  elpd_loo_per_obs: -0.2785663230020901
+  elpd_loo_per_obs_se: 0.004024338648288152
+  khat_max: 0.4172600966354759
+  khat_mean: 0.06973302677117019
   n_obs: 2708
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 10
 - converged: true
-  elpd_loo: -783.8093451752106
-  elpd_loo_per_obs: -0.28668959223672663
-  elpd_loo_per_obs_se: 0.003096685197161738
-  khat_max: 0.4385440025218582
-  khat_mean: 0.006712605017093339
+  elpd_loo: -756.6452587784479
+  elpd_loo_per_obs: -0.2739483196156582
+  elpd_loo_per_obs_se: 0.00389342299229021
+  khat_max: 0.4273143230355918
+  khat_mean: 0.1329444877169467
+  n_obs: 2762
+  predictor_idx: 4
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 10
+- converged: true
+  elpd_loo: -760.1355432106072
+  elpd_loo_per_obs: -0.2780305571362865
+  elpd_loo_per_obs_se: 0.0036838537046221865
+  khat_max: 0.3497938336649466
+  khat_mean: 0.06450978416173643
   n_obs: 2734
   predictor_idx: 9
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 10
 - converged: true
-  elpd_loo: -702.6086404536755
-  elpd_loo_per_obs: -0.2573658023639837
-  elpd_loo_per_obs_se: 0.00448597579245465
-  khat_max: 0.33818274776238566
-  khat_mean: 0.047088342635943144
+  elpd_loo: -746.2500830107006
+  elpd_loo_per_obs: -0.2680495987825792
+  elpd_loo_per_obs_se: 0.0039196814832419425
+  khat_max: 0.4304102671126214
+  khat_mean: 0.07951081439423624
+  n_obs: 2784
+  predictor_idx: 2
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 10
+- converged: true
+  elpd_loo: -735.6094395509537
+  elpd_loo_per_obs: -0.2647029289496055
+  elpd_loo_per_obs_se: 0.004231532442453974
+  khat_max: 0.3434638652784898
+  khat_mean: 0.033288293770323274
+  n_obs: 2779
+  predictor_idx: 1
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 10
+- converged: true
+  elpd_loo: -751.3799779718724
+  elpd_loo_per_obs: -0.2706700208832394
+  elpd_loo_per_obs_se: 0.003720666258247554
+  khat_max: 0.31017518773964264
+  khat_mean: 0.054704863360725234
+  n_obs: 2776
+  predictor_idx: 3
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 10
+- converged: true
+  elpd_loo: -746.6826278841936
+  elpd_loo_per_obs: -0.26849429265882546
+  elpd_loo_per_obs_se: 0.0038435179061019203
+  khat_max: 0.38060858636347894
+  khat_mean: -0.028761489093715675
+  n_obs: 2781
+  predictor_idx: 6
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 10
+- converged: true
+  elpd_loo: -701.2727066526177
+  elpd_loo_per_obs: -0.25687644932330317
+  elpd_loo_per_obs_se: 0.004415011554156656
+  khat_max: 0.5069818575300965
+  khat_mean: 0.12693050936637473
   n_obs: 2730
   predictor_idx: 10
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
 - converged: true
-  elpd_loo: -698.0180522178497
-  elpd_loo_per_obs: -0.2557779597720226
-  elpd_loo_per_obs_se: 0.004461407768935885
-  khat_max: 0.4985013784380202
-  khat_mean: 0.01469634434929285
-  n_obs: 2729
-  predictor_idx: 5
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 11
-- converged: true
-  elpd_loo: -696.5827134749672
-  elpd_loo_per_obs: -0.2572314303821888
-  elpd_loo_per_obs_se: 0.004156383679923029
-  khat_max: 0.2973564884538509
-  khat_mean: -0.0248244967409263
+  elpd_loo: -689.8004967710349
+  elpd_loo_per_obs: -0.2547269190439568
+  elpd_loo_per_obs_se: 0.004211587903149275
+  khat_max: 0.46478274230486927
+  khat_mean: 0.06646775506192817
   n_obs: 2708
   predictor_idx: 8
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
 - converged: true
-  elpd_loo: -694.943235892038
-  elpd_loo_per_obs: -0.25279855798182543
-  elpd_loo_per_obs_se: 0.004177748170922089
-  khat_max: 0.32600613489530383
-  khat_mean: 0.11285483967615542
+  elpd_loo: -688.3068934291389
+  elpd_loo_per_obs: -0.25038446468866454
+  elpd_loo_per_obs_se: 0.0042209548050617645
+  khat_max: 0.3044491411423559
+  khat_mean: 0.06509715339368792
   n_obs: 2749
   predictor_idx: 6
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
 - converged: true
-  elpd_loo: -714.0553903876728
-  elpd_loo_per_obs: -0.2617505096729006
-  elpd_loo_per_obs_se: 0.0041681273575873345
-  khat_max: 0.35905152256395306
-  khat_mean: 0.12830439976118493
-  n_obs: 2728
-  predictor_idx: 2
+  elpd_loo: -693.5353145042832
+  elpd_loo_per_obs: -0.2541353296094845
+  elpd_loo_per_obs_se: 0.004471479643031951
+  khat_max: 0.46266705855565415
+  khat_mean: 0.07755175094127456
+  n_obs: 2729
+  predictor_idx: 5
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
 - converged: true
-  elpd_loo: -700.4952458610813
-  elpd_loo_per_obs: -0.2619653125882877
-  elpd_loo_per_obs_se: 0.00467850659787731
-  khat_max: 0.34072482409261984
-  khat_mean: 0.07175434722186211
+  elpd_loo: -701.7368790180559
+  elpd_loo_per_obs: -0.26242964809949737
+  elpd_loo_per_obs_se: 0.004596942864561352
+  khat_max: 0.47048700302291047
+  khat_mean: 0.05742429815155765
   n_obs: 2674
   predictor_idx: 7
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
 - converged: true
-  elpd_loo: -694.4659036050149
-  elpd_loo_per_obs: -0.2570192093282809
-  elpd_loo_per_obs_se: 0.004527019278411577
-  khat_max: 0.36826875688175276
-  khat_mean: 0.050189811144979515
+  elpd_loo: -710.613374580281
+  elpd_loo_per_obs: -0.2604887736731235
+  elpd_loo_per_obs_se: 0.004304443206497881
+  khat_max: 0.4423389274833568
+  khat_mean: 0.15445952503127602
+  n_obs: 2728
+  predictor_idx: 2
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 11
+- converged: true
+  elpd_loo: -683.1400342473983
+  elpd_loo_per_obs: -0.2528275478339742
+  elpd_loo_per_obs_se: 0.0045631301763246895
+  khat_max: 0.4337702057808561
+  khat_mean: 0.1571622920496897
   n_obs: 2702
   predictor_idx: 4
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
 - converged: true
-  elpd_loo: -699.5235500054669
-  elpd_loo_per_obs: -0.2532670347594015
-  elpd_loo_per_obs_se: 0.004381532739184655
-  khat_max: 0.43717062080790325
-  khat_mean: 0.030242372364647167
-  n_obs: 2762
-  predictor_idx: 0
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 11
-- converged: true
-  elpd_loo: -683.3412664452767
-  elpd_loo_per_obs: -0.24894035207478205
-  elpd_loo_per_obs_se: 0.0043633152002726956
-  khat_max: 0.5209647189640882
-  khat_mean: 0.08930714541900436
-  n_obs: 2745
-  predictor_idx: 1
-  predictor_mean: 0.0
-  predictor_std: 1.0
-  target_idx: 11
-- converged: true
-  elpd_loo: -699.3953669614905
-  elpd_loo_per_obs: -0.25488169349908546
-  elpd_loo_per_obs_se: 0.004272445351519983
-  khat_max: 0.4069460910465791
-  khat_mean: 0.04119315131365234
+  elpd_loo: -698.3436280385897
+  elpd_loo_per_obs: -0.25449840671960267
+  elpd_loo_per_obs_se: 0.0043066653702513
+  khat_max: 0.56395120859125
+  khat_mean: 0.07309804769457323
   n_obs: 2744
   predictor_idx: 3
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
 - converged: true
-  elpd_loo: -696.961180825599
-  elpd_loo_per_obs: -0.25918972883064295
-  elpd_loo_per_obs_se: 0.004599601552408586
-  khat_max: 0.34998951409643553
-  khat_mean: 0.09139474637554112
+  elpd_loo: -696.1828127996537
+  elpd_loo_per_obs: -0.2589002650798266
+  elpd_loo_per_obs_se: 0.004596094648800229
+  khat_max: 0.4136831643829256
+  khat_mean: 0.0955150554137391
   n_obs: 2689
   predictor_idx: 9
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 11
+- converged: true
+  elpd_loo: -679.5093428165834
+  elpd_loo_per_obs: -0.2475443871827262
+  elpd_loo_per_obs_se: 0.00425671206609398
+  khat_max: 0.37982257952094634
+  khat_mean: 0.10987650185542323
+  n_obs: 2745
+  predictor_idx: 1
+  predictor_mean: 0.0
+  predictor_std: 1.0
+  target_idx: 11
+- converged: true
+  elpd_loo: -693.6781073503798
+  elpd_loo_per_obs: -0.2511506543629181
+  elpd_loo_per_obs_se: 0.004436001517047241
+  khat_max: 0.34335380374789215
+  khat_mean: -0.13942320147700482
+  n_obs: 2762
+  predictor_idx: 0
   predictor_mean: 0.0
   predictor_std: 1.0
   target_idx: 11
@@ -1637,11 +1637,11 @@ version: '2.0'
 zero_predictor_meta:
   0:
     converged: true
-    elpd_loo: -695.0989853286444
-    elpd_loo_per_obs: -0.20200493616060575
-    elpd_loo_per_obs_se: 0.0034600841206282916
-    khat_max: 0.31826232231505064
-    khat_mean: 0.09450383566239581
+    elpd_loo: -682.511872214905
+    elpd_loo_per_obs: -0.19834695501740918
+    elpd_loo_per_obs_se: 0.003416334714521352
+    khat_max: 0.2865556509988329
+    khat_mean: 0.11426526742790974
     n_obs: 3441
     predictor_idx: null
     predictor_mean: null
@@ -1649,11 +1649,11 @@ zero_predictor_meta:
     target_idx: 0
   1:
     converged: true
-    elpd_loo: -747.0004568317057
-    elpd_loo_per_obs: -0.21633375523652063
-    elpd_loo_per_obs_se: 0.0026711433331833554
-    khat_max: 0.5015019671804939
-    khat_mean: 0.12456248586533628
+    elpd_loo: -731.1615720281436
+    elpd_loo_per_obs: -0.21174676282309401
+    elpd_loo_per_obs_se: 0.0027527266483955664
+    khat_max: 0.37448023503602906
+    khat_mean: 0.10296147980254097
     n_obs: 3453
     predictor_idx: null
     predictor_mean: null
@@ -1661,11 +1661,11 @@ zero_predictor_meta:
     target_idx: 1
   2:
     converged: true
-    elpd_loo: -796.7543345392958
-    elpd_loo_per_obs: -0.23296910366646076
-    elpd_loo_per_obs_se: 0.0019553372382056745
-    khat_max: 0.4702757292621277
-    khat_mean: 0.22949039789175682
+    elpd_loo: -797.8683976403472
+    elpd_loo_per_obs: -0.23329485311121265
+    elpd_loo_per_obs_se: 0.0019047688635754475
+    khat_max: 0.3884136810632691
+    khat_mean: 0.1518236811642249
     n_obs: 3420
     predictor_idx: null
     predictor_mean: null
@@ -1673,11 +1673,11 @@ zero_predictor_meta:
     target_idx: 2
   3:
     converged: true
-    elpd_loo: -777.5036765748562
-    elpd_loo_per_obs: -0.2254287261742117
-    elpd_loo_per_obs_se: 0.0023971054763339654
-    khat_max: 0.18401521544317553
-    khat_mean: 0.09532142828978216
+    elpd_loo: -775.3423741348728
+    elpd_loo_per_obs: -0.2248020800623
+    elpd_loo_per_obs_se: 0.002445951028370234
+    khat_max: 0.17909218481596983
+    khat_mean: 0.07787888496610673
     n_obs: 3449
     predictor_idx: null
     predictor_mean: null
@@ -1685,11 +1685,11 @@ zero_predictor_meta:
     target_idx: 3
   4:
     converged: true
-    elpd_loo: -809.0477128797613
-    elpd_loo_per_obs: -0.23711832147706954
-    elpd_loo_per_obs_se: 0.0014354550416859108
-    khat_max: 0.08441469776380622
-    khat_mean: -0.044254988866056694
+    elpd_loo: -804.3491738604284
+    elpd_loo_per_obs: -0.23574125845850774
+    elpd_loo_per_obs_se: 0.0016565351725564815
+    khat_max: 0.1508901860254226
+    khat_mean: -0.000933707691940439
     n_obs: 3412
     predictor_idx: null
     predictor_mean: null
@@ -1697,11 +1697,11 @@ zero_predictor_meta:
     target_idx: 4
   5:
     converged: true
-    elpd_loo: -652.321456929025
-    elpd_loo_per_obs: -0.19084887563751463
-    elpd_loo_per_obs_se: 0.003944256649060234
-    khat_max: 0.2281942843995104
-    khat_mean: 0.14505464375473742
+    elpd_loo: -649.9114729304129
+    elpd_loo_per_obs: -0.1901437896227071
+    elpd_loo_per_obs_se: 0.004146586790437357
+    khat_max: 0.273121084398373
+    khat_mean: 0.12491375218085349
     n_obs: 3418
     predictor_idx: null
     predictor_mean: null
@@ -1709,11 +1709,11 @@ zero_predictor_meta:
     target_idx: 5
   6:
     converged: true
-    elpd_loo: -793.2204832018854
-    elpd_loo_per_obs: -0.23065440046579977
-    elpd_loo_per_obs_se: 0.0021470063940184653
-    khat_max: 0.1337596907163926
-    khat_mean: 0.06765933150023845
+    elpd_loo: -777.7676685626993
+    elpd_loo_per_obs: -0.2261609969650187
+    elpd_loo_per_obs_se: 0.0025902486643773577
+    khat_max: 0.1635214344514723
+    khat_mean: 0.05655321988911964
     n_obs: 3439
     predictor_idx: null
     predictor_mean: null
@@ -1721,11 +1721,11 @@ zero_predictor_meta:
     target_idx: 6
   7:
     converged: true
-    elpd_loo: -805.9691400276181
-    elpd_loo_per_obs: -0.2385935879300231
-    elpd_loo_per_obs_se: 0.0017552098576950348
-    khat_max: 0.2098586216889518
-    khat_mean: 0.09770138231666284
+    elpd_loo: -803.6516042766051
+    elpd_loo_per_obs: -0.23790752050817202
+    elpd_loo_per_obs_se: 0.0018673463198520738
+    khat_max: 0.20955036313798603
+    khat_mean: 0.09131912425366122
     n_obs: 3378
     predictor_idx: null
     predictor_mean: null
@@ -1733,11 +1733,11 @@ zero_predictor_meta:
     target_idx: 7
   8:
     converged: true
-    elpd_loo: -761.4103847134193
-    elpd_loo_per_obs: -0.22566994212015984
-    elpd_loo_per_obs_se: 0.002676685690691548
-    khat_max: 0.24341636715316967
-    khat_mean: 0.04840094211935941
+    elpd_loo: -759.374893657423
+    elpd_loo_per_obs: -0.22506665490735714
+    elpd_loo_per_obs_se: 0.002636401502525809
+    khat_max: 0.4050355805617736
+    khat_mean: 0.20404275720406484
     n_obs: 3374
     predictor_idx: null
     predictor_mean: null
@@ -1745,11 +1745,11 @@ zero_predictor_meta:
     target_idx: 8
   9:
     converged: true
-    elpd_loo: -797.655229384821
-    elpd_loo_per_obs: -0.23543542779953394
-    elpd_loo_per_obs_se: 0.0020182663402931555
-    khat_max: 0.1616334939689163
-    khat_mean: 0.05758543631910601
+    elpd_loo: -798.9573844507181
+    elpd_loo_per_obs: -0.2358197710893501
+    elpd_loo_per_obs_se: 0.0019409166717221972
+    khat_max: 0.1312442382328404
+    khat_mean: 0.059975301815856
     n_obs: 3388
     predictor_idx: null
     predictor_mean: null
@@ -1757,11 +1757,11 @@ zero_predictor_meta:
     target_idx: 9
   10:
     converged: true
-    elpd_loo: -777.2795134298362
-    elpd_loo_per_obs: -0.22595334692727798
-    elpd_loo_per_obs_se: 0.0026172377677433035
-    khat_max: 0.27883553402317757
-    khat_mean: 0.034330998233957535
+    elpd_loo: -759.7515497575739
+    elpd_loo_per_obs: -0.22085800865045754
+    elpd_loo_per_obs_se: 0.0028864270651948677
+    khat_max: 0.26434018738428583
+    khat_mean: 0.08392759521330674
     n_obs: 3440
     predictor_idx: null
     predictor_mean: null
@@ -1769,11 +1769,11 @@ zero_predictor_meta:
     target_idx: 10
   11:
     converged: true
-    elpd_loo: -695.2227909497651
-    elpd_loo_per_obs: -0.2047784362149529
-    elpd_loo_per_obs_se: 0.0034007372871435273
-    khat_max: 0.1090072618465375
-    khat_mean: 0.021327955637508736
+    elpd_loo: -700.1453379427553
+    elpd_loo_per_obs: -0.20622837641907374
+    elpd_loo_per_obs_se: 0.003409187773844153
+    khat_max: 0.13978458724391374
+    khat_mean: 0.03508517973775782
     n_obs: 3395
     predictor_idx: null
     predictor_mean: null
