@@ -1,0 +1,29 @@
+_class_name: NeuralGRModel
+decay: 0.25
+dim: 1
+dtype: float64
+eta_scale: 0.1
+full_rank: false
+include_independent: false
+item_keys:
+- GS1
+- GS2
+- GS3
+- GS4
+- GS5
+- GS6
+- GS7
+- GS8
+- GS9
+- GS10
+- GS11
+- GS12
+kappa_scale: 0.5
+missing_val: -9999
+nn_hidden_sizes:
+- 32
+num_people: 4270
+positive_discriminations: true
+response_cardinality: 5
+vi_mode: advi
+weight_exponent: 1.0

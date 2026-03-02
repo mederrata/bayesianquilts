@@ -20,8 +20,8 @@ import pandas as pd
 
 
 def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
-                 batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(32, 32),
-                 dim=1, kappa_scale=0.1, patience=10):
+                 batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(32,),
+                 dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -76,6 +76,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         learning_rate=lr,
         patience=patience,
         kappa_scale=kappa_scale,
+        eta_scale=eta_scale,
     )
 
     # 3. Get true abilities
@@ -199,11 +200,13 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--missingness", type=float, default=0.2,
                         help="MCAR missingness rate")
-    parser.add_argument("--hidden-sizes", type=int, nargs='+', default=[32, 32],
-                        help="NN hidden layer sizes")
+    parser.add_argument("--hidden-sizes", type=int, nargs='+', default=[32],
+                        help="Mixture-of-sigmoids: number of sigmoid components")
     parser.add_argument("--dim", type=int, default=1, help="Latent dimension")
-    parser.add_argument("--kappa-scale", type=float, default=0.1,
+    parser.add_argument("--kappa-scale", type=float, default=0.5,
                         help="Kappa scale for horseshoe prior")
+    parser.add_argument("--eta-scale", type=float, default=0.1,
+                        help="Eta scale for horseshoe prior (local shrinkage)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
     args = parser.parse_args()
 
@@ -226,6 +229,7 @@ def main():
             nn_hidden_sizes=tuple(args.hidden_sizes),
             dim=args.dim,
             kappa_scale=args.kappa_scale,
+            eta_scale=args.eta_scale,
             patience=args.patience,
         )
         all_results[ds] = results

@@ -99,8 +99,9 @@ def calibrate_model(model, n_samples=32, seed=42):
 
 def fit_neural_grm(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
-    nn_hidden_sizes=(32, 32), dim=1, batch_size=256,
-    num_epochs=500, learning_rate=2e-4, patience=10, kappa_scale=0.1,
+    nn_hidden_sizes=(32,), dim=1, batch_size=256,
+    num_epochs=500, learning_rate=2e-4, patience=10,
+    kappa_scale=0.5, eta_scale=0.1,
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
 
@@ -114,6 +115,7 @@ def fit_neural_grm(
         num_people=num_people,
         dim=dim,
         kappa_scale=kappa_scale,
+        eta_scale=eta_scale,
         response_cardinality=response_cardinality,
         nn_hidden_sizes=nn_hidden_sizes,
         dtype=jnp.float64,

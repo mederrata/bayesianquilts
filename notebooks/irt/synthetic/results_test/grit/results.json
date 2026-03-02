@@ -1,0 +1,21 @@
+{
+  "dataset": "grit",
+  "num_people": 4270,
+  "num_items": 12,
+  "response_cardinality": 5,
+  "missingness_rate": 0.2,
+  "baseline": {
+    "spearman_r": -0.006575894134176806,
+    "spearman_p": 0.6674995900278566,
+    "kendall_tau": -0.004483606283083259,
+    "kendall_p": 0.6604489346463771,
+    "rmse": 0.2293520107861965
+  },
+  "imputed": {
+    "spearman_r": -0.006023025902289024,
+    "spearman_p": 0.6939765181530897,
+    "kendall_tau": -0.003919438816850196,
+    "kendall_p": 0.7009654037784296,
+    "rmse": 0.22493120901827976
+  }
+}
