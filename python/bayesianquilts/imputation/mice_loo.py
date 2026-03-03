@@ -2323,21 +2323,26 @@ class MICEBayesianLOO(MICELogistic):
 
         return instance
 
-    def save_to_disk(self, path: Union[str, Path]) -> None:
-        """Save using YAML config + HDF5 parameters (BayesianModel-style).
+    def save_to_disk(self, path: Union[str, Path], backend: str = "hdf5") -> None:
+        """Save using YAML config + array parameters (HDF5 or safetensors).
 
         Creates a directory at `path` containing:
-        - config.yaml: configuration and metadata
-        - params.h5: numerical arrays (beta_mean, intercept_mean, cutpoints_mean)
+        - config.yaml: configuration and metadata (includes ``_backend`` key)
+        - params.h5 (hdf5) **or** tensors.safetensors (safetensors): numerical arrays
 
         Args:
             path: Directory path to save model artifacts.
+            backend: ``"hdf5"`` or ``"safetensors"``.
         """
+        if backend not in ("hdf5", "safetensors"):
+            raise ValueError(f"backend must be 'hdf5' or 'safetensors', got {backend!r}")
+
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
 
         # 1. Config YAML
         config = {
+            '_backend': backend,
             'version': '2.0',
             'config': {
                 'prior_scale': float(self.prior_scale),
@@ -2393,7 +2398,14 @@ class MICEBayesianLOO(MICELogistic):
         with open(path / 'config.yaml', 'w') as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 
-        # 2. HDF5 numerical arrays
+        # 2. Numerical arrays
+        if backend == "hdf5":
+            self._save_arrays_hdf5(path)
+        else:
+            self._save_arrays_safetensors(path)
+
+    def _save_arrays_hdf5(self, path: Path) -> None:
+        """Write numerical arrays to params.h5."""
         with h5py.File(path / 'params.h5', 'w') as f:
             for k, v in self.zero_predictor_results.items():
                 grp = f.create_group(f'zero_predictor/{int(k)}')
@@ -2413,12 +2425,40 @@ class MICEBayesianLOO(MICELogistic):
                 if v.cutpoints_mean is not None:
                     grp.create_dataset('cutpoints_mean', data=np.asarray(v.cutpoints_mean))
 
+    def _save_arrays_safetensors(self, path: Path) -> None:
+        """Write numerical arrays to tensors.safetensors."""
+        from safetensors.numpy import save_file
+
+        tensors = {}
+        for k, v in self.zero_predictor_results.items():
+            prefix = f"zero_predictor/{int(k)}"
+            if v.beta_mean is not None:
+                tensors[f"{prefix}/beta_mean"] = np.atleast_1d(np.asarray(v.beta_mean, dtype=np.float64))
+            if v.intercept_mean is not None:
+                tensors[f"{prefix}/intercept_mean"] = np.atleast_1d(np.asarray(v.intercept_mean, dtype=np.float64))
+            if v.cutpoints_mean is not None:
+                tensors[f"{prefix}/cutpoints_mean"] = np.asarray(v.cutpoints_mean, dtype=np.float64)
+
+        for (t_idx, p_idx), v in self.univariate_results.items():
+            prefix = f"univariate/{int(t_idx)}_{int(p_idx)}"
+            if v.beta_mean is not None:
+                tensors[f"{prefix}/beta_mean"] = np.atleast_1d(np.asarray(v.beta_mean, dtype=np.float64))
+            if v.intercept_mean is not None:
+                tensors[f"{prefix}/intercept_mean"] = np.atleast_1d(np.asarray(v.intercept_mean, dtype=np.float64))
+            if v.cutpoints_mean is not None:
+                tensors[f"{prefix}/cutpoints_mean"] = np.asarray(v.cutpoints_mean, dtype=np.float64)
+
+        save_file(tensors, str(path / 'tensors.safetensors'))
+
     @classmethod
     def load_from_disk(cls, path: Union[str, Path]) -> 'MICEBayesianLOO':
-        """Load model from YAML config + HDF5 parameters (BayesianModel-style).
+        """Load model from YAML config + array parameters (HDF5 or safetensors).
+
+        The backend is auto-detected from the ``_backend`` key in config.yaml.
+        Falls back to ``"hdf5"`` when the key is absent.
 
         Args:
-            path: Directory path containing config.yaml and params.h5.
+            path: Directory containing config.yaml and params.h5 / tensors.safetensors.
 
         Returns:
             Loaded MICEBayesianLOO instance.
@@ -2428,7 +2468,7 @@ class MICEBayesianLOO(MICELogistic):
         with open(path / 'config.yaml', 'r') as f:
             config = yaml.safe_load(f)
 
-        version = config.get('version', '2.0')
+        backend = config.get('_backend', 'hdf5')
 
         cfg = config['config']
         instance = cls(
@@ -2449,29 +2489,16 @@ class MICEBayesianLOO(MICELogistic):
         instance.n_obs_total = data['n_obs_total']
         instance.prediction_graph = config.get('prediction_graph', {})
 
-        # Load numerical arrays from HDF5
-        h5_path = path / 'params.h5'
-        h5_data = {}
-        if h5_path.exists():
-            with h5py.File(h5_path, 'r') as f:
-                def _read_group(grp):
-                    result = {}
-                    for key in grp:
-                        result[key] = np.array(grp[key])
-                    return result
-
-                if 'zero_predictor' in f:
-                    for k in f['zero_predictor']:
-                        h5_data[('zp', int(k))] = _read_group(f[f'zero_predictor/{k}'])
-                if 'univariate' in f:
-                    for k in f['univariate']:
-                        t_idx, p_idx = k.split('_')
-                        h5_data[('uv', int(t_idx), int(p_idx))] = _read_group(f[f'univariate/{k}'])
+        # Load numerical arrays
+        if backend == "safetensors":
+            array_data = cls._load_arrays_safetensors(path)
+        else:
+            array_data = cls._load_arrays_hdf5(path)
 
         # Restore zero-predictor results
         for k_str, meta in config.get('zero_predictor_meta', {}).items():
             k = int(k_str)
-            arrays = h5_data.get(('zp', k), {})
+            arrays = array_data.get(('zp', k), {})
             beta_mean = arrays.get('beta_mean')
             if beta_mean is not None and beta_mean.ndim == 1 and beta_mean.shape[0] == 1:
                 beta_mean = float(beta_mean[0])
@@ -2499,7 +2526,7 @@ class MICEBayesianLOO(MICELogistic):
         for item in config.get('univariate_meta', []):
             t_idx = int(item['target_idx'])
             p_idx = int(item['predictor_idx'])
-            arrays = h5_data.get(('uv', t_idx, p_idx), {})
+            arrays = array_data.get(('uv', t_idx, p_idx), {})
             beta_mean = arrays.get('beta_mean')
             if beta_mean is not None and beta_mean.ndim == 1 and beta_mean.shape[0] == 1:
                 beta_mean = float(beta_mean[0])
@@ -2524,6 +2551,52 @@ class MICEBayesianLOO(MICELogistic):
             )
 
         return instance
+
+    @classmethod
+    def _load_arrays_hdf5(cls, path: Path) -> dict:
+        """Read arrays from params.h5 into a keyed dict."""
+        h5_path = path / 'params.h5'
+        result = {}
+        if not h5_path.exists():
+            return result
+        with h5py.File(h5_path, 'r') as f:
+            def _read_group(grp):
+                out = {}
+                for key in grp:
+                    out[key] = np.array(grp[key])
+                return out
+            if 'zero_predictor' in f:
+                for k in f['zero_predictor']:
+                    result[('zp', int(k))] = _read_group(f[f'zero_predictor/{k}'])
+            if 'univariate' in f:
+                for k in f['univariate']:
+                    t_idx, p_idx = k.split('_')
+                    result[('uv', int(t_idx), int(p_idx))] = _read_group(f[f'univariate/{k}'])
+        return result
+
+    @classmethod
+    def _load_arrays_safetensors(cls, path: Path) -> dict:
+        """Read arrays from tensors.safetensors into a keyed dict."""
+        from safetensors.numpy import load_file
+
+        st_path = path / 'tensors.safetensors'
+        tensors = load_file(str(st_path))
+        result = {}
+        for full_key, arr in tensors.items():
+            # Keys are like "zero_predictor/0/beta_mean" or "univariate/1_0/beta_mean"
+            parts = full_key.split('/')
+            if len(parts) != 3:
+                continue
+            category, group_key, param_name = parts
+            if category == 'zero_predictor':
+                k = ('zp', int(group_key))
+            elif category == 'univariate':
+                t_idx, p_idx = group_key.split('_')
+                k = ('uv', int(t_idx), int(p_idx))
+            else:
+                continue
+            result.setdefault(k, {})[param_name] = arr
+        return result
 
     def to_dict(self) -> Dict[str, Any]:
         """
