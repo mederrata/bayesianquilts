@@ -22,7 +22,8 @@ import pandas as pd
 def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
                  batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(32,),
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
-                 lr_decay_factor=0.9, clip_norm=1.0):
+                 lr_decay_factor=0.9, clip_norm=1.0,
+                 reload_neural_grm=False):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -80,6 +81,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         eta_scale=eta_scale,
         lr_decay_factor=lr_decay_factor,
         clip_norm=clip_norm,
+        reload=reload_neural_grm,
     )
 
     # 3. Get true abilities
@@ -239,6 +241,8 @@ def main():
                         help="LR decay factor on plateau (default 0.9)")
     parser.add_argument("--clip-norm", type=float, default=1.0,
                         help="Gradient clipping norm (default 1.0)")
+    parser.add_argument("--reload-neural-grm", action="store_true",
+                        help="Reload saved NeuralGRM instead of re-training")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -264,6 +268,7 @@ def main():
             patience=args.patience,
             lr_decay_factor=args.lr_decay_factor,
             clip_norm=args.clip_norm,
+            reload_neural_grm=args.reload_neural_grm,
         )
         all_results[ds] = results
 

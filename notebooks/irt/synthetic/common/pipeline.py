@@ -85,12 +85,49 @@ def make_data_factory(data_dict, batch_size, num_people):
 
 
 def calibrate_model(model, n_samples=32, seed=42):
-    """Set calibration expectations from the surrogate posterior."""
-    surrogate = model.surrogate_distribution_generator(model.params)
-    key = jax.random.PRNGKey(seed)
-    samples = surrogate.sample(n_samples, seed=key)
-    model.calibrated_expectations = {k: jnp.mean(v, axis=0) for k, v in samples.items()}
-    model.surrogate_sample = samples
+    """Set calibration expectations from the surrogate posterior.
+
+    Uses point estimates (mode of the variational posterior) extracted
+    directly from the variational parameters, without sampling.
+
+    For Normal surrogates, the stored ``loc`` value is already in the
+    transformed (natural) parameter space and equals the posterior mode.
+    For InverseGamma surrogates, the mode is ``scale / (concentration + 1)``.
+
+    We also draw samples for downstream use (e.g. uncertainty estimates)
+    and store them in ``model.surrogate_sample``.
+    """
+    # --- Point estimates (no sampling) ---
+    point_estimates = {}
+    for key, value in model.params.items():
+        parts = key.split('\\')
+        if len(parts) < 4:
+            continue
+        param_name = parts[0]
+        dist_type = parts[-2]
+        param_type = parts[-1]
+
+        if dist_type == 'normal' and param_type == 'loc':
+            # For Normal surrogate, loc in transformed space IS the mode
+            point_estimates[param_name] = value
+        elif dist_type == 'igamma' and param_type == 'scale':
+            # For InverseGamma(a, b), mode = b / (a + 1)
+            conc_key = key.replace('\\scale', '\\concentration')
+            if conc_key in model.params:
+                point_estimates[param_name] = value / (model.params[conc_key] + 1)
+
+    model.calibrated_expectations = point_estimates
+
+    # --- Also store posterior samples for uncertainty analysis ---
+    try:
+        surrogate = model.surrogate_distribution_generator(model.params)
+        key = jax.random.PRNGKey(seed)
+        samples = surrogate.sample(n_samples, seed=key)
+        model.surrogate_sample = samples
+    except KeyError as e:
+        # Surrogate generator may expect params absent from saved model
+        # (e.g. ddifficulties for K=2). Point estimates suffice for synthesis.
+        print(f"  Warning: surrogate sampling skipped ({e}); point estimates OK")
 
 
 # -------------------------------------------------------------------------
@@ -103,13 +140,25 @@ def fit_neural_grm(
     num_epochs=500, learning_rate=2e-4, patience=10,
     kappa_scale=0.5, eta_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
+    reload=False,
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
+
+    If ``reload=True`` and a saved model exists at ``save_dir``, it is loaded
+    from disk instead of re-training (saves hours of compute).
 
     Returns:
         Fitted NeuralGRModel instance.
     """
     from bayesianquilts.irt.neural_grm import NeuralGRModel
+
+    save_dir = Path(save_dir)
+
+    if reload and (save_dir / 'params.h5').exists():
+        print(f"  Reloading NeuralGRM from {save_dir}")
+        model = NeuralGRModel.load_from_disk(save_dir)
+        calibrate_model(model)
+        return model
 
     model = NeuralGRModel(
         item_keys=item_keys,
@@ -138,7 +187,7 @@ def fit_neural_grm(
         zero_nan_grads=True,
     )
 
-    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
     model.save_to_disk(save_dir)
     calibrate_model(model)
     np.save(save_dir / 'losses.npy', np.array(losses))
