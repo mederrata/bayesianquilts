@@ -282,90 +282,326 @@ class BayesianModel(nnx.Module, ABC):
                 #  dill.dump((self.__class__, self), file)
                 dill.dump(self, file)
 
-    def save_to_disk(self, path):
-        """Serialize model to disk using YAML config and HDF5 parameters."""
-        path = pathlib.Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-        
-        # 1. Save Config (args to __init__)
-        argspec = inspect.getfullargspec(self.__init__)
-        args = argspec.args[1:] # skip self
-        config = {}
-        for arg in args:
-            if hasattr(self, arg):
-                config[arg] = getattr(self, arg)
-            elif hasattr(self, "_" + arg):
-                config[arg] = getattr(self, "_" + arg)
-        
-        def _clean(obj):
-            if isinstance(obj, (jnp.ndarray, np.ndarray)):
-                return obj.tolist()
-            if hasattr(obj, 'dtype'): # check if it is a type that looks like a dtype or array
-                 if isinstance(obj, type):
-                     return obj.__name__
-            if isinstance(obj, type): # generic type handling
-                return obj.__name__
-            if hasattr(obj, 'item'):
-                return obj.item()
-            if isinstance(obj, list):
-                return [_clean(x) for x in obj]
-            if isinstance(obj, dict):
-                return {k: _clean(v) for k, v in obj.items()}
+    @staticmethod
+    def _clean_for_yaml(obj):
+        """Convert an object to a YAML-serializable form, or None if not possible."""
+        if obj is None:
+            return None
+        if isinstance(obj, bool):
+            return bool(obj)
+        if isinstance(obj, (jnp.ndarray, np.ndarray)):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if hasattr(obj, 'dtype') and isinstance(obj, type):
+            return obj.__name__
+        if isinstance(obj, type):
+            return obj.__name__
+        if hasattr(obj, 'item'):
+            return obj.item()
+        if isinstance(obj, (list, tuple)):
+            return [BayesianModel._clean_for_yaml(x) for x in obj]
+        if isinstance(obj, dict):
+            cleaned = {
+                str(k): BayesianModel._clean_for_yaml(v) for k, v in obj.items()
+            }
+            cleaned = {k: v for k, v in cleaned.items() if v is not None}
+            return cleaned if cleaned else None
+        if isinstance(obj, (int, float, str)):
             return obj
+        if callable(obj):
+            return None
+        return None
 
-        config = _clean(config)
+    @staticmethod
+    def _collect_init_arg_names(cls):
+        """Return a set of all __init__ parameter names across the MRO."""
+        names = set()
+        for mro_cls in cls.__mro__:
+            if mro_cls is object:
+                continue
+            init = getattr(mro_cls, '__init__', None)
+            if init is None:
+                continue
+            try:
+                argspec = inspect.getfullargspec(init)
+            except TypeError:
+                continue
+            names.update(argspec.args[1:])
+            names.update(argspec.kwonlyargs or [])
+        return names
+
+    def _discover_attribute_names(self):
+        """Return all public attribute names on this instance."""
+        names = set()
+        # From init args across MRO
+        names.update(self._collect_init_arg_names(type(self)))
+        # From instance __dict__
+        for k in list(getattr(self, '__dict__', {})):
+            if not k.startswith('_'):
+                names.add(k)
+        # From class annotations (nnx.data fields, etc.)
+        for cls in type(self).__mro__:
+            if cls is object:
+                continue
+            for k in getattr(cls, '__annotations__', {}):
+                if not k.startswith('_'):
+                    names.add(k)
+        return names
+
+    @staticmethod
+    def _is_array(val):
+        return isinstance(val, (jnp.ndarray, np.ndarray))
+
+    @staticmethod
+    def _is_dict_of_arrays(val):
+        return (
+            isinstance(val, dict)
+            and val
+            and all(
+                isinstance(v, (jnp.ndarray, np.ndarray)) for v in val.values()
+            )
+        )
+
+    def _collect_array_and_scalar_attrs(self):
+        """Partition instance attributes into array-like and scalar-like."""
+        init_arg_names = self._collect_init_arg_names(type(self))
+        attr_names = self._discover_attribute_names()
+
+        array_attrs = {}   # name -> ndarray | dict[str, ndarray]
+        scalar_attrs = {}  # name -> yaml-serializable value
+
+        for name in sorted(attr_names):
+            try:
+                val = getattr(self, name)
+            except Exception:
+                continue
+            if val is None:
+                continue
+            if callable(val) and not isinstance(val, type):
+                continue
+
+            if self._is_array(val):
+                array_attrs[name] = val
+                # Also keep in YAML if it is an init arg (needed for reconstruction)
+                if name in init_arg_names:
+                    scalar_attrs[name] = val
+            elif self._is_dict_of_arrays(val):
+                array_attrs[name] = val
+            else:
+                scalar_attrs[name] = val
+
+        return array_attrs, scalar_attrs, init_arg_names
+
+    def _save_config_yaml(self, path, scalar_attrs, init_arg_names, backend):
+        """Write the YAML config file."""
+        config = self._clean_for_yaml(scalar_attrs)
+        if config is None:
+            config = {}
+        config = {k: v for k, v in config.items() if v is not None}
         config['_class_name'] = self.__class__.__name__
+        config['_init_arg_names'] = sorted(init_arg_names & set(config.keys()))
+        config['_backend'] = backend
 
         with open(path / "config.yaml", "w") as f:
             yaml.dump(config, f)
-            
-        # 2. Save Parameters (HDF5)
+
+    @staticmethod
+    def _save_arrays_hdf5(path, array_attrs):
+        """Write array attributes into an HDF5 file."""
         with h5py.File(path / "params.h5", "w") as f:
-            if self.params is not None and hasattr(self.params, "items"):
-                grp = f.create_group("params")
-                for k, v in self.params.items():
+            for name, val in array_attrs.items():
+                if isinstance(val, dict):
+                    grp = f.create_group(name)
+                    for k, v in val.items():
+                        arr = np.array(v)
+                        if arr.size > 0:
+                            grp.create_dataset(k, data=arr)
+                else:
+                    arr = np.array(val)
+                    if arr.size > 0:
+                        f.create_dataset(name, data=arr)
+
+    @staticmethod
+    def _save_arrays_safetensors(path, array_attrs):
+        """Write array attributes into a safetensors file.
+
+        Dict-of-array attributes are flattened with a ``::`` separator
+        (e.g. ``params::loc``).  Standalone arrays use plain keys.
+        """
+        from safetensors.numpy import save_file
+
+        flat = {}
+        groups = []
+        for name, val in array_attrs.items():
+            if isinstance(val, dict):
+                groups.append(name)
+                for k, v in val.items():
                     arr = np.array(v)
                     if arr.size > 0:
-                        grp.create_dataset(k, data=arr)
-            
-            if self.mcmc_samples is not None and hasattr(self.mcmc_samples, "items"):
-                grp = f.create_group("mcmc_samples")
-                for k, v in self.mcmc_samples.items():
-                    grp.create_dataset(k, data=np.array(v))
+                        flat[f"{name}::{k}"] = arr
+            else:
+                arr = np.array(val)
+                if arr.size > 0:
+                    flat[name] = arr
+
+        metadata = {"_groups": ",".join(groups)} if groups else None
+        save_file(flat, str(path / "tensors.safetensors"), metadata=metadata)
+
+    def save_to_disk(self, path, backend="hdf5"):
+        """Serialize model to disk.
+
+        Saves all serializable attributes:
+        - Arrays and dicts-of-arrays go into HDF5 or safetensors.
+        - Scalars, strings, lists, and small dicts go into ``config.yaml``.
+
+        The YAML also records ``_init_arg_names`` so that ``load_from_disk``
+        knows which keys to pass to the constructor vs. set afterwards.
+
+        Args:
+            path: Directory to write to (created if it does not exist).
+            backend: ``"hdf5"`` (default) or ``"safetensors"``.
+        """
+        if backend not in ("hdf5", "safetensors"):
+            raise ValueError(
+                f"backend must be 'hdf5' or 'safetensors', got {backend!r}"
+            )
+
+        path = pathlib.Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        array_attrs, scalar_attrs, init_arg_names = (
+            self._collect_array_and_scalar_attrs()
+        )
+
+        self._save_config_yaml(path, scalar_attrs, init_arg_names, backend)
+
+        if backend == "safetensors":
+            self._save_arrays_safetensors(path, array_attrs)
+        else:
+            self._save_arrays_hdf5(path, array_attrs)
+
+    _DTYPE_MAP = {
+        'float16': jnp.float16,
+        'float32': jnp.float32,
+        'float64': jnp.float64,
+        'int32': jnp.int32,
+        'int64': jnp.int64,
+    }
+
+    @staticmethod
+    def _load_arrays_hdf5(path):
+        """Read array attributes from an HDF5 file.
+
+        Returns a dict mapping attribute names to either a jnp array or a
+        dict of jnp arrays (for groups).
+        """
+        result = {}
+        if not (path / "params.h5").exists():
+            return result
+        with h5py.File(path / "params.h5", "r") as f:
+            for name in f:
+                if isinstance(f[name], h5py.Group):
+                    result[name] = {
+                        k: jnp.array(v) for k, v in f[name].items()
+                    }
+                else:
+                    result[name] = jnp.array(f[name])
+        return result
+
+    @staticmethod
+    def _load_arrays_safetensors(path):
+        """Read array attributes from a safetensors file.
+
+        Keys containing ``::`` are reassembled into dicts.
+        """
+        from safetensors.numpy import load_file
+        from safetensors import safe_open
+
+        st_path = path / "tensors.safetensors"
+        if not st_path.exists():
+            return {}
+
+        # Read metadata to learn which prefixes are groups
+        with safe_open(str(st_path), framework="numpy") as f:
+            metadata = f.metadata() or {}
+        group_names = set(
+            g for g in metadata.get("_groups", "").split(",") if g
+        )
+
+        flat = load_file(str(st_path))
+
+        result = {}
+        for key, arr in flat.items():
+            if "::" in key:
+                group, subkey = key.split("::", 1)
+                result.setdefault(group, {})[subkey] = jnp.array(arr)
+            else:
+                result[key] = jnp.array(arr)
+
+        # Ensure all declared groups exist even if empty
+        for g in group_names:
+            result.setdefault(g, {})
+
+        return result
 
     @classmethod
     def load_from_disk(cls, path):
-        """Load model from disk."""
+        """Load a model previously written by ``save_to_disk``.
+
+        Reconstructs the object from saved init args, then overlays every
+        other saved attribute (arrays from the tensor file, scalars from YAML).
+
+        The backend (HDF5 or safetensors) is auto-detected from the YAML
+        config's ``_backend`` key, falling back to HDF5 for older saves.
+        """
         path = pathlib.Path(path)
         with open(path / "config.yaml", "r") as f:
             config = yaml.safe_load(f)
-            
-        class_name = config.pop('_class_name', None)
-        # Verify class name if needed
-        
-        # Filter config args that match __init__ to avoid unexpected kwargs error
-        argspec = inspect.getfullargspec(cls.__init__)
-        valid_args = set(argspec.args[1:] + argspec.kwonlyargs)
-        if argspec.varkw:
-             # accepts any kwargs
-             init_kwargs = config
+
+        config.pop('_class_name', None)
+        init_arg_names = set(config.pop('_init_arg_names', []))
+        backend = config.pop('_backend', 'hdf5')
+
+        # Convert dtype string back to actual dtype
+        if 'dtype' in config and isinstance(config['dtype'], str):
+            config['dtype'] = cls._DTYPE_MAP.get(config['dtype'], jnp.float64)
+
+        # Determine which config keys are valid constructor arguments
+        valid_init_args = cls._collect_init_arg_names(cls)
+
+        # Use the stored _init_arg_names when available; fall back to MRO scan
+        if init_arg_names:
+            init_keys = init_arg_names & valid_init_args
         else:
-             init_kwargs = {k: v for k, v in config.items() if k in valid_args}
+            init_keys = valid_init_args
+
+        init_kwargs = {k: v for k, v in config.items() if k in init_keys}
+        extra_yaml = {k: v for k, v in config.items() if k not in init_keys}
 
         instance = cls(**init_kwargs)
-        
-        if (path / "params.h5").exists():
-            with h5py.File(path / "params.h5", "r") as f:
-                if "params" in f:
-                    instance.params = {k: jnp.array(v) for k, v in f["params"].items()}
-                if "mcmc_samples" in f:
-                    # Handle both group-style and dataset-style storage
-                    if isinstance(f["mcmc_samples"], h5py.Group):
-                        instance.mcmc_samples = {k: jnp.array(v) for k, v in f["mcmc_samples"].items()}
-                    else:
-                        # Fallback if it's stored differently
-                        instance.mcmc_samples = jnp.array(f["mcmc_samples"])
-                    
+
+        # Restore non-init-arg scalars from YAML
+        for name, val in extra_yaml.items():
+            if hasattr(instance, name):
+                try:
+                    setattr(instance, name, val)
+                except Exception:
+                    pass
+
+        # Restore array attributes from the appropriate backend
+        if backend == "safetensors":
+            array_data = cls._load_arrays_safetensors(path)
+        else:
+            array_data = cls._load_arrays_hdf5(path)
+
+        for name, val in array_data.items():
+            setattr(instance, name, val)
+
         return instance
 
 
