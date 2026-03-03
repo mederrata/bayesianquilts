@@ -46,5 +46,8 @@ setuptools.setup(
         'jax',
         'natsort',
         'tqdm',
+        'h5py',
+        'pyyaml',
+        'safetensors[numpy]',
     ]
 )
