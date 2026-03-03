@@ -107,7 +107,7 @@ class IRTModel(BayesianModel):
             dnn_fun = dnn.build_network(dnn_params, jnp.nn.relu)
             return -ability_distribution.log_prob(dnn_fun(self.response_data))
 
-    def simulate_data(self, abilities=None):
+    def simulate_data(self, abilities=None, seed=0):
         discrimination = self.calibrated_expectations['discriminations']
         if abilities is None:
             abilities = self.calibrated_expectations['abilities']
@@ -120,7 +120,7 @@ class IRTModel(BayesianModel):
         response_rv = tfd.Categorical(
             probs=probs
         )
-        responses = response_rv.sample()
+        responses = response_rv.sample(seed=jax.random.PRNGKey(seed))
         return responses
 
     def project_discriminations(self, steps=1000):

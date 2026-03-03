@@ -20,7 +20,7 @@ import pandas as pd
 
 
 def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
-                 batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(32,),
+                 batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(4,),
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
                  lr_decay_factor=0.9, clip_norm=1.0,
                  reload_neural_grm=False):
@@ -44,6 +44,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         load_dataset,
         fit_neural_grm,
         generate_synthetic_data,
+        sample_abilities,
         fit_grm_baseline,
         fit_grm_imputed,
         calibrate_model,
@@ -84,14 +85,17 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         reload=reload_neural_grm,
     )
 
-    # 3. Get true abilities
-    true_abilities = np.array(neural_model.calibrated_expectations['abilities'])
+    # 3. Sample fresh abilities from N(0,1) as ground truth
+    print(f"\n--- Sampling ground-truth abilities ---")
+    true_abilities = sample_abilities(num_people, dim=dim, seed=42)
     print(f"  True abilities shape: {true_abilities.shape}")
+    print(f"  Range: [{true_abilities.min():.3f}, {true_abilities.max():.3f}]")
 
-    # 4. Generate synthetic data with missingness
+    # 4. Generate synthetic data from NeuralGRM item params + sampled abilities
     print(f"\n--- Generating synthetic data (missingness={missingness_rate:.0%}) ---")
     synth_data = generate_synthetic_data(
         neural_model, item_keys, response_cardinality,
+        abilities=true_abilities,
         missingness_rate=missingness_rate, seed=42,
     )
     n_bad = sum(
@@ -229,8 +233,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--missingness", type=float, default=0.2,
                         help="MCAR missingness rate")
-    parser.add_argument("--hidden-sizes", type=int, nargs='+', default=[32],
-                        help="Mixture-of-sigmoids: number of sigmoid components")
+    parser.add_argument("--hidden-sizes", type=int, nargs='+', default=[4],
+                        help="Mixture-of-sigmoids: number of sigmoid components per item")
     parser.add_argument("--dim", type=int, default=1, help="Latent dimension")
     parser.add_argument("--kappa-scale", type=float, default=0.5,
                         help="Kappa scale for horseshoe prior")
