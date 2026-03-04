@@ -1,4 +1,3 @@
-import warnings
 from typing import Any
 
 import jax
@@ -126,120 +125,25 @@ class IRTModel(BayesianModel):
     def project_discriminations(self, steps=1000):
         pass
 
-    # =========================================================================
-    # Imputation model validation
-    # =========================================================================
-
-    def validate_imputation_model(self):
-        """Validate that the imputation model is sufficient for this IRT model.
-
-        Performs 5 checks:
-        1. Fitted check - model has been trained
-        2. Item coverage - all item_keys are in the imputation model
-        3. Variable type - items must be ordinal or binary (not continuous)
-        4. Convergence coverage - at least one converged model per item (warning)
-        5. PSIS khat diagnostic - best model khat < 0.7 (warning)
-
-        Raises:
-            ValueError: For checks 1-3 (fatal).
-        """
-        im = self.imputation_model
-        if im is None:
-            return
-
-        # Check 1: Fitted
-        if not getattr(im, 'variable_names', None) or not getattr(im, 'zero_predictor_results', None):
-            raise ValueError(
-                "Imputation model has not been fitted. Call fit_loo_models() first."
-            )
-
-        # Check 2: Item coverage
-        missing_items = [k for k in self.item_keys if k not in im.variable_names]
-        if missing_items:
-            raise ValueError(
-                f"Imputation model does not cover item(s): {missing_items}"
-            )
-
-        # Check 3: Variable type compatibility
-        continuous_items = []
-        for k in self.item_keys:
-            idx = im.variable_names.index(k)
-            vtype = im.variable_types.get(idx)
-            if vtype == 'continuous':
-                continuous_items.append(k)
-        if continuous_items:
-            raise ValueError(
-                f"Item(s) typed as 'continuous' in imputation model "
-                f"(IRT items must be ordinal/binary): {continuous_items}"
-            )
-
-        # Check 4: Convergence coverage
-        items_without_models = []
-        for k in self.item_keys:
-            idx = im.variable_names.index(k)
-            has_converged = False
-            # Check zero-predictor
-            zp = im.zero_predictor_results.get(idx)
-            if zp is not None and zp.converged:
-                has_converged = True
-            # Check univariate results
-            if not has_converged:
-                for (target_idx, _), result in im.univariate_results.items():
-                    if target_idx == idx and result.converged:
-                        has_converged = True
-                        break
-            if not has_converged:
-                items_without_models.append(k)
-        if items_without_models:
-            warnings.warn(
-                f"Items with no converged imputation models "
-                f"(will use marginal fill): {items_without_models}"
-            )
-
-        # Check 5: PSIS khat diagnostic
-        high_khat_items = []
-        for k in self.item_keys:
-            idx = im.variable_names.index(k)
-            best_khat = None
-            best_elpd = -np.inf
-            # Check zero-predictor
-            zp = im.zero_predictor_results.get(idx)
-            if zp is not None and zp.converged:
-                if zp.elpd_loo_per_obs > best_elpd:
-                    best_elpd = zp.elpd_loo_per_obs
-                    best_khat = zp.khat_max
-            # Check univariate results
-            for (target_idx, _), result in im.univariate_results.items():
-                if target_idx == idx and result.converged:
-                    if result.elpd_loo_per_obs > best_elpd:
-                        best_elpd = result.elpd_loo_per_obs
-                        best_khat = result.khat_max
-            if best_khat is not None and best_khat >= 0.7:
-                high_khat_items.append(k)
-        if high_khat_items:
-            warnings.warn(
-                f"Items with high PSIS khat (>= 0.7), imputation may be "
-                f"unreliable: {high_khat_items}"
-            )
-
-    # =========================================================================
-    # Stochastic imputation in fit()
-    # =========================================================================
+    def _has_missing_values(self, batch):
+        """Check if any item column in the batch has missing values."""
+        for item_key in self.item_keys:
+            col = np.asarray(batch[item_key], dtype=np.float64)
+            if np.any(np.isnan(col) | (col < 0) | (col >= self.response_cardinality)):
+                return True
+        return False
 
     def _compute_batch_pmfs(self, batch):
-        """Compute imputation PMFs for all missing cells in a batch.
+        """Compute imputation PMFs for missing cells using the imputation model.
 
-        For each missing cell (n, i), calls the imputation model's
-        ``predict_pmf()`` to obtain a K-dimensional categorical PMF.
-        Observed cells get zeros (they are masked out by ``bad_choices``
-        in the model's ``predictive_distribution``).
+        Delegates to ``self.imputation_model.predict_pmf()`` for each
+        missing cell (n, i).  Observed cells get zeros.
 
         Args:
             batch: dict mapping keys to arrays.
 
         Returns:
-            np.ndarray of shape (N, I, K) with PMFs for missing cells
-            and zeros for observed cells.
+            np.ndarray of shape (N, I, K) with PMFs for missing cells.
         """
         N = len(batch[self.item_keys[0]])
         I = self.num_items
@@ -254,7 +158,6 @@ class IRTModel(BayesianModel):
                 continue
 
             for row_idx in bad_indices:
-                # Build observed items dict for this row
                 observed_items = {}
                 for other_key in self.item_keys:
                     if other_key == item_key:
@@ -265,73 +168,26 @@ class IRTModel(BayesianModel):
 
                 try:
                     pmf = self.imputation_model.predict_pmf(
-                        observed_items,
-                        target=item_key,
-                        n_categories=K,
+                        observed_items, target=item_key, n_categories=K,
                     )
                     pmfs[row_idx, i, :] = pmf
                 except (ValueError, KeyError, AttributeError):
-                    # Fallback: uniform 1/K
                     pmfs[row_idx, i, :] = 1.0 / K
 
         return pmfs
 
-    def _has_missing_values(self, batch):
-        """Check if any item column in the batch has missing values."""
-        for item_key in self.item_keys:
-            col = np.asarray(batch[item_key], dtype=np.float64)
-            if np.any(np.isnan(col) | (col < 0) | (col >= self.response_cardinality)):
-                return True
-        return False
+    def _wrap_factory_with_imputation(self, factory):
+        """Wrap a data factory to attach imputation PMFs from the imputation model.
 
-    def fit(self, batched_data_factory, initial_values=None, **kwargs):
-        """Fit the IRT model with optional analytic Rao-Blackwellized imputation.
-
-        If imputation_model is set, wraps the data factory to attach
-        ``_imputation_pmfs`` to each batch. The model's
-        ``predictive_distribution`` uses these PMFs to analytically
-        marginalize over the imputation distribution for missing cells:
-
-            contribution = log[ sum_k q(k) * p(Y=k | phi) ]
-
-        This is exact (zero variance) and eliminates the need for M
-        Monte Carlo imputation samples.
-
-        Args:
-            batched_data_factory: Callable returning a data iterator.
-            initial_values: Optional initial parameter values.
-            **kwargs: Additional args passed to _calibrate_minibatch_advi.
-
-        Returns:
-            (losses, params) tuple.
+        Returns a new factory that adds ``_imputation_pmfs`` to every batch.
         """
-        # Strip deprecated n_imputation_samples if passed
-        kwargs.pop('n_imputation_samples', None)
+        model_ref = self
 
-        if self.imputation_model is not None:
-            self.validate_imputation_model()
-
-            model_ref = self
-            original_factory = batched_data_factory
-
-            def imputing_factory():
-                def imputing_iterator():
-                    iterator = original_factory()
-                    try:
-                        for batch in iterator:
-                            # Always add PMFs key to avoid JIT retrace
-                            if model_ref._has_missing_values(batch):
-                                batch['_imputation_pmfs'] = model_ref._compute_batch_pmfs(batch)
-                            else:
-                                N = len(batch[model_ref.item_keys[0]])
-                                batch['_imputation_pmfs'] = np.zeros(
-                                    (N, model_ref.num_items, model_ref.response_cardinality),
-                                    dtype=np.float64,
-                                )
-                            yield batch
-                    except TypeError:
-                        # Factory returned a single batch, not an iterator
-                        batch = iterator
+        def imputing_factory():
+            def imputing_iterator():
+                iterator = factory()
+                try:
+                    for batch in iterator:
                         if model_ref._has_missing_values(batch):
                             batch['_imputation_pmfs'] = model_ref._compute_batch_pmfs(batch)
                         else:
@@ -341,12 +197,162 @@ class IRTModel(BayesianModel):
                                 dtype=np.float64,
                             )
                         yield batch
-                return imputing_iterator()
+                except TypeError:
+                    batch = iterator
+                    if model_ref._has_missing_values(batch):
+                        batch['_imputation_pmfs'] = model_ref._compute_batch_pmfs(batch)
+                    else:
+                        N = len(batch[model_ref.item_keys[0]])
+                        batch['_imputation_pmfs'] = np.zeros(
+                            (N, model_ref.num_items, model_ref.response_cardinality),
+                            dtype=np.float64,
+                        )
+                    yield batch
+            return imputing_iterator()
 
-            return super().fit(
-                imputing_factory, initial_values=initial_values, **kwargs
+        return imputing_factory
+
+    def _compute_elpd_loo(self, data_factory, n_samples=100, seed=42,
+                          khat_threshold=0.7):
+        """Compute PSIS-LOO after fitting, with AIS fallback for high k-hat.
+
+        Iterates one epoch through the factory, computes per-person
+        log-likelihoods under ``n_samples`` surrogate posterior draws,
+        and runs PSIS-LOO.  If any k-hat > khat_threshold, uses
+        AdaptiveImportanceSampler to improve those estimates.
+
+        Results are stored as attributes on ``self`` so they persist
+        via ``save_to_disk``.
+
+        Args:
+            data_factory: Callable returning an iterator of batch dicts
+                (same as the training data factory).
+            n_samples: Surrogate posterior draws for PSIS.
+            seed: Random seed for sampling.
+            khat_threshold: Use AIS for points with k-hat above this.
+        """
+        from bayesianquilts.metrics.nppsis import psisloo
+
+        surrogate = self.surrogate_distribution_generator(self.params)
+        key = jax.random.PRNGKey(seed)
+        samples = surrogate.sample(n_samples, seed=key)
+
+        log_lik_matrix = np.full(
+            (n_samples, self.num_people), np.nan, dtype=np.float64
+        )
+
+        # Collect full data for potential AIS pass
+        all_batches = []
+        for batch in data_factory():
+            people = np.asarray(batch[self.person_key], dtype=np.int32)
+            pred = self.predictive_distribution(batch, **samples)
+            log_lik_matrix[:, people] = np.array(pred['log_likelihood'])
+            all_batches.append(batch)
+
+        # Check coverage
+        visited = ~np.isnan(log_lik_matrix[0])
+        n_obs = int(np.sum(visited))
+        if n_obs < self.num_people:
+            print(f"  Warning: only {n_obs}/{self.num_people} people "
+                  f"visited in ELPD-LOO pass")
+            log_lik_matrix = log_lik_matrix[:, visited]
+
+        loo, loos, ks = psisloo(log_lik_matrix)
+
+        # AIS fallback if any k-hat > threshold
+        bad_k = np.sum(ks > khat_threshold)
+        if bad_k > 0:
+            try:
+                from bayesianquilts.irt.grm import GradedResponseLikelihood
+                from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
+
+                print(f"  {bad_k} observations with k-hat > {khat_threshold}, "
+                      f"running AIS...")
+
+                # Build full data dict from collected batches
+                full_data = {}
+                for k in all_batches[0]:
+                    vals = [np.asarray(b[k]) for b in all_batches]
+                    full_data[k] = np.concatenate(vals, axis=0)
+                full_data['n_people'] = self.num_people
+
+                likelihood_fn = GradedResponseLikelihood(dtype=self.dtype)
+                surrogate_dist = self.surrogate_distribution_generator(self.params)
+                surrogate_log_prob_fn = lambda p: surrogate_dist.log_prob(p)
+                prior_log_prob_fn = lambda p: self.prior_distribution.log_prob(p)
+
+                sampler = AdaptiveImportanceSampler(
+                    likelihood_fn, prior_log_prob_fn, surrogate_log_prob_fn
+                )
+                results = sampler.adaptive_is_loo(
+                    full_data, samples,
+                    variational=True,
+                    khat_threshold=khat_threshold,
+                )
+                best = results['best']
+                loos = np.array(best['ll_loo_psis'])
+                ks = np.array(best['khat'])
+                loo = float(np.sum(loos))
+            except Exception as e:
+                print(f"  AIS fallback failed ({e}), using standard PSIS-LOO")
+
+        self.elpd_loo = float(loo)
+        self.elpd_loo_se = float(np.std(loos) * np.sqrt(n_obs))
+        self.elpd_loo_per_obs = self.elpd_loo / n_obs
+        self.elpd_loo_se_per_obs = self.elpd_loo_se / n_obs
+        self.elpd_loo_pointwise = loos
+        self.elpd_loo_khat = ks
+        self.elpd_loo_n_obs = n_obs
+
+        bad_k = np.sum(ks > khat_threshold)
+        print(f"  ELPD-LOO: {self.elpd_loo:.2f} "
+              f"(SE: {self.elpd_loo_se:.2f})")
+        print(f"  ELPD-LOO per obs: {self.elpd_loo_per_obs:.4f} "
+              f"(SE: {self.elpd_loo_se_per_obs:.4f})")
+        print(f"  k-hat: max={np.max(ks):.3f}, "
+              f"mean={np.mean(ks):.3f}, "
+              f">{khat_threshold}: {bad_k}/{n_obs}")
+
+    def fit(self, batched_data_factory, initial_values=None,
+            compute_elpd_loo=True, elpd_loo_samples=100, **kwargs):
+        """Fit the IRT model with optional imputation and ELPD-LOO.
+
+        If ``imputation_model`` is set, wraps the data factory to attach
+        ``_imputation_pmfs`` to each batch for analytic Rao-Blackwellized
+        marginalization over missing cells.
+
+        After training, runs one additional pass through the data factory
+        to compute PSIS-LOO diagnostics (unless ``compute_elpd_loo=False``).
+
+        Args:
+            batched_data_factory: Callable returning a data iterator.
+            initial_values: Optional initial parameter values.
+            compute_elpd_loo: If True (default), compute and store
+                ELPD-LOO after fitting.
+            elpd_loo_samples: Number of surrogate posterior draws for
+                the PSIS-LOO computation (default 100).
+            **kwargs: Additional args passed to _calibrate_minibatch_advi.
+
+        Returns:
+            (losses, params) tuple.
+        """
+        kwargs.pop('n_imputation_samples', None)
+
+        if self.imputation_model is not None:
+            effective_factory = self._wrap_factory_with_imputation(
+                batched_data_factory
             )
         else:
-            return super().fit(
-                batched_data_factory, initial_values=initial_values, **kwargs
+            effective_factory = batched_data_factory
+
+        losses, params = super().fit(
+            effective_factory, initial_values=initial_values, **kwargs
+        )
+
+        if compute_elpd_loo:
+            print("  Computing ELPD-LOO...")
+            self._compute_elpd_loo(
+                effective_factory, n_samples=elpd_loo_samples
             )
+
+        return losses, params

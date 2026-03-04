@@ -106,6 +106,63 @@ class BayesianModel(nnx.Module, ABC):
         self.params = res[1]
         return res
 
+    def compute_loo(self, data, likelihood_fn, khat_threshold=0.7):
+        """Compute LOO-CV using PSIS, with AIS fallback for k-hat > threshold.
+
+        Args:
+            data: Full dataset dict
+            likelihood_fn: LikelihoodFunction instance with log_likelihood,
+                log_likelihood_gradient, log_likelihood_hessian_diag methods
+            khat_threshold: AIS kicks in above this
+
+        Stores on self:
+            self.loo_results: dict with elpd_loo, elpd_loo_per_obs,
+                elpd_loo_per_obs_se, pointwise_loo, khat, etc.
+        """
+        from bayesianquilts.metrics import nppsis
+        from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
+
+        # Draw posterior samples
+        params = self.sample(batch_shape=(200,))
+
+        # Standard PSIS-LOO first
+        log_lik = likelihood_fn.log_likelihood(data, params)  # (S, N)
+        loo, loos, ks = nppsis.psisloo(np.array(log_lik))
+
+        # If any k-hat > threshold, use AIS
+        if np.max(ks) > khat_threshold:
+            try:
+                surrogate = self.surrogate_distribution_generator(self.params)
+                surrogate_log_prob_fn = lambda p: surrogate.log_prob(p)
+                prior_log_prob_fn = lambda p: self.prior_distribution.log_prob(p)
+
+                sampler = AdaptiveImportanceSampler(
+                    likelihood_fn, prior_log_prob_fn, surrogate_log_prob_fn
+                )
+                results = sampler.adaptive_is_loo(
+                    data, params, variational=True,
+                    khat_threshold=khat_threshold,
+                )
+                best = results['best']
+                loos = np.array(best['ll_loo_psis'])
+                ks = np.array(best['khat'])
+                loo = float(np.sum(loos))
+            except Exception as e:
+                print(f"Warning: AIS fallback failed ({e}), using standard PSIS-LOO")
+
+        n = len(loos)
+        se = float(np.sqrt(n * np.var(loos)))
+
+        self.loo_results = {
+            'elpd_loo': float(loo),
+            'elpd_loo_per_obs': float(loo) / n,
+            'elpd_loo_per_obs_se': se / n,
+            'pointwise_loo': loos,
+            'khat': ks,
+            'khat_max': float(np.max(ks)),
+            'khat_mean': float(np.mean(ks)),
+        }
+
     def set_data(self, data, data_transform_fn):
         self.data = data
         self.data_transform_fn = data_transform_fn

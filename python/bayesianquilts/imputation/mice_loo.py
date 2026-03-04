@@ -33,6 +33,11 @@ import blackjax.vi.pathfinder as pathfinder
 
 from bayesianquilts.imputation.mice import MICELogistic, ordinal_one_hot_encode
 from bayesianquilts.metrics import nppsis
+from bayesianquilts.metrics.ais import (
+    LikelihoodFunction,
+    AutoDiffLikelihoodMixin,
+    AdaptiveImportanceSampler,
+)
 
 tfd = tfp.distributions
 
@@ -357,6 +362,20 @@ class SimpleOrdinalLogisticRegression:
 
         return total_log_lik + log_prior
 
+class SimpleModelLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
+    """Generic LikelihoodFunction wrapper for simple univariate models.
+
+    Wraps any model with a log_likelihood(data, params) -> (S, N) method,
+    providing automatic gradient and Hessian computation via AutoDiffLikelihoodMixin.
+    """
+
+    def __init__(self, model):
+        self.model = model
+
+    def log_likelihood(self, data, params):
+        return self.model.log_likelihood(data, params)  # (S, N)
+
+
 class MICEBayesianLOO(MICELogistic):
     """
     MICE Bayesian LOO-CV Framework using Pathfinder variational inference.
@@ -472,50 +491,50 @@ class MICEBayesianLOO(MICELogistic):
         scale_factor: float,
         seed: int,
         current_dtype: jnp.dtype
-    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool, jnp.dtype]:
+    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool, jnp.dtype, Optional[callable]]:
         """
         Run inference with automatic fallback to float64 if NaN detected.
-        
+
         Returns:
-            Tuple of (params, elbo, converged, dtype_used)
+            Tuple of (params, elbo, converged, dtype_used, surrogate_log_prob_fn)
         """
         # Try with current dtype
         if self.inference_method == 'advi':
-            params, elbo, converged = self._run_advi(model, data_dict, scale_factor=scale_factor, seed=seed)
+            params, elbo, converged, surrogate_fn = self._run_advi(model, data_dict, scale_factor=scale_factor, seed=seed)
         else:
-            params, elbo, converged = self._run_pathfinder(model, data_dict, scale_factor=scale_factor, seed=seed)
-        
+            params, elbo, converged, surrogate_fn = self._run_pathfinder(model, data_dict, scale_factor=scale_factor, seed=seed)
+
         # Check for NaN
         if converged and self._check_for_nan(params, elbo):
             if current_dtype == jnp.float32:
                 if self.verbose:
                     print(f"    NaN detected with float32, retrying with float64...")
-                
+
                 # Recreate model with float64
                 old_dtype = model.dtype
                 model.dtype = jnp.float64
-                
+
                 # Convert data to float64
                 data_dict_f64 = {
                     'X': data_dict['X'].astype(np.float64),
                     'y': data_dict['y'].astype(np.float64)
                 }
-                
+
                 # Retry inference
                 if self.inference_method == 'advi':
-                    params, elbo, converged = self._run_advi(model, data_dict_f64, scale_factor=scale_factor, seed=seed)
+                    params, elbo, converged, surrogate_fn = self._run_advi(model, data_dict_f64, scale_factor=scale_factor, seed=seed)
                 else:
-                    params, elbo, converged = self._run_pathfinder(model, data_dict_f64, scale_factor=scale_factor, seed=seed)
-                
+                    params, elbo, converged, surrogate_fn = self._run_pathfinder(model, data_dict_f64, scale_factor=scale_factor, seed=seed)
+
                 # Restore original dtype
                 model.dtype = old_dtype
-                
-                return params, elbo, converged, jnp.float64
+
+                return params, elbo, converged, jnp.float64, surrogate_fn
             else:
                 # Already using float64 and still getting NaN
-                return None, float('-inf'), False, current_dtype
-        
-        return params, elbo, converged, current_dtype
+                return None, float('-inf'), False, current_dtype, None
+
+        return params, elbo, converged, current_dtype, surrogate_fn
 
     def _run_pathfinder(
         self,
@@ -523,7 +542,7 @@ class MICEBayesianLOO(MICELogistic):
         data: Dict[str, Any],
         scale_factor: float = 1.0,
         seed: int = 42
-    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool]:
+    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool, Optional[callable]]:
         """
         Run Pathfinder variational inference.
 
@@ -534,7 +553,7 @@ class MICEBayesianLOO(MICELogistic):
             seed: Random seed
 
         Returns:
-            Tuple of (samples_dict, elbo, converged)
+            Tuple of (samples_dict, elbo, converged, surrogate_log_prob_fn)
         """
         # Setup parameter flattening
         key = jax.random.PRNGKey(seed)
@@ -583,14 +602,31 @@ class MICEBayesianLOO(MICELogistic):
             for var in model.var_list:
                 samples_dict[var] = jnp.stack(samples_dict[var], axis=0)
 
-            return samples_dict, elbo, converged
+            # Build surrogate log prob from Pathfinder samples (diagonal normal fit)
+            sample_mean = {var: jnp.mean(samples_dict[var], axis=0) for var in model.var_list}
+            sample_std = {var: jnp.maximum(jnp.std(samples_dict[var], axis=0), 1e-6) for var in model.var_list}
+
+            def surrogate_log_prob_fn(params):
+                lp = jnp.zeros(jax.tree_util.tree_leaves(params)[0].shape[0])
+                for var in model.var_list:
+                    p = params[var]
+                    dist = tfd.Independent(
+                        tfd.Normal(loc=sample_mean[var], scale=sample_std[var]),
+                        reinterpreted_batch_ndims=max(sample_mean[var].ndim, 1)
+                    ) if sample_mean[var].ndim >= 1 else tfd.Normal(
+                        loc=sample_mean[var], scale=sample_std[var]
+                    )
+                    lp = lp + dist.log_prob(p)
+                return lp
+
+            return samples_dict, elbo, converged, surrogate_log_prob_fn
 
         except Exception as e:
             # Always print errors for debugging purposes
             print(f"    Pathfinder failed: {e}")
             import traceback
             traceback.print_exc()
-            return None, float('-inf'), False
+            return None, float('-inf'), False, None
 
     def _run_advi(
         self,
@@ -598,7 +634,7 @@ class MICEBayesianLOO(MICELogistic):
         data: Dict[str, Any],
         scale_factor: float = 1.0,
         seed: int = 42
-    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool]:
+    ) -> Tuple[Optional[Dict[str, jnp.ndarray]], float, bool, Optional[callable]]:
         """
         Run minibatch ADVI inference.
 
@@ -609,7 +645,7 @@ class MICEBayesianLOO(MICELogistic):
             seed: Random seed
 
         Returns:
-            Tuple of (samples_dict, elbo, converged)
+            Tuple of (samples_dict, elbo, converged, surrogate_log_prob_fn)
         """
         from bayesianquilts.vi.minibatch import minibatch_mc_variational_loss
         import optax
@@ -706,87 +742,43 @@ class MICEBayesianLOO(MICELogistic):
         try:
             final_surrogate = create_surrogate(surrogate_params)
             samples = final_surrogate.sample(self.pathfinder_num_samples, seed=jax.random.PRNGKey(seed + 1000))
-            
+
             # Convert to dict format
             samples_dict = {}
             for var in model.var_list:
                 samples_dict[var] = samples[var]
-            
-            return samples_dict, -best_loss, True
-            
+
+            # Build surrogate log prob fn from final surrogate params
+            captured_params = {k: jnp.array(v) for k, v in surrogate_params.items()}
+            def surrogate_log_prob_fn(params):
+                surr = create_surrogate(captured_params)
+                return surr.log_prob(params)
+
+            return samples_dict, -best_loss, True, surrogate_log_prob_fn
+
         except Exception as e:
             print(f"    ADVI sampling failed: {e}")
-            return None, float('-inf'), False
-        """
-        Run Pathfinder variational inference.
-
-        Returns:
-            Tuple of (samples_dict, elbo, converged)
-        """
-        # Setup parameter flattening
-        key = jax.random.PRNGKey(seed)
-        prior = model.create_prior()
-        prior_sample = prior.sample(seed=key)
-        template = prior_sample
-        flat_template, unflatten_fn = jax.flatten_util.ravel_pytree(template)
-        param_dim = flat_template.shape[0]
-
-        # Define log probability for Pathfinder
-        def logprob_fn_flat(params_flat):
-            params_dict = unflatten_fn(params_flat)
-            return jnp.squeeze(model.unormalized_log_prob(data=data, **params_dict))
-
-        # Initial position
-        initial_position = jax.random.normal(jax.random.PRNGKey(seed + 1), (param_dim,)) * 0.1
-
-        try:
-            # Run Pathfinder
-            state, info = pathfinder.approximate(
-                rng_key=jax.random.PRNGKey(seed + 2),
-                logdensity_fn=logprob_fn_flat,
-                initial_position=initial_position,
-                num_samples=self.pathfinder_num_samples,
-                maxiter=self.pathfinder_maxiter,
-                ftol=1e-6,
-                gtol=1e-9,
-            )
-
-            elbo = float(state.elbo)
-            converged = True
-
-            # Sample from approximate posterior
-            sample_key = jax.random.PRNGKey(seed + 3)
-            samples_result = pathfinder.sample(sample_key, state, num_samples=self.pathfinder_num_samples)
-            samples_flat = samples_result[0] if isinstance(samples_result, tuple) else samples_result
-
-            # Unflatten samples
-            samples_dict = {var: [] for var in model.var_list}
-            for i in range(self.pathfinder_num_samples):
-                sample = unflatten_fn(samples_flat[i])
-                for var in model.var_list:
-                    samples_dict[var].append(sample[var])
-
-            # Stack samples
-            for var in model.var_list:
-                samples_dict[var] = jnp.stack(samples_dict[var], axis=0)
-
-            return samples_dict, elbo, converged
-
-        except Exception as e:
-            # Always print errors for debugging purposes
-            print(f"    Pathfinder failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return None, float('-inf'), False
+            return None, float('-inf'), False, None
 
     def _compute_loo_elpd(
         self,
         model,
         data: Dict[str, Any],
-        params: Dict[str, jnp.ndarray]
+        params: Dict[str, jnp.ndarray],
+        surrogate_log_prob_fn: Optional[callable] = None,
+        prior_log_prob_fn: Optional[callable] = None,
+        khat_threshold: float = 0.7,
     ) -> Tuple[float, float, float, float]:
         """
-        Compute LOO-ELPD using PSIS.
+        Compute LOO-ELPD using PSIS, with AIS fallback when k-hat > threshold.
+
+        Args:
+            model: Model instance with log_likelihood method
+            data: Data dictionary
+            params: Posterior samples dict
+            surrogate_log_prob_fn: Log prob of the variational surrogate (for AIS)
+            prior_log_prob_fn: Log prob of the prior (for AIS)
+            khat_threshold: Threshold above which AIS is used
 
         Returns:
             Tuple of (elpd_loo, elpd_loo_se, khat_max, khat_mean)
@@ -799,6 +791,33 @@ class MICEBayesianLOO(MICELogistic):
 
         # Run PSIS-LOO
         loo, loos, ks = nppsis.psisloo(log_lik_np)
+
+        # If k-hat is high and we have surrogate/prior, use AIS to improve
+        if np.max(ks) > khat_threshold and surrogate_log_prob_fn is not None:
+            try:
+                likelihood_fn = SimpleModelLikelihood(model)
+                if prior_log_prob_fn is None:
+                    prior = model.create_prior()
+                    prior_log_prob_fn = lambda p: prior.log_prob(p)
+
+                sampler = AdaptiveImportanceSampler(
+                    likelihood_fn,
+                    prior_log_prob_fn=prior_log_prob_fn,
+                    surrogate_log_prob_fn=surrogate_log_prob_fn,
+                )
+                results = sampler.adaptive_is_loo(
+                    data, params,
+                    variational=True,
+                    khat_threshold=khat_threshold,
+                    transformations=['identity', 'mm1', 'mm2', 'pmm1', 'pmm2', 'll'],
+                )
+                best = results['best']
+                loos = np.array(best['ll_loo_psis'])
+                ks = np.array(best['khat'])
+                loo = float(np.sum(loos))
+            except Exception as e:
+                if self.verbose:
+                    print(f"    AIS fallback failed: {e}, using standard PSIS-LOO")
 
         # Compute standard error of LOO ELPD
         # SE = sqrt(n * var(loos)) where loos are pointwise contributions
@@ -892,7 +911,7 @@ class MICEBayesianLOO(MICELogistic):
             )
 
         # Run inference (Pathfinder or ADVI)
-        params, elbo, converged, _ = self._run_inference_with_fallback(
+        params, elbo, converged, _, surrogate_fn = self._run_inference_with_fallback(
             model, data_dict, scale_factor=scale_factor, seed=seed, current_dtype=self.dtype
         )
 
@@ -909,8 +928,14 @@ class MICEBayesianLOO(MICELogistic):
                 converged=False
             )
 
-        # Compute LOO-ELPD
-        elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
+        # Compute LOO-ELPD (with AIS fallback if k-hat > 0.7)
+        prior = model.create_prior()
+        prior_log_prob_fn = lambda p: prior.log_prob(p)
+        elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(
+            model, data_dict, params,
+            surrogate_log_prob_fn=surrogate_fn,
+            prior_log_prob_fn=prior_log_prob_fn,
+        )
 
         if params is not None:
             # Compute point estimates before discarding params
@@ -1068,7 +1093,7 @@ class MICEBayesianLOO(MICELogistic):
             )
 
         # Run inference (Pathfinder or ADVI)
-        params, elbo, converged, _ = self._run_inference_with_fallback(
+        params, elbo, converged, _, surrogate_fn = self._run_inference_with_fallback(
             model, data_dict, scale_factor=scale_factor, seed=seed, current_dtype=self.dtype
         )
 
@@ -1086,9 +1111,15 @@ class MICEBayesianLOO(MICELogistic):
                 predictor_mean=X_mean,
                 predictor_std=X_std
             )
-            
-        # Compute LOO-ELPD
-        elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(model, data_dict, params)
+
+        # Compute LOO-ELPD (with AIS fallback if k-hat > 0.7)
+        prior = model.create_prior()
+        prior_log_prob_fn = lambda p: prior.log_prob(p)
+        elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(
+            model, data_dict, params,
+            surrogate_log_prob_fn=surrogate_fn,
+            prior_log_prob_fn=prior_log_prob_fn,
+        )
 
         if params is not None:
              # Compute point estimates before discarding params
@@ -1123,94 +1154,6 @@ class MICEBayesianLOO(MICELogistic):
             intercept_mean=intercept_mean,
             cutpoints_mean=cutpoints_mean
         )
-        """
-        Run Pathfinder variational inference.
-
-        Returns:
-            Tuple of (samples_dict, elbo, converged)
-        """
-        # Setup parameter flattening
-        key = jax.random.PRNGKey(seed)
-        prior = model.create_prior()
-        prior_sample = prior.sample(seed=key)
-        template = prior_sample
-        flat_template, unflatten_fn = jax.flatten_util.ravel_pytree(template)
-        param_dim = flat_template.shape[0]
-
-        # Define log probability for Pathfinder
-        def logprob_fn_flat(params_flat):
-            params_dict = unflatten_fn(params_flat)
-            return jnp.squeeze(model.unormalized_log_prob(data=data, **params_dict))
-
-        # Initial position
-        initial_position = jax.random.normal(jax.random.PRNGKey(seed + 1), (param_dim,)) * 0.1
-
-        try:
-            # Run Pathfinder
-            state, info = pathfinder.approximate(
-                rng_key=jax.random.PRNGKey(seed + 2),
-                logdensity_fn=logprob_fn_flat,
-                initial_position=initial_position,
-                num_samples=self.pathfinder_num_samples,
-                maxiter=self.pathfinder_maxiter,
-                ftol=1e-6,
-                gtol=1e-9,
-            )
-
-            elbo = float(state.elbo)
-            converged = True
-
-            # Sample from approximate posterior
-            sample_key = jax.random.PRNGKey(seed + 3)
-            samples_result = pathfinder.sample(sample_key, state, num_samples=self.pathfinder_num_samples)
-            samples_flat = samples_result[0] if isinstance(samples_result, tuple) else samples_result
-
-            # Unflatten samples
-            samples_dict = {var: [] for var in model.var_list}
-            for i in range(self.pathfinder_num_samples):
-                sample = unflatten_fn(samples_flat[i])
-                for var in model.var_list:
-                    samples_dict[var].append(sample[var])
-
-            # Stack samples
-            for var in model.var_list:
-                samples_dict[var] = jnp.stack(samples_dict[var], axis=0)
-
-            return samples_dict, elbo, converged
-
-        except Exception as e:
-            if self.verbose:
-                print(f"    Pathfinder failed: {e}")
-            return None, float('-inf'), False
-
-    def _compute_loo_elpd(
-        self,
-        model,
-        data: Dict[str, Any],
-        params: Dict[str, jnp.ndarray]
-    ) -> Tuple[float, float, float, float]:
-        """
-        Compute LOO-ELPD using PSIS.
-
-        Returns:
-            Tuple of (elpd_loo, elpd_loo_se, khat_max, khat_mean)
-        """
-        # Compute log-likelihood for each sample and data point
-        log_lik = model.log_likelihood(data, params)  # (n_samples, n_data)
-
-        # Convert to numpy for PSIS
-        log_lik_np = np.array(log_lik)
-
-        # Run PSIS-LOO
-        loo, loos, ks = nppsis.psisloo(log_lik_np)
-
-        # Compute standard error of LOO ELPD
-        # SE = sqrt(n * var(loos)) where loos are pointwise contributions
-        n = len(loos)
-        elpd_se = np.sqrt(n * np.var(loos))
-
-        return float(loo), float(elpd_se), float(np.max(ks)), float(np.mean(ks))
-
 
     def fit_loo_models(
         self,
@@ -1484,19 +1427,6 @@ class MICEBayesianLOO(MICELogistic):
 
         with open(file_path, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
-                
-                # Optional: clear from memory if trying to save RAM?
-                # But we might need them for self.univariate_results access later?
-                # The user just wants to save coefficients.
-                # If N=500, self.univariate_results will grow large.
-                # If we save to disk, we technically don't need to keep them in memory if we don't return them.
-                # But the method returns 'self'.
-                # For safety, I'll keep them in memory unless memory is tight.
-                # Assuming 12GB RAM, 600MB is fine.
-
-        if self.verbose:
-             # ... (same summary stats)
-             pass
 
         if self.verbose:
             n_converged_zero = sum(1 for r in self.zero_predictor_results.values() if r.converged)

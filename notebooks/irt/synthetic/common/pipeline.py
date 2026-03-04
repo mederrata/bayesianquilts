@@ -84,119 +84,6 @@ def make_data_factory(data_dict, batch_size, num_people):
     return data_factory
 
 
-def compute_elpd_loo(model, data_dict, batch_size=512, n_samples=100, seed=42):
-    """Compute PSIS-LOO for a fitted IRT model.
-
-    Samples from the surrogate posterior, computes per-person log-likelihoods
-    across the full dataset, and runs PSIS-LOO diagnostics.
-
-    For imputed models (with an ``imputation_model``), the imputation PMFs
-    are pre-computed for the full dataset and attached to each batch.
-
-    Results are stored on the model as attributes so they persist via
-    ``save_to_disk``.
-
-    Args:
-        model: A fitted GRModel with params set.
-        data_dict: Full dataset dict (person, item columns).
-        batch_size: People per batch for log-likelihood computation.
-        n_samples: Number of surrogate posterior draws for PSIS.
-        seed: Random seed for sampling.
-
-    Returns:
-        Dict with elpd_loo, elpd_loo_se, elpd_loo_per_obs,
-        elpd_loo_se_per_obs, pointwise_loo, khat, n_obs.
-    """
-    from bayesianquilts.metrics.nppsis import psisloo
-
-    # Sample from surrogate posterior
-    surrogate = model.surrogate_distribution_generator(model.params)
-    key = jax.random.PRNGKey(seed)
-    samples = surrogate.sample(n_samples, seed=key)
-
-    N = len(data_dict[model.item_keys[0]])
-
-    # For imputed models, pre-compute PMFs for the full dataset
-    has_imputation = (
-        hasattr(model, 'imputation_model')
-        and model.imputation_model is not None
-    )
-    if has_imputation:
-        if model._has_missing_values(data_dict):
-            print("  Computing imputation PMFs for full dataset...")
-            full_pmfs = model._compute_batch_pmfs(data_dict)
-        else:
-            full_pmfs = np.zeros(
-                (N, model.num_items, model.response_cardinality),
-                dtype=np.float64,
-            )
-    else:
-        full_pmfs = None
-
-    # Compute log-likelihoods in batches over people
-    all_log_liks = []
-    indices = np.arange(N)
-
-    for start in range(0, N, batch_size):
-        end = min(start + batch_size, N)
-        idx = indices[start:end]
-
-        batch = {}
-        for k, v in data_dict.items():
-            if isinstance(v, (np.ndarray, jnp.ndarray)) and len(v) == N:
-                batch[k] = v[idx]
-            else:
-                batch[k] = v
-        # person key must be actual person indices (for abilities indexing)
-        batch[model.person_key] = idx.astype(np.float64)
-
-        if full_pmfs is not None:
-            batch['_imputation_pmfs'] = full_pmfs[idx]
-
-        pred = model.predictive_distribution(batch, **samples)
-        all_log_liks.append(np.array(pred['log_likelihood']))
-
-    log_lik = np.concatenate(all_log_liks, axis=1)  # (S, N)
-
-    # Run PSIS-LOO
-    loo, loos, ks = psisloo(log_lik)
-
-    n_obs = N
-    elpd_loo = float(loo)
-    elpd_loo_se = float(np.std(loos) * np.sqrt(n_obs))
-    elpd_loo_per_obs = elpd_loo / n_obs
-    elpd_loo_se_per_obs = elpd_loo_se / n_obs
-
-    results = {
-        'elpd_loo': elpd_loo,
-        'elpd_loo_se': elpd_loo_se,
-        'elpd_loo_per_obs': elpd_loo_per_obs,
-        'elpd_loo_se_per_obs': elpd_loo_se_per_obs,
-        'pointwise_loo': loos,
-        'khat': ks,
-        'n_obs': n_obs,
-    }
-
-    # Store on model for persistence via save_to_disk
-    model.elpd_loo = elpd_loo
-    model.elpd_loo_se = elpd_loo_se
-    model.elpd_loo_per_obs = elpd_loo_per_obs
-    model.elpd_loo_se_per_obs = elpd_loo_se_per_obs
-    model.elpd_loo_pointwise = loos
-    model.elpd_loo_khat = ks
-    model.elpd_loo_n_obs = n_obs
-
-    # Report diagnostics
-    bad_k = np.sum(ks > 0.7)
-    print(f"  ELPD-LOO: {elpd_loo:.2f} (SE: {elpd_loo_se:.2f})")
-    print(f"  ELPD-LOO per obs: {elpd_loo_per_obs:.4f} (SE: {elpd_loo_se_per_obs:.4f})")
-    print(f"  k-hat: max={np.max(ks):.3f}, "
-          f"mean={np.mean(ks):.3f}, "
-          f">{0.7}: {bad_k}/{n_obs}")
-
-    return results
-
-
 def calibrate_model(model, n_samples=32, seed=42):
     """Set calibration expectations from the surrogate posterior.
 
@@ -349,10 +236,6 @@ def fit_grm_baseline(
 
     calibrate_model(model)
 
-    # Compute ELPD-LOO
-    print("  Computing ELPD-LOO...")
-    compute_elpd_loo(model, data_dict, batch_size=batch_size)
-
     save_dir = Path(save_dir)
     model.save_to_disk(save_dir)
     np.save(save_dir / 'losses.npy', np.array(losses))
@@ -401,10 +284,6 @@ def fit_grm_imputed(
     )
 
     calibrate_model(model)
-
-    # Compute ELPD-LOO
-    print("  Computing ELPD-LOO...")
-    compute_elpd_loo(model, data_dict, batch_size=batch_size)
 
     save_dir = Path(save_dir)
     model.save_to_disk(save_dir)
