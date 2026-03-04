@@ -1901,8 +1901,11 @@ class MICEBayesianLOO(MICELogistic):
         target_idx = self.variable_names.index(target)
         var_type = self.variable_types.get(target_idx, 'continuous')
 
-        # Collect available models and their predictions
-        # List of (name, elpd_per_obs, se_per_obs, prediction, n_obs)
+        # Collect available models and their predictions.
+        # Per-obs ELPD and SE are used directly — no rescaling by N.
+        # Each model's per-obs ELPD reflects its quality per prediction,
+        # and per-obs SE reflects the uncertainty in that estimate.
+        # List of (name, elpd_per_obs, se_per_obs, prediction)
         models_info = []
 
         # 1. Zero-predictor model (always available if converged)
@@ -1937,8 +1940,7 @@ class MICEBayesianLOO(MICELogistic):
                     pred = intercept
 
                 models_info.append(('intercept', zero_result.elpd_loo_per_obs,
-                                    zero_result.elpd_loo_per_obs_se, float(pred),
-                                    zero_result.n_obs))
+                                    zero_result.elpd_loo_per_obs_se, float(pred)))
 
         # 2. Univariate models for available predictors
         for predictor_name, predictor_value in items.items():
@@ -1960,23 +1962,13 @@ class MICEBayesianLOO(MICELogistic):
             pred = self._predict_single_univariate(uni_result, predictor_value, var_type)
 
             models_info.append((predictor_name, uni_result.elpd_loo_per_obs,
-                                uni_result.elpd_loo_per_obs_se, float(pred),
-                                uni_result.n_obs))
+                                uni_result.elpd_loo_per_obs_se, float(pred)))
 
         if len(models_info) == 0:
             raise ValueError(f"No converged models available for target '{target}'")
 
-        # Scale per-obs ELPD to the smallest N across eligible models so that
-        # models with more data don't dominate purely due to sample size.
-        all_n = [m[4] for m in models_info if m[4] > 0]
-        n_obs_ref = min(all_n) if all_n else 1
-
-        elpd_per_obs = np.array([m[1] for m in models_info])
-        se_per_obs = np.array([m[2] for m in models_info])
-
-        # Scale to common N for the softmax
-        elpd_values = elpd_per_obs * n_obs_ref
-        se_values = se_per_obs * n_obs_ref
+        elpd_values = np.array([m[1] for m in models_info])
+        se_values = np.array([m[2] for m in models_info])
 
         # Compute uncertainty-adjusted ELPD (lower confidence bound)
         # Replace inf SE with large value for calculation
@@ -2006,7 +1998,6 @@ class MICEBayesianLOO(MICELogistic):
                 'elpd_loo_per_obs': {m[0]: float(m[1]) for m in models_info},
                 'elpd_loo_per_obs_se': {m[0]: float(m[2]) for m in models_info},
                 'predictions': {m[0]: float(m[3]) for m in models_info},
-                'n_obs_ref': n_obs_ref,
                 'n_obs_total': self.n_obs_total
             }
         else:
@@ -2082,7 +2073,8 @@ class MICEBayesianLOO(MICELogistic):
         target_idx = self.variable_names.index(target)
         var_type = self.variable_types.get(target_idx, 'continuous')
 
-        # ---- collect (name, elpd_per_obs, se_per_obs, pmf, n_obs) for every model ----
+        # ---- collect (name, elpd_per_obs, se_per_obs, pmf) for every model ----
+        # Per-obs ELPD and SE used directly — no rescaling by N.
         models_info: list = []
 
         # Zero-predictor
@@ -2100,7 +2092,7 @@ class MICEBayesianLOO(MICELogistic):
                 )
                 pmf = self._ordinal_pmf_from_model(zr, intercept, n_categories)
                 models_info.append(('intercept', zr.elpd_loo_per_obs,
-                                    zr.elpd_loo_per_obs_se, pmf, zr.n_obs))
+                                    zr.elpd_loo_per_obs_se, pmf))
 
         # Univariate models
         for predictor_name, predictor_value in items.items():
@@ -2129,23 +2121,14 @@ class MICEBayesianLOO(MICELogistic):
 
             pmf = self._ordinal_pmf_from_model(ur, eta, n_categories)
             models_info.append((predictor_name, ur.elpd_loo_per_obs,
-                                ur.elpd_loo_per_obs_se, pmf, ur.n_obs))
+                                ur.elpd_loo_per_obs_se, pmf))
 
         if not models_info:
             # No models — uniform fallback
             return np.ones(n_categories) / n_categories
 
-        # Scale per-obs ELPD to the smallest N across eligible models so that
-        # models with more data don't dominate purely due to sample size.
-        all_n = [m[4] for m in models_info if m[4] > 0]
-        n_obs_ref = min(all_n) if all_n else 1
-
-        elpd_per_obs = np.array([m[1] for m in models_info])
-        se_per_obs = np.array([m[2] for m in models_info])
-
-        # Scale to common N for the softmax
-        elpd_values = elpd_per_obs * n_obs_ref
-        se_values = se_per_obs * n_obs_ref
+        elpd_values = np.array([m[1] for m in models_info])
+        se_values = np.array([m[2] for m in models_info])
 
         se_safe = np.where(np.isfinite(se_values), se_values, 1e6)
         adjusted = elpd_values - uncertainty_penalty * se_safe

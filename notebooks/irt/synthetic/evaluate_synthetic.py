@@ -160,6 +160,20 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     baseline_metrics = compare_ability_ordering(true_abilities, baseline_abilities)
     imputed_metrics = compare_ability_ordering(true_abilities, imputed_abilities)
 
+    # Add ELPD-LOO metrics from the fitted models
+    for label, model_obj, metrics in [
+        ('baseline', baseline_model, baseline_metrics),
+        ('imputed', imputed_model, imputed_metrics),
+    ]:
+        if hasattr(model_obj, 'elpd_loo'):
+            metrics['elpd_loo'] = model_obj.elpd_loo
+            metrics['elpd_loo_se'] = model_obj.elpd_loo_se
+            metrics['elpd_loo_per_obs'] = model_obj.elpd_loo_per_obs
+            metrics['elpd_loo_se_per_obs'] = model_obj.elpd_loo_se_per_obs
+            metrics['elpd_loo_n_obs'] = model_obj.elpd_loo_n_obs
+            metrics['elpd_loo_khat_max'] = float(np.max(model_obj.elpd_loo_khat))
+            metrics['elpd_loo_khat_mean'] = float(np.mean(model_obj.elpd_loo_khat))
+
     results = {
         'dataset': dataset_name,
         'num_people': num_people,
@@ -189,6 +203,11 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     print(f"  Imputed:   Spearman r = {imputed_metrics['spearman_r']:.4f}, "
           f"Kendall tau = {imputed_metrics['kendall_tau']:.4f}, "
           f"RMSE = {imputed_metrics['rmse']:.4f}")
+    if 'elpd_loo' in baseline_metrics:
+        print(f"  Baseline ELPD-LOO: {baseline_metrics['elpd_loo']:.2f} "
+              f"(per obs: {baseline_metrics['elpd_loo_per_obs']:.4f})")
+        print(f"  Imputed  ELPD-LOO: {imputed_metrics['elpd_loo']:.2f} "
+              f"(per obs: {imputed_metrics['elpd_loo_per_obs']:.4f})")
 
     # 9. Generate plots
     print(f"\n--- Generating plots ---")
@@ -214,7 +233,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     return results
 
 
-DATASETS = ['grit', 'rwa', 'eqsq', 'npi', 'wpi', 'tma']
+DATASETS = ['grit', 'rwa', 'tma', 'wpi', 'npi', 'eqsq']
 
 
 def main():
@@ -278,17 +297,25 @@ def main():
 
     # Summary table
     if len(all_results) > 1:
-        print(f"\n{'='*70}")
+        has_elpd = 'elpd_loo_per_obs' in next(iter(all_results.values()))['baseline']
+        print(f"\n{'='*90}")
         print("SUMMARY")
-        print(f"{'='*70}")
-        print(f"{'Dataset':<10} {'Base Spearman':>14} {'Imp Spearman':>14} "
-              f"{'Base RMSE':>10} {'Imp RMSE':>10}")
-        print("-" * 70)
+        print(f"{'='*90}")
+        header = (f"{'Dataset':<10} {'Base Spearman':>14} {'Imp Spearman':>14} "
+                  f"{'Base RMSE':>10} {'Imp RMSE':>10}")
+        if has_elpd:
+            header += f" {'Base ELPD/n':>12} {'Imp ELPD/n':>12}"
+        print(header)
+        print("-" * 90)
         for ds, r in all_results.items():
-            print(f"{ds:<10} {r['baseline']['spearman_r']:>14.4f} "
-                  f"{r['imputed']['spearman_r']:>14.4f} "
-                  f"{r['baseline']['rmse']:>10.4f} "
-                  f"{r['imputed']['rmse']:>10.4f}")
+            line = (f"{ds:<10} {r['baseline']['spearman_r']:>14.4f} "
+                    f"{r['imputed']['spearman_r']:>14.4f} "
+                    f"{r['baseline']['rmse']:>10.4f} "
+                    f"{r['imputed']['rmse']:>10.4f}")
+            if has_elpd:
+                line += (f" {r['baseline']['elpd_loo_per_obs']:>12.4f}"
+                         f" {r['imputed']['elpd_loo_per_obs']:>12.4f}")
+            print(line)
 
         # Save combined results
         output_dir = Path(args.output_dir)
