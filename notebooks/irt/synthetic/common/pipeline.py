@@ -186,6 +186,7 @@ def fit_neural_grm(
         lr_decay_factor=lr_decay_factor,
         clip_norm=clip_norm,
         zero_nan_grads=True,
+        compute_elpd_loo=False,  # NeuralGRM is for data generation, not comparison
     )
 
     save_dir.mkdir(parents=True, exist_ok=True)
