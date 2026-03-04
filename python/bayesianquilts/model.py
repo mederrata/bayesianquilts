@@ -11,8 +11,15 @@ import dill
 import jax
 import jax.numpy as jnp
 import numpy as np
-from arviz.data import InferenceData
-from arviz.data.base import dict_to_dataset
+try:
+    # arviz >= 1.0: InferenceData replaced by xarray.DataTree
+    from arviz_base import convert_to_datatree, dict_to_dataset
+    InferenceData = None  # not available in arviz 1.0
+except ImportError:
+    # arviz < 1.0
+    from arviz.data import InferenceData
+    from arviz.data.base import dict_to_dataset
+    convert_to_datatree = None
 from flax import nnx
 from jax import random
 from tensorflow_probability.substrates.jax import tf2jax as tf
@@ -971,6 +978,9 @@ class BayesianModel(nnx.Module, ABC):
             ),
         }
 
+        if convert_to_datatree is not None:
+            # arviz >= 1.0
+            return convert_to_datatree(idict)
         return InferenceData(**idict)
 
 class QuiltedBayesianModel(BayesianModel):

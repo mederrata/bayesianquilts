@@ -136,7 +136,7 @@ def calibrate_model(model, n_samples=32, seed=42):
 
 def fit_neural_grm(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
-    nn_hidden_sizes=(32,), dim=1, batch_size=256,
+    nn_hidden_sizes=(4,), per_item_nn=True, dim=1, batch_size=256,
     num_epochs=500, learning_rate=2e-4, patience=10,
     kappa_scale=0.5, eta_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
@@ -168,6 +168,7 @@ def fit_neural_grm(
         eta_scale=eta_scale,
         response_cardinality=response_cardinality,
         nn_hidden_sizes=nn_hidden_sizes,
+        per_item_nn=per_item_nn,
         dtype=jnp.float64,
     )
 
@@ -293,6 +294,22 @@ def fit_grm_imputed(
 # Synthetic data generation
 # -------------------------------------------------------------------------
 
+def sample_abilities(num_people, dim=1, seed=42):
+    """Sample fresh abilities from a standard normal prior.
+
+    Args:
+        num_people: Number of people.
+        dim: Latent dimension (default 1).
+        seed: Random seed.
+
+    Returns:
+        abilities array with shape (N, dim, 1, 1) matching the IRT convention.
+    """
+    rng = np.random.default_rng(seed)
+    abilities = rng.standard_normal((num_people, dim, 1, 1))
+    return abilities
+
+
 def generate_synthetic_data(model, item_keys, response_cardinality,
                             abilities=None, missingness_rate=0.0, seed=0):
     """Generate synthetic responses from a fitted NeuralGRModel or GRModel.
@@ -303,12 +320,12 @@ def generate_synthetic_data(model, item_keys, response_cardinality,
         response_cardinality: Number of response categories.
         abilities: Optional ability array to use. If None, uses model's calibrated.
         missingness_rate: Fraction of responses to set missing (MCAR). Default 0.
-        seed: Random seed for missingness.
+        seed: Random seed for response sampling and missingness.
 
     Returns:
         data_dict with keys: person, item_key1, ..., item_keyN
     """
-    responses = np.array(model.simulate_data(abilities=abilities))
+    responses = np.array(model.simulate_data(abilities=abilities, seed=seed))
     # responses shape: (N, I) or (N, D, I) — flatten to (N, I)
     if responses.ndim > 2:
         responses = responses.reshape(responses.shape[0], -1)
@@ -324,7 +341,7 @@ def generate_synthetic_data(model, item_keys, response_cardinality,
 
     # Introduce MCAR missingness
     if missingness_rate > 0:
-        rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(seed + 1000)
         mask = rng.random((N, I)) < missingness_rate
         for i, key in enumerate(item_keys):
             data_dict[key] = np.where(mask[:, i], -1.0, data_dict[key])

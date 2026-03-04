@@ -35,10 +35,10 @@ The Neural GRM replaces the fixed sigmoid link with a flexible, learned monotone
 The Neural GRM defines:
 
 $$
-P(Y_{ji} \geq k \mid \theta_j) = g\bigl(-a_i(b_{ik} - \theta_j)\bigr), \quad k = 1, \ldots, K-1,
+P(Y_{ji} \geq k \mid \theta_j) = g_i\bigl(-a_i(b_{ik} - \theta_j)\bigr), \quad k = 1, \ldots, K-1,
 $$
 
-where $g: \mathbb{R} \to (0, 1)$ is a **shared monotone function** parameterized as a mixture of sigmoids. The argument uses the sign convention $-a_i(b_{ik} - \theta_j) = a_i(\theta_j - b_{ik})$, matching the standard GRM so that $P(Y_{ji} \geq k)$ increases with ability and decreases with threshold difficulty.
+where $g_i: \mathbb{R} \to (0, 1)$ is a **per-item monotone function** parameterized as a mixture of sigmoids (or a shared function $g$ when `per_item_nn=False`). The argument uses the sign convention $-a_i(b_{ik} - \theta_j) = a_i(\theta_j - b_{ik})$, matching the standard GRM so that $P(Y_{ji} \geq k)$ increases with ability and decreases with threshold difficulty.
 
 ### Mixture-of-Sigmoids Architecture
 
@@ -56,7 +56,7 @@ where:
 
 **Monotonicity guarantee.** Since each $\sigma(\alpha_h z + \beta_h)$ is monotone increasing in $z$ (because $\alpha_h > 0$ and $\sigma$ is increasing), and $\pi_h \geq 0$, the weighted sum $g(z)$ is monotone increasing. Moreover, $g(z) \to 0$ as $z \to -\infty$ and $g(z) \to 1$ as $z \to +\infty$, so $g$ is a valid CDF-like link function.
 
-**Expressiveness.** A mixture of $H$ sigmoids can approximate any continuous monotone function from $\mathbb{R}$ to $(0, 1)$ to arbitrary precision as $H \to \infty$. With $H = 32$ (default), the model can capture a wide range of asymmetric, multi-modal-derivative, and non-logistic response curves. When $H = 1$ and $\alpha_1 = 1$, $\beta_1 = 0$, the model reduces to the standard GRM.
+**Expressiveness.** A mixture of $H$ sigmoids can approximate any continuous monotone function from $\mathbb{R}$ to $(0, 1)$ to arbitrary precision as $H \to \infty$. With per-item mixtures and $H = 4$ (default), each item can capture asymmetric, multi-modal-derivative, and non-logistic response curves with its own shape. When $H = 1$ and $\alpha_1 = 1$, $\beta_1 = 0$, the model reduces to the standard GRM.
 
 ### Category Probabilities
 
@@ -113,13 +113,15 @@ where $\Delta b_{ik} > 0$ ensures the ordering $b_{i1} \leq b_{i2} \leq \cdots$.
 
 ### Mixture-of-Sigmoids Parameters
 
-| Parameter | Prior | Shape | Description |
-|-----------|-------|-------|-------------|
-| $\tilde{\alpha}_h$ (nn\_w0) | $\mathcal{N}(0, 1)$ | $(H, 1)$ | Unconstrained slopes |
-| $\beta_h$ (nn\_b0) | $\mathcal{N}(0, 2)$ | $(H,)$ | Component offsets (wider prior for diversity) |
-| $\tilde{w}_h$ (nn\_w1) | $\mathcal{N}(0, 1)$ | $(1, H)$ | Mixing logits |
+With `per_item_nn=True` (default), each item $i$ has its own set of mixture parameters. With `per_item_nn=False`, a single set is shared across all items.
 
-The wider prior ($\sigma = 2$) on the offsets $\beta_h$ encourages the sigmoid components to spread across different regions of the $z$-axis at initialization, giving the mixture good initial coverage of the response function.
+| Parameter | Prior | Shape (per-item) | Shape (shared) | Description |
+|-----------|-------|-------------------|----------------|-------------|
+| $\tilde{\alpha}_{ih}$ (nn\_w0) | $\mathcal{N}(0, 1)$ | $(I, H, 1)$ | $(H, 1)$ | Unconstrained slopes |
+| $\beta_{ih}$ (nn\_b0) | $\mathcal{N}(0, 2)$ | $(I, H)$ | $(H,)$ | Component offsets |
+| $\tilde{w}_{ih}$ (nn\_w1) | $\mathcal{N}(0, 1)$ | $(I, 1, H)$ | $(1, H)$ | Mixing logits |
+
+The wider prior ($\sigma = 2$) on the offsets $\beta_{ih}$ encourages the sigmoid components to spread across different regions of the $z$-axis at initialization, giving the mixture good initial coverage of the response function. The default is $H = 4$ for per-item mode (vs. $H = 32$ for shared mode), since each item needs only a few components to capture its individual ICC shape.
 
 ## Inference
 
@@ -171,7 +173,23 @@ Given a fitted model with calibrated parameter expectations $\hat{\Psi}$, synthe
 
 The Neural GRM is a strict generalization of the standard GRM. When the mixture-of-sigmoids reduces to a single component with unit slope and zero offset---i.e., $H = 1$, $\alpha_1 = 1$, $\beta_1 = 0$---the response function becomes $g(z) = \sigma(z)$ and the model is identical to the standard GRM.
 
-The key structural difference is that the response function $g$ is **shared across all items**. Item-specific behavior is captured entirely by the discrimination $a_i$ and difficulty thresholds $b_{ik}$. This means the Neural GRM learns a single "response curve shape" that represents how respondents transition between categories, while item parameters control where on this curve each item sits.
+### Shared vs. Per-Item Link Functions
+
+The original architecture used a **shared** response function $g$ across all items. Since $g$ is monotone and operates on the same scalar $z = a_i(\theta - b_{ik})$ as the GRM, the response probability ranking across people for any item-threshold pair is identical to the standard GRM. The shared neural link only reshapes the ICC curve globally but cannot change which people are more likely to respond higher for a given item.
+
+The current default uses **per-item** link functions $g_i$, where each item has its own mixture-of-sigmoids:
+
+$$
+g_i(z) = \sum_{h=1}^{H} \pi_{ih} \, \sigma\!\bigl(\alpha_{ih} \, z + \beta_{ih}\bigr).
+$$
+
+This means different items can have genuinely different ICC shapes---asymmetric curves, variable steepness, different inflection regions---while monotonicity is preserved by the same argument (positive-weighted sum of monotone functions).
+
+**Why per-item links matter:** The Fisher information varies differently across ability levels for each item, producing different posteriors and hence different ability estimates than any logistic GRM. When generating synthetic data, the response patterns have non-logistic properties that a standard GRM cannot replicate.
+
+**Parameter cost:** With $H = 4$ components per item (default), each item contributes $3H + 1 = 13$ NN parameters. For 100 items this is 1,300 parameters---very manageable. The shared architecture (`per_item_nn=False`) is preserved for backward compatibility.
+
+To use the shared architecture: `NeuralGRModel(..., per_item_nn=False, nn_hidden_sizes=(32,))`.
 
 ## Implementation
 

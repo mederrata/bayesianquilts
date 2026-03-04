@@ -161,4 +161,16 @@ notebooks/irt/*/TMA.zip
 .build-cache
 .tar
 RWAS.zip
-
+RWAS/
+EQSQ.zip
+EQSQ/
+NPI.zip
+NPI/
+WPI.zip
+WPI/
+TMA.zip
+TMA/
+duckworth-grit-scale-data/
+*gitignore.swp
+duckworth-grit-scale-data.zip
+notebooks/irt/synthetic/results*
