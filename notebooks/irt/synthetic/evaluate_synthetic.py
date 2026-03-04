@@ -20,7 +20,7 @@ import pandas as pd
 
 
 def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
-                 batch_size=256, missingness_rate=0.2, nn_hidden_sizes=(4,),
+                 batch_size=256, missingness_rate=0.2,
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
                  lr_decay_factor=0.9, clip_norm=1.0,
                  reload_neural_grm=False):
@@ -72,7 +72,6 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     neural_model = fit_neural_grm(
         data_dict, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "neural_grm",
-        nn_hidden_sizes=nn_hidden_sizes,
         dim=dim,
         batch_size=batch_size,
         num_epochs=epochs,
@@ -187,7 +186,6 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
             'lr': lr,
             'grm_lr': grm_lr,
             'batch_size': batch_size,
-            'nn_hidden_sizes': list(nn_hidden_sizes),
             'dim': dim,
             'kappa_scale': kappa_scale,
             'eta_scale': eta_scale,
@@ -252,8 +250,6 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--missingness", type=float, default=0.2,
                         help="MCAR missingness rate")
-    parser.add_argument("--hidden-sizes", type=int, nargs='+', default=[4],
-                        help="Mixture-of-sigmoids: number of sigmoid components per item")
     parser.add_argument("--dim", type=int, default=1, help="Latent dimension")
     parser.add_argument("--kappa-scale", type=float, default=0.5,
                         help="Kappa scale for horseshoe prior")
@@ -284,7 +280,6 @@ def main():
             grm_lr=args.grm_lr,
             batch_size=args.batch_size,
             missingness_rate=args.missingness,
-            nn_hidden_sizes=tuple(args.hidden_sizes),
             dim=args.dim,
             kappa_scale=args.kappa_scale,
             eta_scale=args.eta_scale,

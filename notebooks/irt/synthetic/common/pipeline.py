@@ -136,7 +136,7 @@ def calibrate_model(model, n_samples=32, seed=42):
 
 def fit_neural_grm(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
-    nn_hidden_sizes=(4,), per_item_nn=True, dim=1, batch_size=256,
+    dim=1, batch_size=256,
     num_epochs=500, learning_rate=2e-4, patience=10,
     kappa_scale=0.5, eta_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
@@ -167,8 +167,6 @@ def fit_neural_grm(
         kappa_scale=kappa_scale,
         eta_scale=eta_scale,
         response_cardinality=response_cardinality,
-        nn_hidden_sizes=nn_hidden_sizes,
-        per_item_nn=per_item_nn,
         dtype=jnp.float64,
     )
 
@@ -298,18 +296,37 @@ def fit_grm_imputed(
 # -------------------------------------------------------------------------
 
 def sample_abilities(num_people, dim=1, seed=42):
-    """Sample fresh abilities from a standard normal prior.
+    """Create a grid of abilities using normal quantiles.
+
+    Uses equally-spaced quantiles of the standard normal distribution
+    to produce a deterministic, evenly-covered grid over the latent space.
+    For dim > 1, each dimension gets an independently shuffled copy of
+    the 1D grid (Latin Hypercube design).
 
     Args:
-        num_people: Number of people.
+        num_people: Number of grid points.
         dim: Latent dimension (default 1).
-        seed: Random seed.
+        seed: Random seed (used only for shuffling in dim > 1).
 
     Returns:
         abilities array with shape (N, dim, 1, 1) matching the IRT convention.
     """
-    rng = np.random.default_rng(seed)
-    abilities = rng.standard_normal((num_people, dim, 1, 1))
+    from scipy.stats import norm
+
+    # Equally-spaced quantiles: avoid 0 and 1 by using midpoints
+    quantile_points = (np.arange(num_people) + 0.5) / num_people
+    grid_1d = norm.ppf(quantile_points)
+
+    if dim == 1:
+        abilities = grid_1d[:, np.newaxis, np.newaxis, np.newaxis]
+    else:
+        # Latin Hypercube: independently shuffled grids per dimension
+        rng = np.random.default_rng(seed)
+        abilities = np.zeros((num_people, dim, 1, 1))
+        for d in range(dim):
+            perm = rng.permutation(num_people)
+            abilities[:, d, 0, 0] = grid_1d[perm]
+
     return abilities
 
 

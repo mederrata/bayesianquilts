@@ -20,10 +20,7 @@ item_keys:
 - GS12
 kappa_scale: 0.5
 missing_val: -9999
-nn_hidden_sizes:
-- 4
 num_people: 4270
-per_item_nn: true
 positive_discriminations: true
 response_cardinality: 5
 vi_mode: advi
