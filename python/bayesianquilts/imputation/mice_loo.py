@@ -1902,8 +1902,9 @@ class MICEBayesianLOO(MICELogistic):
         var_type = self.variable_types.get(target_idx, 'continuous')
 
         # Collect available models and their predictions
-        # List of (name, elpd_loo, elpd_loo_se, prediction)
+        # List of (name, elpd_per_obs, se_per_obs, prediction)
         models_info = []
+        n_obs_ref = None  # reference N for rescaling (from zero-predictor)
 
         # 1. Zero-predictor model (always available if converged)
         if target_idx in self.zero_predictor_results:
@@ -1936,11 +1937,17 @@ class MICEBayesianLOO(MICELogistic):
                     # Linear: intercept
                     pred = intercept
 
-                # SE for the total ELPD (not per obs)
-                elpd_se = zero_result.elpd_loo_per_obs_se * zero_result.n_obs
-                models_info.append(('intercept', zero_result.elpd_loo, elpd_se, float(pred)))
+                # Use per-obs ELPD for fair comparison across models
+                n_obs_ref = zero_result.n_obs  # reference N for rescaling
+                models_info.append(('intercept', zero_result.elpd_loo_per_obs,
+                                    zero_result.elpd_loo_per_obs_se, float(pred)))
 
         # 2. Univariate models for available predictors
+        # Use zero-predictor n_obs as reference N (most complete cases for this target)
+        if n_obs_ref is None:
+            # No zero-predictor; use max n_obs across univariate models
+            n_obs_ref = 1  # will be updated below
+
         for predictor_name, predictor_value in items.items():
             if predictor_name not in self.variable_names:
                 continue
@@ -1959,17 +1966,36 @@ class MICEBayesianLOO(MICELogistic):
 
             pred = self._predict_single_univariate(uni_result, predictor_value, var_type)
 
-            # SE for the total ELPD (not per obs)
-            elpd_se = uni_result.elpd_loo_per_obs_se * uni_result.n_obs
-            models_info.append((predictor_name, uni_result.elpd_loo, elpd_se, float(pred)))
+            # Use per-obs ELPD for fair comparison across models
+            models_info.append((predictor_name, uni_result.elpd_loo_per_obs,
+                                uni_result.elpd_loo_per_obs_se, float(pred)))
 
         if len(models_info) == 0:
             raise ValueError(f"No converged models available for target '{target}'")
 
-        # Compute stacking weights: w_k = exp(elpd_loo_k - uncertainty_penalty * se_k)
-        # This hedges against uncertainty by penalizing models with high SE
-        elpd_values = np.array([m[1] for m in models_info])
-        se_values = np.array([m[2] for m in models_info])
+        # If no zero-predictor, find reference N from available models
+        if n_obs_ref is None or n_obs_ref <= 1:
+            all_n = []
+            if target_idx in self.zero_predictor_results:
+                all_n.append(self.zero_predictor_results[target_idx].n_obs)
+            for predictor_name in items:
+                if predictor_name not in self.variable_names or predictor_name == target:
+                    continue
+                pidx = self.variable_names.index(predictor_name)
+                key = (target_idx, pidx)
+                if key in self.univariate_results:
+                    all_n.append(self.univariate_results[key].n_obs)
+            n_obs_ref = max(all_n) if all_n else 1
+
+        # Compute stacking weights using per-obs ELPD rescaled to a common N.
+        # All models are compared at the same effective sample size (the
+        # zero-predictor's n_obs, i.e. all non-missing rows for this target).
+        elpd_per_obs = np.array([m[1] for m in models_info])
+        se_per_obs = np.array([m[2] for m in models_info])
+
+        # Scale to common N for the softmax
+        elpd_values = elpd_per_obs * n_obs_ref
+        se_values = se_per_obs * n_obs_ref
 
         # Compute uncertainty-adjusted ELPD (lower confidence bound)
         # Replace inf SE with large value for calculation
@@ -1996,9 +2022,10 @@ class MICEBayesianLOO(MICELogistic):
             return {
                 'prediction': stacked_pred,
                 'weights': {m[0]: float(w) for m, w in zip(models_info, weights)},
-                'elpd_loo': {m[0]: float(m[1]) for m in models_info},
-                'elpd_loo_se': {m[0]: float(m[2]) for m in models_info},
+                'elpd_loo_per_obs': {m[0]: float(m[1]) for m in models_info},
+                'elpd_loo_per_obs_se': {m[0]: float(m[2]) for m in models_info},
                 'predictions': {m[0]: float(m[3]) for m in models_info},
+                'n_obs_ref': n_obs_ref,
                 'n_obs_total': self.n_obs_total
             }
         else:
@@ -2074,8 +2101,9 @@ class MICEBayesianLOO(MICELogistic):
         target_idx = self.variable_names.index(target)
         var_type = self.variable_types.get(target_idx, 'continuous')
 
-        # ---- collect (name, elpd, se, pmf) for every available model ----
-        models_info: list = []  # (name, elpd_loo, elpd_se, pmf_array)
+        # ---- collect (name, elpd_per_obs, se_per_obs, pmf) for every model ----
+        models_info: list = []  # (name, elpd_per_obs, se_per_obs, pmf_array)
+        n_obs_ref = None  # reference N for rescaling (from zero-predictor)
 
         # Zero-predictor
         if target_idx in self.zero_predictor_results:
@@ -2091,8 +2119,9 @@ class MICEBayesianLOO(MICELogistic):
                     )
                 )
                 pmf = self._ordinal_pmf_from_model(zr, intercept, n_categories)
-                elpd_se = zr.elpd_loo_per_obs_se * zr.n_obs
-                models_info.append(('intercept', zr.elpd_loo, elpd_se, pmf))
+                n_obs_ref = zr.n_obs
+                models_info.append(('intercept', zr.elpd_loo_per_obs,
+                                    zr.elpd_loo_per_obs_se, pmf))
 
         # Univariate models
         for predictor_name, predictor_value in items.items():
@@ -2120,16 +2149,35 @@ class MICEBayesianLOO(MICELogistic):
             eta = float(x_std * beta_val + intercept)
 
             pmf = self._ordinal_pmf_from_model(ur, eta, n_categories)
-            elpd_se = ur.elpd_loo_per_obs_se * ur.n_obs
-            models_info.append((predictor_name, ur.elpd_loo, elpd_se, pmf))
+            models_info.append((predictor_name, ur.elpd_loo_per_obs,
+                                ur.elpd_loo_per_obs_se, pmf))
 
         if not models_info:
             # No models — uniform fallback
             return np.ones(n_categories) / n_categories
 
-        # ---- stacking weights (same logic as predict) ----
-        elpd_values = np.array([m[1] for m in models_info])
-        se_values = np.array([m[2] for m in models_info])
+        # If no zero-predictor, find reference N from available models
+        if n_obs_ref is None:
+            all_n = []
+            if target_idx in self.zero_predictor_results:
+                all_n.append(self.zero_predictor_results[target_idx].n_obs)
+            for predictor_name in items:
+                if predictor_name not in self.variable_names or predictor_name == target:
+                    continue
+                pidx = self.variable_names.index(predictor_name)
+                key = (target_idx, pidx)
+                if key in self.univariate_results:
+                    all_n.append(self.univariate_results[key].n_obs)
+            n_obs_ref = max(all_n) if all_n else 1
+
+        # ---- stacking weights using per-obs ELPD rescaled to common N ----
+        elpd_per_obs = np.array([m[1] for m in models_info])
+        se_per_obs = np.array([m[2] for m in models_info])
+
+        # Scale to common N (zero-predictor's n_obs) for the softmax
+        elpd_values = elpd_per_obs * n_obs_ref
+        se_values = se_per_obs * n_obs_ref
+
         se_safe = np.where(np.isfinite(se_values), se_values, 1e6)
         adjusted = elpd_values - uncertainty_penalty * se_safe
 
