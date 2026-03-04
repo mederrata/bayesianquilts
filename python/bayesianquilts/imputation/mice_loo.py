@@ -1292,7 +1292,7 @@ class MICEBayesianLOO(MICELogistic):
         # Compute Spearman correlation matrix for feature selection
         if self.verbose:
             print("Computing feature correlations...")
-        corr_matrix = X_df.corr(method='spearman').abs().values
+        corr_matrix = np.array(X_df.corr(method='spearman').abs().values)
         # Fill self-correlation with -1 to exclude from top selection (though we skip i==j explicitly anyway)
         np.fill_diagonal(corr_matrix, -1.0)
         
