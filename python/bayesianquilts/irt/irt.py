@@ -125,6 +125,70 @@ class IRTModel(BayesianModel):
     def project_discriminations(self, steps=1000):
         pass
 
+    def validate_imputation_model(self):
+        """Validate that the imputation model is suitable for this IRT model.
+
+        Checks:
+        1. Imputation model has been fitted (has variable_names).
+        2. Imputation model covers all item keys.
+        3. No variables are typed as 'continuous'.
+        4. Warns if any items have no converged models.
+        5. Warns if any items have high k-hat diagnostics.
+        """
+        import warnings
+
+        if self.imputation_model is None:
+            return
+
+        im = self.imputation_model
+
+        # Check 1: fitted
+        if not getattr(im, 'variable_names', None):
+            raise ValueError(
+                "Imputation model has not been fitted "
+                "(no variable_names found)."
+            )
+
+        # Check 2: item coverage
+        covered = set(im.variable_names)
+        missing = [k for k in self.item_keys if k not in covered]
+        if missing:
+            raise ValueError(
+                f"Imputation model does not cover items: {missing}"
+            )
+
+        # Check 3: continuous variables
+        var_types = getattr(im, 'variable_types', {})
+        for i, name in enumerate(im.variable_names):
+            vtype = var_types.get(i, 'ordinal')
+            if vtype == 'continuous' and name in self.item_keys:
+                raise ValueError(
+                    f"Item '{name}' is typed as continuous in the "
+                    f"imputation model, but IRT requires ordinal/categorical."
+                )
+
+        # Check 4: convergence
+        zero_results = getattr(im, 'zero_predictor_results', {})
+        for i, name in enumerate(im.variable_names):
+            if name not in self.item_keys:
+                continue
+            result = zero_results.get(i)
+            if result is not None and not getattr(result, 'converged', True):
+                warnings.warn(
+                    f"Item '{name}' has no converged imputation models."
+                )
+
+        # Check 5: high k-hat
+        for i, name in enumerate(im.variable_names):
+            if name not in self.item_keys:
+                continue
+            result = zero_results.get(i)
+            if result is not None and getattr(result, 'khat_max', 0) > 0.7:
+                warnings.warn(
+                    f"Item '{name}' has high khat "
+                    f"({result.khat_max:.3f} > 0.7)."
+                )
+
     def _has_missing_values(self, batch):
         """Check if any item column in the batch has missing values."""
         for item_key in self.item_keys:
