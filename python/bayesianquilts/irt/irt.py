@@ -318,7 +318,7 @@ class IRTModel(BayesianModel):
               f">{khat_threshold}: {bad_k}/{n_obs}")
 
     def fit(self, batched_data_factory, initial_values=None,
-            compute_elpd_loo=True, elpd_loo_samples=100, **kwargs):
+            compute_elpd_loo=False, elpd_loo_samples=100, **kwargs):
         """Fit the IRT model with optional imputation and ELPD-LOO.
 
         If ``imputation_model`` is set, wraps the data factory to attach
@@ -331,8 +331,8 @@ class IRTModel(BayesianModel):
         Args:
             batched_data_factory: Callable returning a data iterator.
             initial_values: Optional initial parameter values.
-            compute_elpd_loo: If True (default), compute and store
-                ELPD-LOO after fitting.
+            compute_elpd_loo: If True, compute and store
+                ELPD-LOO after fitting. Default is False.
             elpd_loo_samples: Number of surrogate posterior draws for
                 the PSIS-LOO computation (default 100).
             **kwargs: Additional args passed to _calibrate_minibatch_advi.
