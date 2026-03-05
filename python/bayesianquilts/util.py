@@ -130,6 +130,7 @@ def training_loop(
     max_nan_recoveries: int = 10,
     zero_nan_grads: bool = False,
     verbose: bool = True,
+    snapshot_epoch: int | None = None,
 ):
     """
     Advanced training loop with checkpointing, early stopping, LR decay on plateau,
@@ -191,6 +192,7 @@ def training_loop(
     current_lr = learning_rate
     nan_recovery_count = 0
     best_params = None
+    snapshot_params = None
     if base_optimizer_fn is None:
         base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
     # 2. Initial Optimizer Setup
@@ -352,6 +354,15 @@ def training_loop(
                         raise
             avg_epoch_loss = epoch_loss / steps_per_epoch
             epoch_losses += [avg_epoch_loss]
+
+            if snapshot_epoch is not None and epoch + 1 == snapshot_epoch:
+                snapshot_params = jax.tree_util.tree_map(
+                    lambda x: jnp.array(x) if hasattr(x, 'shape') else x,
+                    dict(params),
+                )
+                if verbose:
+                    print(f"  -> Snapshot saved at epoch {epoch + 1}")
+
             # 4. Check for improvement, save checkpoints, and decay LR
             if (epoch + 1) % check_convergence_every == 0:
                 if avg_epoch_loss < best_loss:
@@ -447,6 +458,8 @@ def training_loop(
     else:
         final_params = params
 
+    if snapshot_epoch is not None:
+        return epoch_losses, final_params, snapshot_params
     return epoch_losses, final_params
 
 

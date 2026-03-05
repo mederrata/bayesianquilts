@@ -191,6 +191,7 @@ class BayesianModel(nnx.Module, ABC):
         unormalized_log_prob_fn: Callable | None = None,
         verbose: bool = True,
         zero_nan_grads: bool = False,
+        snapshot_epoch: int | None = None,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -234,12 +235,16 @@ class BayesianModel(nnx.Module, ABC):
                 data_iterator=batched_data_factory,
                 verbose=verbose,
                 zero_nan_grads=zero_nan_grads,
+                snapshot_epoch=snapshot_epoch,
                 **kwargs,
             )
             return losses
 
-        losses, params = run_approximation()
+        result = run_approximation()
+        losses, params = result[0], result[1]
         self.params = params
+        if len(result) > 2:
+            return losses, params, result[2]
         return losses, params
 
     def set_calibration_expectations(self, samples: int = 24, variational: bool = True):

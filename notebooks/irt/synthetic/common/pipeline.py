@@ -200,11 +200,13 @@ def fit_grm_baseline(
     dim=1, batch_size=256, num_epochs=500, learning_rate=2e-4,
     patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
+    snapshot_epoch=None,
 ):
     """Fit a standard GRM (no imputation) and save to disk.
 
     Returns:
-        Fitted GRModel instance.
+        (model, snapshot_params) where snapshot_params is the variational
+        parameters at ``snapshot_epoch`` (None if not requested).
     """
     from bayesianquilts.irt.grm import GRModel
 
@@ -220,7 +222,7 @@ def fit_grm_baseline(
     steps_per_epoch = int(np.ceil(num_people / batch_size))
     factory = make_data_factory(data_dict, batch_size, num_people)
 
-    losses, params = model.fit(
+    res = model.fit(
         factory,
         batch_size=batch_size,
         dataset_size=num_people,
@@ -231,7 +233,10 @@ def fit_grm_baseline(
         lr_decay_factor=lr_decay_factor,
         clip_norm=clip_norm,
         zero_nan_grads=True,
+        snapshot_epoch=snapshot_epoch,
     )
+    losses = res[0]
+    snapshot_params = res[2] if len(res) > 2 else None
 
     calibrate_model(model)
 
@@ -239,7 +244,7 @@ def fit_grm_baseline(
     model.save_to_disk(save_dir)
     np.save(save_dir / 'losses.npy', np.array(losses))
 
-    return model
+    return model, snapshot_params
 
 
 def fit_grm_imputed(
@@ -247,8 +252,13 @@ def fit_grm_imputed(
     imputation_model, dim=1, batch_size=256, num_epochs=500,
     learning_rate=2e-4, patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
+    initial_values=None,
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
+
+    Args:
+        initial_values: Optional initial variational parameters (e.g. from
+            an early baseline checkpoint) to warm-start training.
 
     Returns:
         Fitted GRModel instance.
@@ -267,7 +277,7 @@ def fit_grm_imputed(
     steps_per_epoch = int(np.ceil(num_people / batch_size))
     factory = make_data_factory(data_dict, batch_size, num_people)
 
-    losses, params = model.fit(
+    res = model.fit(
         factory,
         batch_size=batch_size,
         dataset_size=num_people,
@@ -278,7 +288,9 @@ def fit_grm_imputed(
         lr_decay_factor=lr_decay_factor,
         clip_norm=clip_norm,
         zero_nan_grads=True,
+        initial_values=initial_values,
     )
+    losses = res[0]
 
     calibrate_model(model)
 
@@ -329,15 +341,23 @@ def sample_abilities(num_people, dim=1, seed=42):
 
 
 def generate_synthetic_data(model, item_keys, response_cardinality,
-                            abilities=None, missingness_rate=0.0, seed=0):
+                            abilities=None, missingness_rate=0.0,
+                            missing_respondent_frac=0.4,
+                            seed=0):
     """Generate synthetic responses from a fitted NeuralGRModel or GRModel.
+
+    Missingness is applied only to a fraction of respondents. The remaining
+    respondents are fully observed.
 
     Args:
         model: A fitted IRT model with calibrated_expectations set.
         item_keys: List of item column names.
         response_cardinality: Number of response categories.
         abilities: Optional ability array to use. If None, uses model's calibrated.
-        missingness_rate: Fraction of responses to set missing (MCAR). Default 0.
+        missingness_rate: Fraction of responses to set missing (MCAR) for
+            respondents selected to have missing data. Default 0.
+        missing_respondent_frac: Fraction of respondents who have any missing
+            data. The rest are fully observed. Default 0.4.
         seed: Random seed for response sampling and missingness.
 
     Returns:
@@ -357,12 +377,18 @@ def generate_synthetic_data(model, item_keys, response_cardinality,
     for i, key in enumerate(item_keys):
         data_dict[key] = responses[:, i].astype(np.float64)
 
-    # Introduce MCAR missingness
+    # Introduce MCAR missingness for a subset of respondents
     if missingness_rate > 0:
         rng = np.random.default_rng(seed + 1000)
-        mask = rng.random((N, I)) < missingness_rate
+        # Select which respondents have missing data
+        n_missing_people = int(N * missing_respondent_frac)
+        missing_people = rng.choice(N, size=n_missing_people, replace=False)
+        # For selected respondents, each response is missing with prob missingness_rate
+        item_mask = rng.random((n_missing_people, I)) < missingness_rate
         for i, key in enumerate(item_keys):
-            data_dict[key] = np.where(mask[:, i], -1.0, data_dict[key])
+            vals = data_dict[key].copy()
+            vals[missing_people[item_mask[:, i]]] = -1.0
+            data_dict[key] = vals
 
     return data_dict
 

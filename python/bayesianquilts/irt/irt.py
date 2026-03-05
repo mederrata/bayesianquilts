@@ -413,9 +413,10 @@ class IRTModel(BayesianModel):
         else:
             effective_factory = batched_data_factory
 
-        losses, params = super().fit(
+        res = super().fit(
             effective_factory, initial_values=initial_values, **kwargs
         )
+        losses, params = res[0], res[1]
 
         if compute_elpd_loo:
             print("  Computing ELPD-LOO...")
@@ -423,4 +424,4 @@ class IRTModel(BayesianModel):
                 effective_factory, n_samples=elpd_loo_samples
             )
 
-        return losses, params
+        return res

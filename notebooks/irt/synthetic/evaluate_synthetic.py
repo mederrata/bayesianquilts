@@ -20,7 +20,8 @@ import pandas as pd
 
 
 def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
-                 batch_size=256, missingness_rate=0.2,
+                 batch_size=256, missingness_rate=0.25,
+                 missing_respondent_frac=0.4,
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
                  lr_decay_factor=0.9, clip_norm=1.0,
                  reload_neural_grm=False):
@@ -91,11 +92,14 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     print(f"  Range: [{true_abilities.min():.3f}, {true_abilities.max():.3f}]")
 
     # 4. Generate synthetic data from NeuralGRM item params + sampled abilities
-    print(f"\n--- Generating synthetic data (missingness={missingness_rate:.0%}) ---")
+    print(f"\n--- Generating synthetic data (missingness={missingness_rate:.0%} "
+          f"for {missing_respondent_frac:.0%} of respondents) ---")
     synth_data = generate_synthetic_data(
         neural_model, item_keys, response_cardinality,
         abilities=true_abilities,
-        missingness_rate=missingness_rate, seed=42,
+        missingness_rate=missingness_rate,
+        missing_respondent_frac=missing_respondent_frac,
+        seed=42,
     )
     n_bad = sum(
         np.sum(np.isnan(synth_data[k]) | (synth_data[k] < 0) | (synth_data[k] >= response_cardinality))
@@ -103,7 +107,15 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     )
     print(f"  Synthetic data: {num_people} people, {n_bad} missing values")
 
-    # 5. Fit imputation model on synthetic data
+    # 5. Count missingness stats
+    has_missing = np.zeros(num_people, dtype=bool)
+    for key in item_keys:
+        has_missing |= (synth_data[key] < 0)
+    n_fully_observed = int(np.sum(~has_missing))
+    print(f"  Fully observed respondents: {n_fully_observed}/{num_people} "
+          f"({n_fully_observed/num_people*100:.1f}%)")
+
+    # 6. Fit imputation model on full synthetic data (all respondents)
     print(f"\n--- Fitting MICEBayesianLOO on synthetic data ---")
     synth_df = pd.DataFrame({k: synth_data[k] for k in item_keys})
     synth_df = synth_df.replace(-1, np.nan)
@@ -119,7 +131,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     mice_loo.fit_loo_models(
         X_df=synth_df,
         n_top_features=min(len(item_keys), 40),
-        n_jobs=-1,
+        n_jobs=1,
         fit_zero_predictors=True,
         seed=42,
     )
@@ -130,18 +142,25 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     mice_loo.save_to_disk(output_dir / "imputation_model")
     print(f"  Imputation model saved ({len(mice_loo.univariate_results)} univariate models)")
 
-    # 6. Fit baseline GRM on synthetic data
-    print(f"\n--- Fitting baseline GRM on synthetic data ---")
-    baseline_model = fit_grm_baseline(
+    # 7. Fit baseline GRM on all data (no imputation — missing responses
+    #    are marginalized out, contributing 0 to the log-likelihood)
+    snapshot_epoch = 50  # save early checkpoint for warm-starting imputed model
+    print(f"\n--- Fitting baseline GRM on all data ({num_people} people, no imputation) ---")
+    baseline_model, snapshot_params = fit_grm_baseline(
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_baseline",
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
+        snapshot_epoch=snapshot_epoch,
     )
+    if snapshot_params is not None:
+        print(f"  Using baseline epoch-{snapshot_epoch} snapshot to warm-start imputed model")
+    else:
+        print(f"  Warning: no snapshot at epoch {snapshot_epoch} (baseline may have stopped earlier)")
 
-    # 7. Fit imputed GRM on synthetic data
-    print(f"\n--- Fitting imputed GRM on synthetic data ---")
+    # 8. Fit imputed GRM on all data (with imputation for missing)
+    print(f"\n--- Fitting imputed GRM on all data ({num_people} people, with imputation) ---")
     imputed_model = fit_grm_imputed(
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_imputed",
@@ -149,9 +168,10 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
+        initial_values=snapshot_params,
     )
 
-    # 8. Compare ability ordering preservation
+    # 9. Compare ability ordering preservation
     print(f"\n--- Comparing ability orderings ---")
     baseline_abilities = np.array(baseline_model.calibrated_expectations['abilities'])
     imputed_abilities = np.array(imputed_model.calibrated_expectations['abilities'])
@@ -176,9 +196,11 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     results = {
         'dataset': dataset_name,
         'num_people': num_people,
+        'num_fully_observed': n_fully_observed,
         'num_items': len(item_keys),
         'response_cardinality': response_cardinality,
         'missingness_rate': missingness_rate,
+        'missing_respondent_frac': missing_respondent_frac,
         'baseline': baseline_metrics,
         'imputed': imputed_metrics,
         'hyperparameters': {
@@ -207,7 +229,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         print(f"  Imputed  ELPD-LOO: {imputed_metrics['elpd_loo']:.2f} "
               f"(per obs: {imputed_metrics['elpd_loo_per_obs']:.4f})")
 
-    # 9. Generate plots
+    # 10. Generate plots
     print(f"\n--- Generating plots ---")
     make_comparison_plots(
         true_abilities, baseline_abilities, imputed_abilities,
@@ -248,8 +270,10 @@ def main():
     parser.add_argument("--grm-lr", type=float, default=None,
                         help="GRM learning rate (defaults to --lr if not set)")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
-    parser.add_argument("--missingness", type=float, default=0.2,
-                        help="MCAR missingness rate")
+    parser.add_argument("--missingness", type=float, default=0.25,
+                        help="MCAR missingness rate for selected respondents")
+    parser.add_argument("--missing-respondent-frac", type=float, default=0.4,
+                        help="Fraction of respondents with any missing data (default 0.4)")
     parser.add_argument("--dim", type=int, default=1, help="Latent dimension")
     parser.add_argument("--kappa-scale", type=float, default=0.5,
                         help="Kappa scale for horseshoe prior")
@@ -280,6 +304,7 @@ def main():
             grm_lr=args.grm_lr,
             batch_size=args.batch_size,
             missingness_rate=args.missingness,
+            missing_respondent_frac=args.missing_respondent_frac,
             dim=args.dim,
             kappa_scale=args.kappa_scale,
             eta_scale=args.eta_scale,

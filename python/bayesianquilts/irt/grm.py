@@ -442,7 +442,6 @@ class GRModel(IRTModel):
         # grm_model_prob already applies discrimination weighting and
         # reduces over the dimensions axis (-3), so response_probs is 4D
         response_probs = self.grm_model_prob(abilities, discriminations, difficulties)
-        imputed_lp = jnp.sum(xlogy(response_probs, response_probs), axis=-1)
 
         rv_responses = tfd.Categorical(probs=response_probs)
 
@@ -458,8 +457,10 @@ class GRModel(IRTModel):
             )  # (S, N, I)
             log_probs = jnp.where(bad_choices[jnp.newaxis, ...], rb, log_probs)
         else:
+            # Missing responses are marginalized out: sum_k p(k|theta) = 1,
+            # so they contribute log(1) = 0 to the log-likelihood.
             log_probs = jnp.where(
-                bad_choices[jnp.newaxis, ...], imputed_lp, log_probs
+                bad_choices[jnp.newaxis, ...], 0.0, log_probs
             )
 
         log_probs = jnp.sum(log_probs, axis=-1)
