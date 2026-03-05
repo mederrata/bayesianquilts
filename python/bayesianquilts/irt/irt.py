@@ -237,6 +237,10 @@ class IRTModel(BayesianModel):
         key = jax.random.PRNGKey(seed)
         samples = surrogate.sample(n_samples, seed=key)
 
+        # Reassemble factorized parameters if model has a transform method
+        if hasattr(self, 'transform'):
+            samples = self.transform(samples)
+
         log_lik_matrix = np.full(
             (n_samples, self.num_people), np.nan, dtype=np.float64
         )

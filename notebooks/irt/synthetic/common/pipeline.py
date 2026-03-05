@@ -264,8 +264,6 @@ def fit_grm_imputed(
         dtype=jnp.float64,
         imputation_model=imputation_model,
     )
-    model.validate_imputation_model()
-
     steps_per_epoch = int(np.ceil(num_people / batch_size))
     factory = make_data_factory(data_dict, batch_size, num_people)
 
