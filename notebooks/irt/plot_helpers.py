@@ -258,11 +258,12 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
                                         title='Imputation Model Weights'):
     """Pcolormesh visualization of imputation model weights.
 
-    For each target item i (row), the I+1 columns represent the full
+    For each target item i (row), the I+2 columns represent the full
     weight decomposition across all contributing models:
-      - (I-1) univariate MICE predictors (off-diagonal)
-      - 1 zero-predictor (intercept-only) MICE model (on the diagonal)
-      - 1 IRT model (rightmost column)
+      - I univariate MICE predictor columns (diagonal cell = 0, item
+        cannot predict itself)
+      - 1 zero-predictor (intercept-only) MICE model column
+      - 1 IRT model column
     Each row sums to 1.
 
     The MICE internal stacking weights (softmax over ELPDs) are scaled
@@ -275,10 +276,11 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
     """
     n_items = len(item_keys)
 
-    # Build weight matrix: (n_items, n_items + 1)
-    # Columns 0..n_items-1 = MICE models (off-diag: univariate, diag: zero-predictor)
-    # Column n_items = IRT weight
-    weight_matrix = np.zeros((n_items, n_items + 1))
+    # Build weight matrix: (n_items, n_items + 2)
+    # Columns 0..n_items-1 = univariate MICE predictors (diagonal = 0)
+    # Column n_items = zero-predictor (intercept-only)
+    # Column n_items+1 = IRT weight
+    weight_matrix = np.zeros((n_items, n_items + 2))
 
     for i, target_key in enumerate(item_keys):
         target_idx = i
@@ -314,39 +316,47 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
         exp_e = np.exp(all_elpds - max_e)
         softmax_w = exp_e / exp_e.sum()
 
-        # Diagonal: zero-predictor weight × w_mice
-        weight_matrix[i, i] = w_mice * softmax_w[0]
-
-        # Off-diagonal: univariate predictor weights × w_mice
+        # Univariate predictor weights × w_mice (diagonal stays 0)
         for k, j in enumerate(pred_indices):
             weight_matrix[i, j] = w_mice * softmax_w[k + 1]
 
-        # Rightmost column: IRT
-        weight_matrix[i, n_items] = w_irt
+        # Zero-predictor column
+        weight_matrix[i, n_items] = w_mice * softmax_w[0]
+
+        # IRT column
+        weight_matrix[i, n_items + 1] = w_irt
 
     # Create the plot
-    fig, ax = plt.subplots(figsize=(max(6, (n_items + 2) * 0.35),
+    n_cols = n_items + 2
+    fig, ax = plt.subplots(figsize=(max(6, n_cols * 0.35),
                                      max(4, n_items * 0.3)))
 
-    cmap = plt.cm.YlOrRd
-    norm = mcolors.Normalize(vmin=0, vmax=weight_matrix.max())
+    cmap = plt.cm.Greens
+    norm = mcolors.Normalize(vmin=0, vmax=1)
 
-    x_labels = list(item_keys) + ['IRT']
+    x_labels = list(item_keys) + ['Zero', 'IRT']
     im = ax.pcolormesh(weight_matrix, cmap=cmap, norm=norm, edgecolors='white',
                         linewidth=0.5)
 
-    ax.set_xticks(np.arange(n_items + 1) + 0.5)
+    ax.set_xticks(np.arange(n_cols) + 0.5)
     ax.set_xticklabels(x_labels, rotation=90,
                         fontsize=max(5, 8 - n_items // 20))
     ax.set_yticks(np.arange(n_items) + 0.5)
     ax.set_yticklabels(item_keys, fontsize=max(5, 8 - n_items // 20))
 
-    ax.set_xlabel('Predictor (MICE models) → IRT')
+    # Mark diagonal cells (item cannot predict itself)
+    for i in range(n_items):
+        ax.text(i + 0.5, i + 0.5, '×', ha='center', va='center',
+                fontsize=max(6, 10 - n_items // 15), color='red',
+                fontweight='bold')
+
+    ax.set_xlabel('Predictor')
     ax.set_ylabel('Target variable')
     ax.set_title(title, fontsize=11)
 
-    # Vertical line separating MICE columns from IRT column
+    # Vertical lines separating sections
     ax.axvline(x=n_items, color='black', linewidth=1.5)
+    ax.axvline(x=n_items + 1, color='black', linewidth=1.5)
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label('Weight', fontsize=9)
