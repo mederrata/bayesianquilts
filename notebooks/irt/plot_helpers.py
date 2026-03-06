@@ -334,7 +334,7 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
     cmap = plt.cm.Greens
     norm = mcolors.Normalize(vmin=0, vmax=1)
 
-    x_labels = list(item_keys) + ['Zero', 'IRT']
+    x_labels = list(item_keys) + ['Intercept\nonly', 'IRT']
     im = ax.pcolormesh(weight_matrix, cmap=cmap, norm=norm, edgecolors='white',
                         linewidth=0.5)
 
@@ -349,6 +349,13 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
         ax.text(i + 0.5, i + 0.5, '×', ha='center', va='center',
                 fontsize=max(6, 10 - n_items // 15), color='red',
                 fontweight='bold')
+
+    # Annotate IRT column with weight values rounded to 2 decimal places
+    irt_col = n_items + 1
+    for i in range(n_items):
+        val = weight_matrix[i, irt_col]
+        ax.text(irt_col + 0.5, i + 0.5, f'{val:.2f}', ha='center', va='center',
+                fontsize=max(5, 7 - n_items // 20), color='white' if val > 0.5 else 'black')
 
     ax.set_xlabel('Predictor')
     ax.set_ylabel('Target variable')
