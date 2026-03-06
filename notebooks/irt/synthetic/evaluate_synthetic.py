@@ -141,7 +141,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     for idx in range(len(item_keys)):
         vtype = 'binary' if response_cardinality == 2 else 'ordinal'
         mice_loo.variable_types[idx] = vtype
-    mice_loo.save_to_disk(output_dir / "imputation_model")
+    mice_loo.save(str(output_dir / "mice_loo_model.yaml"))
     print(f"  Imputation model saved ({len(mice_loo.univariate_results)} univariate models)")
 
     # 7. Fit baseline GRM on all data (no imputation — missing responses
@@ -161,7 +161,19 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     else:
         print(f"  Warning: no snapshot at epoch {snapshot_epoch} (baseline may have stopped earlier)")
 
-    # 8. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
+    # 8. Fit MICE-only GRM (imputation from MICE alone, no IRT blending)
+    print(f"\n--- Fitting MICE-only GRM on all data ({num_people} people) ---")
+    mice_only_model = fit_grm_imputed(
+        synth_data, item_keys, response_cardinality, num_people,
+        save_dir=output_dir / "grm_mice_only",
+        imputation_model=mice_loo,
+        dim=dim, batch_size=batch_size, num_epochs=epochs,
+        learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
+        lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
+        initial_values=snapshot_params,
+    )
+
+    # 9. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
     print(f"\n--- Building IrtMixedImputationModel ---")
     factory = make_data_factory(synth_data, batch_size, num_people)
     mixed_imputation = IrtMixedImputationModel(
@@ -172,8 +184,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     )
     print(mixed_imputation.summary())
 
-    # 9. Fit imputed GRM on all data (with mixed imputation for missing)
-    print(f"\n--- Fitting imputed GRM on all data ({num_people} people, with mixed imputation) ---")
+    # 10. Fit mixed-imputed GRM on all data
+    print(f"\n--- Fitting mixed-imputed GRM on all data ({num_people} people) ---")
     imputed_model = fit_grm_imputed(
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_imputed",
@@ -184,27 +196,15 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         initial_values=snapshot_params,
     )
 
-    # 10. Compare ability ordering preservation
+    # 11. Compare ability ordering preservation
     print(f"\n--- Comparing ability orderings ---")
     baseline_abilities = np.array(baseline_model.calibrated_expectations['abilities'])
+    mice_only_abilities = np.array(mice_only_model.calibrated_expectations['abilities'])
     imputed_abilities = np.array(imputed_model.calibrated_expectations['abilities'])
 
     baseline_metrics = compare_ability_ordering(true_abilities, baseline_abilities)
+    mice_only_metrics = compare_ability_ordering(true_abilities, mice_only_abilities)
     imputed_metrics = compare_ability_ordering(true_abilities, imputed_abilities)
-
-    # Add ELPD-LOO metrics from the fitted models
-    for label, model_obj, metrics in [
-        ('baseline', baseline_model, baseline_metrics),
-        ('imputed', imputed_model, imputed_metrics),
-    ]:
-        if hasattr(model_obj, 'elpd_loo'):
-            metrics['elpd_loo'] = model_obj.elpd_loo
-            metrics['elpd_loo_se'] = model_obj.elpd_loo_se
-            metrics['elpd_loo_per_obs'] = model_obj.elpd_loo_per_obs
-            metrics['elpd_loo_se_per_obs'] = model_obj.elpd_loo_se_per_obs
-            metrics['elpd_loo_n_obs'] = model_obj.elpd_loo_n_obs
-            metrics['elpd_loo_khat_max'] = float(np.max(model_obj.elpd_loo_khat))
-            metrics['elpd_loo_khat_mean'] = float(np.mean(model_obj.elpd_loo_khat))
 
     results = {
         'dataset': dataset_name,
@@ -215,6 +215,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         'missingness_rate': missingness_rate,
         'missing_respondent_frac': missing_respondent_frac,
         'baseline': baseline_metrics,
+        'mice_only': mice_only_metrics,
         'imputed': imputed_metrics,
         'hyperparameters': {
             'epochs': epochs,
@@ -230,23 +231,21 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         },
     }
 
-    print(f"\n  Baseline:  Spearman r = {baseline_metrics['spearman_r']:.4f}, "
+    print(f"\n  Baseline:   Spearman r = {baseline_metrics['spearman_r']:.4f}, "
           f"Kendall tau = {baseline_metrics['kendall_tau']:.4f}, "
           f"RMSE = {baseline_metrics['rmse']:.4f}")
-    print(f"  Imputed:   Spearman r = {imputed_metrics['spearman_r']:.4f}, "
+    print(f"  MICE-only:  Spearman r = {mice_only_metrics['spearman_r']:.4f}, "
+          f"Kendall tau = {mice_only_metrics['kendall_tau']:.4f}, "
+          f"RMSE = {mice_only_metrics['rmse']:.4f}")
+    print(f"  Mixed:      Spearman r = {imputed_metrics['spearman_r']:.4f}, "
           f"Kendall tau = {imputed_metrics['kendall_tau']:.4f}, "
           f"RMSE = {imputed_metrics['rmse']:.4f}")
-    if 'elpd_loo' in baseline_metrics:
-        print(f"  Baseline ELPD-LOO: {baseline_metrics['elpd_loo']:.2f} "
-              f"(per obs: {baseline_metrics['elpd_loo_per_obs']:.4f})")
-        print(f"  Imputed  ELPD-LOO: {imputed_metrics['elpd_loo']:.2f} "
-              f"(per obs: {imputed_metrics['elpd_loo_per_obs']:.4f})")
 
-    # 10. Generate plots
+    # 12. Generate plots
     print(f"\n--- Generating plots ---")
     make_comparison_plots(
-        true_abilities, baseline_abilities, imputed_abilities,
-        dataset_name, output_dir / "plots",
+        true_abilities, baseline_abilities, mice_only_abilities,
+        imputed_abilities, dataset_name, output_dir / "plots",
     )
 
     # Save results JSON
@@ -259,6 +258,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         output_dir / 'abilities.npz',
         true=true_abilities,
         baseline=baseline_abilities,
+        mice_only=mice_only_abilities,
         imputed=imputed_abilities,
     )
     print(f"Abilities saved to {output_dir / 'abilities.npz'}")
@@ -293,8 +293,8 @@ def main():
     parser.add_argument("--eta-scale", type=float, default=0.1,
                         help="Eta scale for horseshoe prior (local shrinkage)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
-    parser.add_argument("--lr-decay-factor", type=float, default=0.9,
-                        help="LR decay factor on plateau (default 0.9)")
+    parser.add_argument("--lr-decay-factor", type=float, default=0.975,
+                        help="LR decay factor on plateau (default 0.975)")
     parser.add_argument("--clip-norm", type=float, default=1.0,
                         help="Gradient clipping norm (default 1.0)")
     parser.add_argument("--reload-neural-grm", action="store_true",
@@ -330,24 +330,20 @@ def main():
 
     # Summary table
     if len(all_results) > 1:
-        has_elpd = 'elpd_loo_per_obs' in next(iter(all_results.values()))['baseline']
-        print(f"\n{'='*90}")
+        print(f"\n{'='*100}")
         print("SUMMARY")
-        print(f"{'='*90}")
-        header = (f"{'Dataset':<10} {'Base Spearman':>14} {'Imp Spearman':>14} "
-                  f"{'Base RMSE':>10} {'Imp RMSE':>10}")
-        if has_elpd:
-            header += f" {'Base ELPD/n':>12} {'Imp ELPD/n':>12}"
+        print(f"{'='*100}")
+        header = (f"{'Dataset':<10} {'Base ρ':>10} {'MICE ρ':>10} {'Mixed ρ':>10} "
+                  f"{'Base RMSE':>10} {'MICE RMSE':>10} {'Mixed RMSE':>10}")
         print(header)
-        print("-" * 90)
+        print("-" * 100)
         for ds, r in all_results.items():
-            line = (f"{ds:<10} {r['baseline']['spearman_r']:>14.4f} "
-                    f"{r['imputed']['spearman_r']:>14.4f} "
+            line = (f"{ds:<10} {r['baseline']['spearman_r']:>10.4f} "
+                    f"{r['mice_only']['spearman_r']:>10.4f} "
+                    f"{r['imputed']['spearman_r']:>10.4f} "
                     f"{r['baseline']['rmse']:>10.4f} "
+                    f"{r['mice_only']['rmse']:>10.4f} "
                     f"{r['imputed']['rmse']:>10.4f}")
-            if has_elpd:
-                line += (f" {r['baseline']['elpd_loo_per_obs']:>12.4f}"
-                         f" {r['imputed']['elpd_loo_per_obs']:>12.4f}")
             print(line)
 
         # Save combined results

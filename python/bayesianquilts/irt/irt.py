@@ -230,12 +230,21 @@ class IRTModel(BayesianModel):
                     if not (np.isnan(val) or val < 0 or val >= K):
                         observed_items[other_key] = val
 
+                # Pass person index if available (for IRT baseline PMFs)
+                person_idx = None
+                if self.person_key in batch:
+                    person_idx = int(batch[self.person_key][row_idx])
+
                 try:
+                    kwargs = {}
+                    if person_idx is not None:
+                        kwargs['person_idx'] = person_idx
                     pmf = self.imputation_model.predict_pmf(
                         observed_items, target=item_key, n_categories=K,
+                        **kwargs,
                     )
                     pmfs[row_idx, i, :] = pmf
-                except (ValueError, KeyError, AttributeError):
+                except (ValueError, KeyError, AttributeError, TypeError):
                     pmfs[row_idx, i, :] = 1.0 / K
 
         return pmfs

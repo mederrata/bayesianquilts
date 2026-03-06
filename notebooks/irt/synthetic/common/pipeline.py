@@ -427,19 +427,39 @@ def compare_ability_ordering(true_abilities, estimated_abilities):
 # Plotting
 # -------------------------------------------------------------------------
 
-def make_comparison_plots(true_abilities, baseline_abilities, imputed_abilities,
+def _set_tufte_style(ax):
+    """Apply Tufte-style formatting: minimal ink, no chartjunk."""
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(direction='out', length=3, width=0.5)
+    ax.spines['left'].set_linewidth(0.5)
+    ax.spines['bottom'].set_linewidth(0.5)
+
+
+# Consistent colors across all synthetic plots
+COLORS = {
+    'true': '#222222',
+    'baseline': '#4477AA',
+    'mice_only': '#228833',
+    'mixed': '#EE6677',
+}
+
+
+def make_comparison_plots(true_abilities, baseline_abilities,
+                          mice_only_abilities, imputed_abilities,
                           dataset_name, save_dir):
-    """Generate comparison plots between true and estimated abilities.
+    """Generate Tufte-style comparison plots for 3 conditions.
 
     Produces:
-    - Scatter plots of true vs estimated abilities
-    - Rank correlation bar chart
-    - Ability distribution histograms
+    - Scatter plots of true vs estimated abilities (3 panels)
+    - Dot plot of rank correlation metrics (replaces bar chart)
+    - Step histograms of ability distributions
 
     Args:
         true_abilities: Array of true ability values.
         baseline_abilities: Abilities from baseline GRM.
-        imputed_abilities: Abilities from imputed GRM.
+        mice_only_abilities: Abilities from MICE-only GRM.
+        imputed_abilities: Abilities from mixed-imputed GRM.
         dataset_name: Name of the dataset (for titles).
         save_dir: Directory to save plot files.
     """
@@ -448,86 +468,83 @@ def make_comparison_plots(true_abilities, baseline_abilities, imputed_abilities,
 
     true_flat = np.array(true_abilities).flatten()
     base_flat = np.array(baseline_abilities).flatten()
+    mice_flat = np.array(mice_only_abilities).flatten()
     imp_flat = np.array(imputed_abilities).flatten()
 
-    # 1. Scatter plots
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    ax = axes[0]
-    ax.scatter(true_flat, base_flat, alpha=0.2, s=8, edgecolors='none')
-    lims = [
-        min(true_flat.min(), base_flat.min()),
-        max(true_flat.max(), base_flat.max()),
+    # 1. Scatter plots — 3 panels
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    conditions = [
+        ('Baseline (ignorable)', base_flat, COLORS['baseline']),
+        ('MICE-only', mice_flat, COLORS['mice_only']),
+        ('Mixed (MICE + IRT)', imp_flat, COLORS['mixed']),
     ]
-    ax.plot(lims, lims, 'k--', alpha=0.5, label='y = x')
-    rho = stats.spearmanr(true_flat, base_flat).statistic
-    ax.set_xlabel('True Ability')
-    ax.set_ylabel('Estimated Ability')
-    ax.set_title(f'Baseline GRM (Spearman r = {rho:.3f})')
-    ax.legend()
+    for ax, (label, est_flat, color) in zip(axes, conditions):
+        ax.scatter(true_flat, est_flat, alpha=0.15, s=6, edgecolors='none',
+                   color=color)
+        lims = [min(true_flat.min(), est_flat.min()),
+                max(true_flat.max(), est_flat.max())]
+        ax.plot(lims, lims, 'k--', alpha=0.4, linewidth=0.5)
+        rho = stats.spearmanr(true_flat, est_flat).statistic
+        ax.set_xlabel('True ability')
+        ax.set_ylabel('Estimated ability')
+        ax.set_title(f'{label} (ρ = {rho:.3f})', fontsize=10)
+        ax.set_aspect('equal')
+        _set_tufte_style(ax)
 
-    ax = axes[1]
-    ax.scatter(true_flat, imp_flat, alpha=0.2, s=8, edgecolors='none')
-    lims = [
-        min(true_flat.min(), imp_flat.min()),
-        max(true_flat.max(), imp_flat.max()),
-    ]
-    ax.plot(lims, lims, 'k--', alpha=0.5, label='y = x')
-    rho = stats.spearmanr(true_flat, imp_flat).statistic
-    ax.set_xlabel('True Ability')
-    ax.set_ylabel('Estimated Ability')
-    ax.set_title(f'Imputed GRM (Spearman r = {rho:.3f})')
-    ax.legend()
-
-    fig.suptitle(f'{dataset_name.upper()} — True vs Estimated Abilities', fontsize=14)
+    fig.suptitle(f'{dataset_name.upper()} — True vs Estimated Abilities',
+                 fontsize=12, y=1.02)
     plt.tight_layout()
-    fig.savefig(save_dir / 'scatter_abilities.png', dpi=150, bbox_inches='tight')
+    fig.savefig(save_dir / 'scatter_abilities.pdf', dpi=150, bbox_inches='tight')
     plt.close(fig)
 
-    # 2. Rank correlation bar chart
-    base_metrics = compare_ability_ordering(true_flat, base_flat)
-    imp_metrics = compare_ability_ordering(true_flat, imp_flat)
+    # 2. Dot plot of metrics (high data-ink ratio, no bar chart)
+    base_m = compare_ability_ordering(true_flat, base_flat)
+    mice_m = compare_ability_ordering(true_flat, mice_flat)
+    imp_m = compare_ability_ordering(true_flat, imp_flat)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    x = np.arange(3)
-    width = 0.35
-    metric_names = ['Spearman r', 'Kendall tau', '1 - RMSE']
-    base_vals = [
-        base_metrics['spearman_r'],
-        base_metrics['kendall_tau'],
-        max(0, 1 - base_metrics['rmse']),
-    ]
-    imp_vals = [
-        imp_metrics['spearman_r'],
-        imp_metrics['kendall_tau'],
-        max(0, 1 - imp_metrics['rmse']),
-    ]
-    ax.bar(x - width / 2, base_vals, width, label='Baseline', color='tab:blue', alpha=0.8)
-    ax.bar(x + width / 2, imp_vals, width, label='Imputed', color='tab:orange', alpha=0.8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(metric_names)
-    ax.set_ylabel('Value')
-    ax.set_title(f'{dataset_name.upper()} — Ability Ordering Metrics')
-    ax.legend()
-    ax.set_ylim(0, 1.1)
+    metric_names = ['Spearman ρ', 'Kendall τ', '1 − RMSE']
+    y_pos = np.arange(len(metric_names))
+
+    fig, ax = plt.subplots(figsize=(6, 3))
+    offset = 0.12
+    for i, (label, m, color, marker) in enumerate([
+        ('Baseline', base_m, COLORS['baseline'], 'o'),
+        ('MICE-only', mice_m, COLORS['mice_only'], 's'),
+        ('Mixed', imp_m, COLORS['mixed'], 'D'),
+    ]):
+        vals = [m['spearman_r'], m['kendall_tau'], max(0, 1 - m['rmse'])]
+        ax.scatter(vals, y_pos + (i - 1) * offset, marker=marker, s=40,
+                   color=color, zorder=3, label=label, alpha=0.85)
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(metric_names)
+    ax.set_xlabel('Value')
+    ax.set_title(f'{dataset_name.upper()} — Ability Ordering Metrics', fontsize=11)
+    ax.legend(frameon=False, fontsize=8, loc='lower right')
+    ax.invert_yaxis()
+    ax.axvline(x=1.0, color='gray', linestyle=':', alpha=0.3, linewidth=0.5)
+    _set_tufte_style(ax)
     plt.tight_layout()
-    fig.savefig(save_dir / 'metric_comparison.png', dpi=150, bbox_inches='tight')
+    fig.savefig(save_dir / 'metric_comparison.pdf', dpi=150, bbox_inches='tight')
     plt.close(fig)
 
-    # 3. Ability distribution histograms
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(true_flat, bins=40, histtype='step', linewidth=2,
-            label='True', color='black')
-    ax.hist(base_flat, bins=40, histtype='step', linewidth=2,
-            label='Baseline', color='tab:blue')
-    ax.hist(imp_flat, bins=40, histtype='step', linewidth=2,
-            label='Imputed', color='tab:orange')
+    # 3. Ability distribution step histograms
+    fig, ax = plt.subplots(figsize=(7, 3.5))
+    ax.hist(true_flat, bins=40, histtype='step', linewidth=1.5,
+            label='True', color=COLORS['true'])
+    ax.hist(base_flat, bins=40, histtype='step', linewidth=1.2,
+            label='Baseline', color=COLORS['baseline'])
+    ax.hist(mice_flat, bins=40, histtype='step', linewidth=1.2,
+            label='MICE-only', color=COLORS['mice_only'])
+    ax.hist(imp_flat, bins=40, histtype='step', linewidth=1.2,
+            label='Mixed', color=COLORS['mixed'])
     ax.set_xlabel('Ability')
     ax.set_ylabel('Count')
-    ax.set_title(f'{dataset_name.upper()} — Ability Distributions')
-    ax.legend()
+    ax.set_title(f'{dataset_name.upper()} — Ability Distributions', fontsize=11)
+    ax.legend(frameon=False, fontsize=8)
+    _set_tufte_style(ax)
     plt.tight_layout()
-    fig.savefig(save_dir / 'ability_distributions.png', dpi=150, bbox_inches='tight')
+    fig.savefig(save_dir / 'ability_distributions.pdf', dpi=150, bbox_inches='tight')
     plt.close(fig)
 
     print(f"Plots saved to {save_dir}")

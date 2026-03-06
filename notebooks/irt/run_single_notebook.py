@@ -61,16 +61,28 @@ def make_data_dict(dataframe):
 
 
 def calibrate_manually(model, n_samples=32, seed=42):
-    surrogate = model.surrogate_distribution_generator(model.params)
-    key = jax.random.PRNGKey(seed)
-    samples = surrogate.sample(n_samples, seed=key)
-    expectations = {k: jnp.mean(v, axis=0) for k, v in samples.items()}
-    model.calibrated_expectations = expectations
-    model.surrogate_sample = samples
+    try:
+        surrogate = model.surrogate_distribution_generator(model.params)
+        key = jax.random.PRNGKey(seed)
+        samples = surrogate.sample(n_samples, seed=key)
+        expectations = {k: jnp.mean(v, axis=0) for k, v in samples.items()}
+        model.calibrated_expectations = expectations
+        model.surrogate_sample = samples
+    except KeyError as e:
+        print(f"  Warning: surrogate sampling failed ({e}), using point estimates")
+        point_estimates = {}
+        for key_name, value in model.params.items():
+            parts = key_name.split('\\')
+            if len(parts) >= 4:
+                param_name = parts[0]
+                if parts[-2] == 'normal' and parts[-1] == 'loc':
+                    point_estimates[param_name] = value
+        model.calibrated_expectations = point_estimates
 
 
 def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
-                num_epochs=200, batch_size=256, learning_rate=2e-4):
+                num_epochs=200, batch_size=256, learning_rate=2e-4,
+                lr_decay_factor=0.975):
     import importlib
     from pathlib import Path
 
@@ -136,6 +148,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
             num_epochs=num_epochs,
             steps_per_epoch=steps_per_epoch,
             learning_rate=learning_rate,
+            lr_decay_factor=lr_decay_factor,
             patience=10,
             zero_nan_grads=True,
             snapshot_epoch=SNAPSHOT_EPOCH,
@@ -194,6 +207,13 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     )
     print(mixed_imputation.summary())
 
+    # Save mixed weights as JSON for gofluttercat export
+    import json
+    weights_path = work_dir / 'mixed_weights.json'
+    with open(weights_path, 'w') as f:
+        json.dump(mixed_imputation.weights, f, indent=2)
+    print(f"Saved mixed weights to {weights_path}")
+
     gc.collect()
 
     # ---- Stage 4: Imputed GRM ----
@@ -218,6 +238,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         num_epochs=num_epochs,
         steps_per_epoch=steps_per_epoch,
         learning_rate=learning_rate,
+        lr_decay_factor=lr_decay_factor,
         patience=10,
         zero_nan_grads=True,
         initial_values=snapshot_params,
@@ -243,6 +264,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--lr', type=float, default=2e-4)
+    parser.add_argument('--lr-decay-factor', type=float, default=0.975)
     args = parser.parse_args()
 
     work_dir = os.path.join(
@@ -258,6 +280,7 @@ def main():
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        lr_decay_factor=args.lr_decay_factor,
     )
 
 

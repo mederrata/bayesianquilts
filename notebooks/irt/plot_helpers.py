@@ -156,8 +156,11 @@ def plot_thresholds(item_keys, model_baseline, model_imputed, title=None):
     """Panel plot of difficulty thresholds per level."""
     def _compute_thresholds(model):
         diff0 = np.array(model.surrogate_sample['difficulties0'])
-        ddiff = np.array(model.surrogate_sample['ddifficulties'])
-        d0 = np.concatenate([diff0, ddiff], axis=-1)
+        if 'ddifficulties' in model.surrogate_sample:
+            ddiff = np.array(model.surrogate_sample['ddifficulties'])
+            d0 = np.concatenate([diff0, ddiff], axis=-1)
+        else:
+            d0 = diff0
         thresholds = np.cumsum(d0, axis=-1)
         n_samples = thresholds.shape[0]
         n_thresholds = thresholds.size // (n_samples * len(item_keys))
@@ -255,9 +258,15 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
                                         title='Imputation Model Weights'):
     """Pcolormesh visualization of imputation model weights.
 
-    Y-axis: variable being predicted
-    X-axis: predictor item (MICE models) + rightmost column for IRT model
-    Color: model weight contribution
+    For each target item i (row), the I+1 columns represent the full
+    weight decomposition across all contributing models:
+      - (I-1) univariate MICE predictors (off-diagonal)
+      - 1 zero-predictor (intercept-only) MICE model (on the diagonal)
+      - 1 IRT model (rightmost column)
+    Each row sums to 1.
+
+    The MICE internal stacking weights (softmax over ELPDs) are scaled
+    by w_mice, and the IRT column gets (1 - w_mice).
 
     Args:
         mice_model: Fitted MICEBayesianLOO model
@@ -267,19 +276,25 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
     n_items = len(item_keys)
 
     # Build weight matrix: (n_items, n_items + 1)
-    # Columns 0..n_items-1 = MICE predictor weights
+    # Columns 0..n_items-1 = MICE models (off-diag: univariate, diag: zero-predictor)
     # Column n_items = IRT weight
     weight_matrix = np.zeros((n_items, n_items + 1))
 
-    # For each target variable, compute MICE predictor weights
     for i, target_key in enumerate(item_keys):
         target_idx = i
 
-        # Get the MICE weight for this item from the mixed model
         w_mice = mixed_model._weights.get(target_key, 0.5)
         w_irt = 1.0 - w_mice
 
-        # Get ELPD values for each predictor to compute relative predictor weights
+        # Collect ELPDs for all MICE sub-models predicting this target
+        # Zero-predictor
+        if target_idx in mice_model.zero_predictor_results:
+            zp = mice_model.zero_predictor_results[target_idx]
+            zero_elpd = zp.elpd_loo_per_obs if zp.converged else -np.inf
+        else:
+            zero_elpd = -np.inf
+
+        # Univariate predictors
         predictor_elpds = {}
         for j in range(n_items):
             if i == j:
@@ -290,53 +305,36 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
                 if result.converged:
                     predictor_elpds[j] = result.elpd_loo_per_obs
 
-        # Add zero-predictor baseline
-        if target_idx in mice_model.zero_predictor_results:
-            zp = mice_model.zero_predictor_results[target_idx]
-            if zp.converged:
-                zero_elpd = zp.elpd_loo_per_obs
-            else:
-                zero_elpd = -np.inf
-        else:
-            zero_elpd = -np.inf
+        # Softmax stacking weights over zero-predictor + univariate models
+        pred_indices = list(predictor_elpds.keys())
+        elpd_vals = np.array([predictor_elpds[j] for j in pred_indices])
+        all_elpds = np.concatenate([[zero_elpd], elpd_vals])
 
-        # Compute softmax weights over predictors (within MICE)
-        if predictor_elpds:
-            elpd_vals = np.array(list(predictor_elpds.values()))
-            pred_indices = list(predictor_elpds.keys())
+        max_e = np.max(all_elpds) if len(all_elpds) > 0 else 0.0
+        exp_e = np.exp(all_elpds - max_e)
+        softmax_w = exp_e / exp_e.sum()
 
-            # Include zero-predictor as baseline
-            all_elpds = np.concatenate([[zero_elpd], elpd_vals])
+        # Diagonal: zero-predictor weight × w_mice
+        weight_matrix[i, i] = w_mice * softmax_w[0]
 
-            # Softmax for numerical stability
-            max_e = np.max(all_elpds)
-            exp_e = np.exp(all_elpds - max_e)
-            softmax_w = exp_e / exp_e.sum()
+        # Off-diagonal: univariate predictor weights × w_mice
+        for k, j in enumerate(pred_indices):
+            weight_matrix[i, j] = w_mice * softmax_w[k + 1]
 
-            # softmax_w[0] is the zero-predictor weight (not shown separately)
-            # Distribute the total MICE weight among predictors
-            for k, j in enumerate(pred_indices):
-                # Weight = (mice total weight) * (predictor's share)
-                weight_matrix[i, j] = w_mice * softmax_w[k + 1]
-
-        # IRT weight in the last column
+        # Rightmost column: IRT
         weight_matrix[i, n_items] = w_irt
 
     # Create the plot
     fig, ax = plt.subplots(figsize=(max(6, (n_items + 2) * 0.35),
                                      max(4, n_items * 0.3)))
 
-    # Use a diverging colormap centered on meaningful values
-    # Sequential is better here since weights are 0-1
     cmap = plt.cm.YlOrRd
     norm = mcolors.Normalize(vmin=0, vmax=weight_matrix.max())
 
-    # pcolormesh
     x_labels = list(item_keys) + ['IRT']
     im = ax.pcolormesh(weight_matrix, cmap=cmap, norm=norm, edgecolors='white',
                         linewidth=0.5)
 
-    # Axis labels
     ax.set_xticks(np.arange(n_items + 1) + 0.5)
     ax.set_xticklabels(x_labels, rotation=90,
                         fontsize=max(5, 8 - n_items // 20))
@@ -347,19 +345,12 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
     ax.set_ylabel('Target variable')
     ax.set_title(title, fontsize=11)
 
-    # Add a vertical line before the IRT column
+    # Vertical line separating MICE columns from IRT column
     ax.axvline(x=n_items, color='black', linewidth=1.5)
 
-    # Colorbar
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label('Weight', fontsize=9)
     cbar.ax.tick_params(labelsize=8)
-
-    # Mask diagonal (self-prediction)
-    for i in range(n_items):
-        ax.add_patch(plt.Rectangle((i, i), 1, 1, fill=True,
-                                    facecolor='lightgray', edgecolor='white',
-                                    linewidth=0.5))
 
     _set_tufte_style(ax)
     plt.tight_layout()

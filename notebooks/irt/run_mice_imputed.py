@@ -63,7 +63,8 @@ def calibrate_manually(model, n_samples=32, seed=42):
 
 
 def run_mice_imputed(dataset_name, work_dir, skip_mice=False,
-                     num_epochs=200, batch_size=256, learning_rate=2e-4):
+                     num_epochs=200, batch_size=256, learning_rate=2e-4,
+                     lr_decay_factor=0.975):
     import importlib
     from pathlib import Path
     from bayesianquilts.irt.grm import GRModel
@@ -180,6 +181,7 @@ def run_mice_imputed(dataset_name, work_dir, skip_mice=False,
         num_epochs=num_epochs,
         steps_per_epoch=steps_per_epoch,
         learning_rate=learning_rate,
+        lr_decay_factor=lr_decay_factor,
         patience=10,
         zero_nan_grads=True,
     )
@@ -199,6 +201,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--lr', type=float, default=2e-4)
+    parser.add_argument('--lr-decay-factor', type=float, default=0.975)
     args = parser.parse_args()
 
     work_dir = os.path.join(
@@ -211,6 +214,7 @@ def main():
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        lr_decay_factor=args.lr_decay_factor,
     )
 
 

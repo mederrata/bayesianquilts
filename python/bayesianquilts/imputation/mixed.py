@@ -70,6 +70,7 @@ class IrtMixedImputationModel:
         self._compute_irt_elpd(data_factory, batch_size=irt_elpd_batch_size)
         self._compute_mice_elpd()
         self._compute_weights()
+        self._precompute_irt_pmfs()
 
     # ------------------------------------------------------------------
     # ELPD computation
@@ -107,7 +108,7 @@ class IrtMixedImputationModel:
 
         disc_all = np.asarray(samples["discriminations"])    # (S, ...)
         diff0_all = np.asarray(samples["difficulties0"])     # (S, ...)
-        ddiff_all = np.asarray(samples["ddifficulties"])     # (S, ...)
+        ddiff_all = np.asarray(samples["ddifficulties"]) if "ddifficulties" in samples else None
         abil_all = np.asarray(samples["abilities"])          # (S, ...)
         S = disc_all.shape[0]
 
@@ -137,7 +138,7 @@ class IrtMixedImputationModel:
 
                 disc_chunk = jnp.asarray(disc_all[s_start:s_end])
                 diff0_chunk = jnp.asarray(diff0_all[s_start:s_end])
-                ddiff_chunk = jnp.asarray(ddiff_all[s_start:s_end])
+                ddiff_chunk = jnp.asarray(ddiff_all[s_start:s_end]) if ddiff_all is not None else None
                 abil_chunk = jnp.asarray(abil_all[s_start:s_end])
 
                 abil_people = abil_chunk[:, people, ...]
@@ -219,6 +220,40 @@ class IrtMixedImputationModel:
             else:
                 self._mice_elpd_per_item[item_key] = -np.inf
 
+    def _precompute_irt_pmfs(self):
+        """Precompute IRT baseline PMFs for all people and items.
+
+        Uses the fitted baseline model's posterior mean parameters and
+        fitted abilities to compute P(Y_i = k | θ_n, item_params) for
+        every (person, item) pair.  Stored as ``_irt_pmf_matrix`` of
+        shape (N, I, K).
+        """
+        model = self.irt_model
+        samples = model.surrogate_sample
+        item_keys = model.item_keys
+        K = model.response_cardinality
+
+        if hasattr(model, 'transform') and 'discriminations' not in samples:
+            samples = model.transform(dict(samples))
+
+        # Use posterior means (point estimates)
+        disc = np.asarray(samples["discriminations"]).mean(0)
+        diff0 = np.asarray(samples["difficulties0"]).mean(0)
+        ddiff = np.asarray(samples["ddifficulties"]).mean(0) if "ddifficulties" in samples else None
+        abil = np.asarray(samples["abilities"]).mean(0)
+
+        # Compute probabilities: forward pass through GRM
+        probs = np.asarray(model.grm_model_prob_d(
+            jnp.asarray(abil[np.newaxis]),
+            jnp.asarray(disc[np.newaxis]),
+            jnp.asarray(diff0[np.newaxis]),
+            jnp.asarray(ddiff[np.newaxis]) if ddiff is not None else None,
+        ))  # (1, N, I, K)
+        self._irt_pmf_matrix = probs[0]  # (N, I, K)
+
+        # Build item name → index mapping
+        self._item_to_idx = {k: i for i, k in enumerate(item_keys)}
+
     def _compute_weights(self):
         """Compute per-item mixing weight w_i for MICE vs IRT.
 
@@ -226,7 +261,7 @@ class IrtMixedImputationModel:
             w_mice = exp(elpd_mice) / (exp(elpd_mice) + exp(elpd_irt))
 
         When w_mice is high, we trust the MICE imputation.
-        When w_mice is low, we fall back toward uniform (ignorable).
+        When w_mice is low, we fall back toward the IRT baseline prediction.
         """
         for item_key in self.irt_model.item_keys:
             elpd_irt = self._irt_elpd_per_item.get(item_key, -np.inf)
@@ -261,11 +296,13 @@ class IrtMixedImputationModel:
         target: str,
         n_categories: int,
         uncertainty_penalty: Optional[float] = None,
+        person_idx: Optional[int] = None,
     ) -> np.ndarray:
         """Return a blended PMF for a missing cell.
 
-        Mixes the MICE PMF with a uniform (ignorable) PMF using the
-        per-item weight.
+        Mixes the MICE PMF with the baseline IRT model's predicted PMF
+        using the per-item weight:
+            PMF = w_mice * MICE(k) + (1 - w_mice) * IRT_baseline(k)
 
         Parameters
         ----------
@@ -277,6 +314,11 @@ class IrtMixedImputationModel:
             Number of response categories.
         uncertainty_penalty : float, optional
             Override the instance-level penalty for MICE stacking.
+        person_idx : int, optional
+            Index of the person in the training data.  When provided,
+            uses the baseline IRT model's pre-fitted prediction for
+            this person.  Falls back to the population-average IRT PMF
+            when not provided.
 
         Returns
         -------
@@ -296,20 +338,31 @@ class IrtMixedImputationModel:
         except (ValueError, KeyError, AttributeError):
             mice_pmf = np.ones(n_categories) / n_categories
 
-        # IRT "ignorable" PMF is uniform: marginalizing over Y gives
-        # equal weight to all categories from the imputation model's
-        # perspective (the IRT model will apply its own likelihood).
-        uniform_pmf = np.ones(n_categories) / n_categories
+        # IRT baseline PMF from pre-fitted model
+        item_idx = self._item_to_idx.get(target)
+        if item_idx is not None and self._irt_pmf_matrix is not None:
+            if person_idx is not None and 0 <= person_idx < self._irt_pmf_matrix.shape[0]:
+                irt_pmf = self._irt_pmf_matrix[person_idx, item_idx, :n_categories]
+            else:
+                # Population average
+                irt_pmf = self._irt_pmf_matrix[:, item_idx, :n_categories].mean(axis=0)
+        else:
+            irt_pmf = np.ones(n_categories) / n_categories
+
+        # Normalize IRT PMF
+        irt_total = irt_pmf.sum()
+        if irt_total > 0:
+            irt_pmf = irt_pmf / irt_total
 
         # Blend
-        blended = w_mice * mice_pmf + (1.0 - w_mice) * uniform_pmf
+        blended = w_mice * mice_pmf + (1.0 - w_mice) * irt_pmf
 
-        # Normalize (should already sum to 1, but guard against numerics)
+        # Normalize
         total = blended.sum()
         if total > 0:
             blended /= total
         else:
-            blended = uniform_pmf
+            blended = np.ones(n_categories) / n_categories
 
         return blended
 
@@ -340,9 +393,15 @@ class IrtMixedImputationModel:
 
         mice_pred = mice_details['prediction']
 
-        # IRT ignorable prediction: marginal expectation = (K-1)/2
+        # IRT baseline prediction: population-average expected value
         K = self.irt_model.response_cardinality
-        irt_pred = (K - 1) / 2.0
+        item_idx = self._item_to_idx.get(target)
+        if item_idx is not None and self._irt_pmf_matrix is not None:
+            irt_pmf = self._irt_pmf_matrix[:, item_idx, :K].mean(axis=0)
+            irt_pmf = irt_pmf / irt_pmf.sum()
+            irt_pred = float(np.dot(np.arange(K), irt_pmf))
+        else:
+            irt_pred = (K - 1) / 2.0
 
         blended_pred = w_mice * mice_pred + (1.0 - w_mice) * irt_pred
 
@@ -350,7 +409,7 @@ class IrtMixedImputationModel:
             return {
                 'prediction': blended_pred,
                 'mice_prediction': mice_pred,
-                'irt_marginal_prediction': irt_pred,
+                'irt_baseline_prediction': irt_pred,
                 'weight_mice': w_mice,
                 'mice_details': mice_details,
                 'irt_elpd_per_item': self._irt_elpd_per_item.get(target),
