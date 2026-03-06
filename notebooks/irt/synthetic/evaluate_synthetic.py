@@ -51,8 +51,10 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         calibrate_model,
         compare_ability_ordering,
         make_comparison_plots,
+        make_data_factory,
     )
     from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+    from bayesianquilts.imputation.mixed import IrtMixedImputationModel
 
     output_dir = Path(output_dir) / dataset_name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -159,19 +161,30 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     else:
         print(f"  Warning: no snapshot at epoch {snapshot_epoch} (baseline may have stopped earlier)")
 
-    # 8. Fit imputed GRM on all data (with imputation for missing)
-    print(f"\n--- Fitting imputed GRM on all data ({num_people} people, with imputation) ---")
+    # 8. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
+    print(f"\n--- Building IrtMixedImputationModel ---")
+    factory = make_data_factory(synth_data, batch_size, num_people)
+    mixed_imputation = IrtMixedImputationModel(
+        irt_model=baseline_model,
+        mice_model=mice_loo,
+        data_factory=factory,
+        irt_elpd_batch_size=4,
+    )
+    print(mixed_imputation.summary())
+
+    # 9. Fit imputed GRM on all data (with mixed imputation for missing)
+    print(f"\n--- Fitting imputed GRM on all data ({num_people} people, with mixed imputation) ---")
     imputed_model = fit_grm_imputed(
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_imputed",
-        imputation_model=mice_loo,
+        imputation_model=mixed_imputation,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         initial_values=snapshot_params,
     )
 
-    # 9. Compare ability ordering preservation
+    # 10. Compare ability ordering preservation
     print(f"\n--- Comparing ability orderings ---")
     baseline_abilities = np.array(baseline_model.calibrated_expectations['abilities'])
     imputed_abilities = np.array(imputed_model.calibrated_expectations['abilities'])
