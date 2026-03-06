@@ -42,12 +42,24 @@ def make_data_dict(dataframe):
 
 
 def calibrate_manually(model, n_samples=32, seed=42):
-    surrogate = model.surrogate_distribution_generator(model.params)
-    key = jax.random.PRNGKey(seed)
-    samples = surrogate.sample(n_samples, seed=key)
-    expectations = {k: jnp.mean(v, axis=0) for k, v in samples.items()}
-    model.calibrated_expectations = expectations
-    model.surrogate_sample = samples
+    try:
+        surrogate = model.surrogate_distribution_generator(model.params)
+        key = jax.random.PRNGKey(seed)
+        samples = surrogate.sample(n_samples, seed=key)
+        expectations = {k: jnp.mean(v, axis=0) for k, v in samples.items()}
+        model.calibrated_expectations = expectations
+        model.surrogate_sample = samples
+    except KeyError as e:
+        # K=2 models may not have ddifficulties surrogate params
+        print(f"  Warning: surrogate sampling failed ({e}), using point estimates")
+        point_estimates = {}
+        for key_name, value in model.params.items():
+            parts = key_name.split('\\')
+            if len(parts) >= 4:
+                param_name = parts[0]
+                if parts[-2] == 'normal' and parts[-1] == 'loc':
+                    point_estimates[param_name] = value
+        model.calibrated_expectations = point_estimates
 
 
 def run_mice_imputed(dataset_name, work_dir, skip_mice=False,

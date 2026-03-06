@@ -402,9 +402,12 @@ class GRModel(IRTModel):
         return probs
 
     def grm_model_prob_d(
-        self, abilities, discriminations, difficulties0, ddifficulties
+        self, abilities, discriminations, difficulties0, ddifficulties=None
     ):
-        d0 = jnp.concat([difficulties0, ddifficulties], axis=-1)
+        if ddifficulties is not None and ddifficulties.shape[-1] > 0:
+            d0 = jnp.concat([difficulties0, ddifficulties], axis=-1)
+        else:
+            d0 = difficulties0
         difficulties = jnp.cumsum(d0, axis=-1)
         return self.grm_model_prob(abilities, discriminations, difficulties)
 
@@ -413,14 +416,17 @@ class GRModel(IRTModel):
         data,
         discriminations,
         difficulties0,
-        ddifficulties,
         abilities,
+        ddifficulties=None,
         **kwargs
     ):
-        ddifficulties = jnp.where(
-            ddifficulties < 1e-1, 1e-1 * jnp.ones_like(ddifficulties), ddifficulties
-        )
-        difficulties = jnp.concat([difficulties0, ddifficulties], axis=-1)
+        if ddifficulties is not None and ddifficulties.shape[-1] > 0:
+            ddifficulties = jnp.where(
+                ddifficulties < 1e-1, 1e-1 * jnp.ones_like(ddifficulties), ddifficulties
+            )
+            difficulties = jnp.concat([difficulties0, ddifficulties], axis=-1)
+        else:
+            difficulties = difficulties0
         difficulties = jnp.cumsum(difficulties, axis=-1)
 
         rank = len(abilities.shape)
@@ -476,8 +482,8 @@ class GRModel(IRTModel):
         data,
         discriminations,
         difficulties0,
-        ddifficulties,
         abilities,
+        ddifficulties=None,
         *args,
         **kwargs
     ):
@@ -485,8 +491,8 @@ class GRModel(IRTModel):
             data,
             discriminations,
             difficulties0,
-            ddifficulties,
             abilities,
+            ddifficulties=ddifficulties,
             *args,
             **kwargs
         )
@@ -501,7 +507,8 @@ class GRModel(IRTModel):
         self.bijectors["eta"] = tfb.Softplus()
         self.bijectors["kappa"] = tfb.Softplus()
         self.bijectors["discriminations"] = tfb.Softplus()
-        self.bijectors["ddifficulties"] = tfb.Softplus()
+        if self.response_cardinality > 2:
+            self.bijectors["ddifficulties"] = tfb.Softplus()
         self.bijectors["eta_a"] = tfb.Softplus()
         self.bijectors["kappa_a"] = tfb.Softplus()
         self.bijectors["xi"] = tfb.Softplus()
@@ -549,20 +556,6 @@ class GRModel(IRTModel):
                     )
                 )
             ),
-            ddifficulties=tfd.Independent(
-                tfd.HalfNormal(
-                    scale=jnp.ones(
-                        (
-                            1,
-                            self.dimensions,
-                            self.num_items,
-                            self.response_cardinality - 2,
-                        ),
-                        dtype=self.dtype,
-                    )
-                ),
-                reinterpreted_batch_ndims=4,
-            ),
             eta=tfd.Independent(
                 tfd.HalfNormal(
                     scale=self.eta_scale
@@ -586,6 +579,21 @@ class GRModel(IRTModel):
                 reinterpreted_batch_ndims=4,
             ),
         )
+        if self.response_cardinality > 2:
+            grm_joint_distribution_dict["ddifficulties"] = tfd.Independent(
+                tfd.HalfNormal(
+                    scale=jnp.ones(
+                        (
+                            1,
+                            self.dimensions,
+                            self.num_items,
+                            self.response_cardinality - 2,
+                        ),
+                        dtype=self.dtype,
+                    )
+                ),
+                reinterpreted_batch_ndims=4,
+            )
         if grouping_params is not None:
             grm_joint_distribution_dict["probs"] = tfd.Independent(
                 tfd.Dirichlet(jnp.astype(grouping_params, self.dtype)),
@@ -760,11 +768,16 @@ class GRModel(IRTModel):
         trait_samples = sampling_rv.sample(samples)
         sample_log_p = sampling_rv.log_prob(trait_samples)
 
+        ddiff = (
+            jnp.expand_dims(self.surrogate_sample["ddifficulties"], 0)
+            if "ddifficulties" in self.surrogate_sample
+            else None
+        )
         response_probs = self.grm_model_prob_d(
             abilities=trait_samples[..., jnp.newaxis, jnp.newaxis, :, :, :],
             discriminations=jnp.expand_dims(self.surrogate_sample["discriminations"], 0),
             difficulties0=jnp.expand_dims(self.surrogate_sample["difficulties0"], 0),
-            ddifficulties=jnp.expand_dims(self.surrogate_sample["ddifficulties"], 0),
+            ddifficulties=ddiff,
         )
 
         response_probs = jnp.mean(response_probs, axis=-4)
