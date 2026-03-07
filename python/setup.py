@@ -23,6 +23,8 @@ setuptools.setup(
     include_package_data=True,
     package_data={
         "bayesianquilts": [
+            "data/bouldering_men.csv.gz",
+            "data/bouldering_women.csv.gz",
         ]
     },
     classifiers=[

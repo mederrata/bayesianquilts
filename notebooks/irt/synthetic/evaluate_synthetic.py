@@ -266,7 +266,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     return results
 
 
-DATASETS = ['grit', 'rwa', 'tma', 'wpi', 'npi', 'eqsq']
+DATASETS = ['grit', 'rwa', 'tma', 'wpi', 'npi', 'eqsq', 'bouldering']
 
 
 def main():

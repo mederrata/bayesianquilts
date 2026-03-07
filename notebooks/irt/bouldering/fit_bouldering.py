@@ -1,16 +1,20 @@
 #!/usr/bin/env python
-"""Run a single IRT GRM notebook as a Python script.
+"""Fit GRM pipeline on IFSC bouldering data.
 
-Executes the same logic as grm_single_scale.ipynb but as a script,
-with explicit gc.collect() between stages to avoid OOM.
+Runs the same four-stage pipeline as the psychometric notebooks:
+  1. Baseline GRM (ignorable missingness)
+  2. MICEBayesianLOO imputation model
+  3. IrtMixedImputationModel (blends MICE + IRT baseline)
+  4. Imputed GRM (warm-started from baseline)
 
 Usage:
-    python run_single_notebook.py --dataset rwa
-    python run_single_notebook.py --dataset npi --skip-baseline
+    python fit_bouldering.py [--skip-baseline] [--skip-mice]
+    python fit_bouldering.py --gender women
 """
 
 import argparse
 import gc
+import json
 import os
 import sys
 
@@ -21,38 +25,6 @@ import jax
 import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
-
-
-DATASET_CONFIGS = {
-    'grit': {
-        'module': 'bayesianquilts.data.grit',
-        'n_top_features': 12,
-    },
-    'rwa': {
-        'module': 'bayesianquilts.data.rwa',
-        'n_top_features': 22,
-    },
-    'npi': {
-        'module': 'bayesianquilts.data.npi',
-        'n_top_features': 40,
-    },
-    'tma': {
-        'module': 'bayesianquilts.data.tma',
-        'n_top_features': 14,
-    },
-    'wpi': {
-        'module': 'bayesianquilts.data.wpi',
-        'n_top_features': 20,
-    },
-    'eqsq': {
-        'module': 'bayesianquilts.data.eqsq',
-        'n_top_features': 30,
-    },
-    'bouldering': {
-        'module': 'bayesianquilts.data.bouldering',
-        'n_top_features': 40,
-    },
-}
 
 
 def make_data_dict(dataframe):
@@ -84,35 +56,33 @@ def calibrate_manually(model, n_samples=32, seed=42):
         model.calibrated_expectations = point_estimates
 
 
-def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
-                num_epochs=200, batch_size=256, learning_rate=2e-4,
-                lr_decay_factor=0.975):
+def run_bouldering(work_dir, gender='men', skip_baseline=False, skip_mice=False,
+                   num_epochs=200, batch_size=256, learning_rate=2e-4,
+                   lr_decay_factor=0.975):
     import importlib
     from pathlib import Path
 
-    config = DATASET_CONFIGS[dataset_name]
-    mod = importlib.import_module(config['module'])
-    item_keys = mod.item_keys
-    response_cardinality = mod.response_cardinality
+    # Load bouldering data
+    from bayesianquilts.data.bouldering import get_data, item_keys, response_cardinality, item_labels
 
     work_dir = Path(work_dir)
     os.chdir(work_dir)
 
     print(f"\n{'='*60}")
-    print(f"Dataset: {dataset_name.upper()}")
+    print(f"IFSC Bouldering ({gender})")
     print(f"Working dir: {work_dir}")
     print(f"{'='*60}")
 
-    # Load data
-    df, num_people = mod.get_data(polars_out=True)
-    print(f"People: {num_people}, Items: {len(item_keys)}, K: {response_cardinality}")
+    df, num_people = get_data(polars_out=True, gender=gender)
+    n_items = len(item_keys)
+    print(f"People: {num_people}, Items: {n_items}, K: {response_cardinality}")
 
     batch = make_data_dict(df)
     n_bad = sum(
         np.sum(np.isnan(batch[k]) | (batch[k] < 0) | (batch[k] >= response_cardinality))
         for k in item_keys
     )
-    print(f"Bad/missing values: {n_bad}")
+    print(f"Missing values: {n_bad}")
 
     SUBSAMPLE_N = num_people
     steps_per_epoch = int(np.ceil(SUBSAMPLE_N / batch_size))
@@ -169,15 +139,19 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
 
     mice_path = work_dir / 'mice_loo_model.yaml'
+    # Limit top features given the large item count
+    n_top_features = min(n_items, 40)
+
     if skip_mice and mice_path.exists():
         print("\n--- Loading existing MICE LOO model ---")
         mice_loo = MICEBayesianLOO.load(str(mice_path))
         print("MICE LOO loaded.")
     else:
-        print("\n--- Fitting MICE LOO ---")
+        print(f"\n--- Fitting MICE LOO (n_top_features={n_top_features}) ---")
         pandas_df = df.select(item_keys).to_pandas()
         pandas_df = pandas_df.replace(-1, np.nan)
-        print(f"Missing values per item:\n{pandas_df.isna().sum()}")
+        n_missing = pandas_df.isna().sum().sum()
+        print(f"Total missing values: {n_missing}")
 
         mice_loo = MICEBayesianLOO(
             random_state=42,
@@ -189,7 +163,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         )
         mice_loo.fit_loo_models(
             pandas_df,
-            n_top_features=config['n_top_features'],
+            n_top_features=n_top_features,
             n_jobs=1,
             fit_zero_predictors=True,
             seed=42,
@@ -211,8 +185,6 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     )
     print(mixed_imputation.summary())
 
-    # Save mixed weights as JSON for gofluttercat export
-    import json
     weights_path = work_dir / 'mixed_weights.json'
     with open(weights_path, 'w') as f:
         json.dump(mixed_imputation.weights, f, indent=2)
@@ -252,33 +224,34 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     model_imputed.save_to_disk('grm_imputed')
     calibrate_manually(model_imputed, n_samples=32, seed=102)
 
+    # ---- Save item label mapping ----
+    with open(work_dir / 'item_labels.json', 'w') as f:
+        json.dump(item_labels, f, indent=2)
+
     print(f"\n{'='*60}")
-    print(f"DONE: {dataset_name.upper()}")
+    print(f"DONE: Bouldering ({gender})")
     print(f"Artifacts: grm_baseline/, mice_loo_model.yaml, grm_imputed/")
     print(f"{'='*60}")
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', required=True, choices=list(DATASET_CONFIGS.keys()))
-    parser.add_argument('--skip-baseline', action='store_true',
-                        help='Load existing baseline instead of re-fitting')
-    parser.add_argument('--skip-mice', action='store_true',
-                        help='Load existing MICE model instead of re-fitting')
+    parser = argparse.ArgumentParser(
+        description="Fit GRM pipeline on IFSC bouldering data."
+    )
+    parser.add_argument('--gender', default='men', choices=['men', 'women'])
+    parser.add_argument('--skip-baseline', action='store_true')
+    parser.add_argument('--skip-mice', action='store_true')
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--lr-decay-factor', type=float, default=0.975)
     args = parser.parse_args()
 
-    work_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        args.dataset,
-    )
+    work_dir = os.path.dirname(os.path.abspath(__file__))
 
-    run_dataset(
-        args.dataset,
+    run_bouldering(
         work_dir,
+        gender=args.gender,
         skip_baseline=args.skip_baseline,
         skip_mice=args.skip_mice,
         num_epochs=args.epochs,
