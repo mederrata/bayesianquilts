@@ -99,11 +99,14 @@ def get_data(polars_out=False, cache_dir=None, gender='men'):
     """
     global item_keys, item_labels, climber_names
 
-    # Load CSV from package data via importlib.resources
-    csv_filename = f"bouldering_{gender}.csv"
+    # Load gzipped CSV from package data via importlib.resources
+    import gzip
+
+    gz_filename = f"bouldering_{gender}.csv.gz"
     data_pkg = importlib.resources.files("bayesianquilts.data")
-    csv_text = (data_pkg / csv_filename).read_text(encoding="utf-8")
-    raw = pl.read_csv(csv_text.encode("utf-8"))
+    gz_bytes = (data_pkg / gz_filename).read_bytes()
+    csv_bytes = gzip.decompress(gz_bytes)
+    raw = pl.read_csv(csv_bytes)
 
     # Drop the unnamed index column
     if '' in raw.columns:
