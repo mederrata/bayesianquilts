@@ -62,17 +62,28 @@ class NeuralGRModel(IRTModel):
         vi_mode='advi',
         imputation_model=None,
         dtype=jnp.float64,
+        noisy_dim=False,
+        noisy_dim_eta_scale=0.01,
+        noisy_dim_ability_scale=2.0,
         # Legacy params accepted but ignored for backward compat
         nn_hidden_sizes=None,
         per_item_nn=None,
     ):
+        # Store noisy_dim settings before super().__init__ calls set_dimension
+        self.noisy_dim = noisy_dim
+        self.noisy_dim_eta_scale = noisy_dim_eta_scale
+        self.noisy_dim_ability_scale = noisy_dim_ability_scale
+
+        # If noisy_dim, the actual model dimension is dim+1
+        effective_dim = dim + 1 if noisy_dim else dim
+
         super(NeuralGRModel, self).__init__(
             item_keys=item_keys,
             num_people=num_people,
             num_groups=num_groups,
             data=data,
             person_key=person_key,
-            dim=dim,
+            dim=effective_dim,
             decay=decay,
             positive_discriminations=positive_discriminations,
             missing_val=missing_val,
@@ -87,6 +98,20 @@ class NeuralGRModel(IRTModel):
             imputation_model=imputation_model,
             dtype=dtype,
         )
+        # Store the user-facing dim (before noisy augmentation)
+        self._primary_dim = dim
+
+        # Override kappa_scale for the noisy dimension to enforce strong shrinkage
+        if noisy_dim:
+            # kappa_scale shape is (1, D, 1, 1) after set_dimension
+            # Replace the last dimension's scale with a much smaller value
+            noisy_kappa = jnp.array(
+                noisy_dim_eta_scale, dtype=dtype
+            ) * jnp.ones((1, 1, 1, 1), dtype=dtype)
+            self.kappa_scale = jnp.concatenate(
+                [self.kappa_scale[:, :dim, :, :], noisy_kappa], axis=1
+            )
+
         self.create_distributions()
 
     def _monotone_forward(self, z, nn_params):
@@ -403,34 +428,26 @@ class NeuralGRModel(IRTModel):
                 "NeuralGRModel does not yet support grouping_params."
             )
 
+        ability_dims = (
+            self.dimensions
+            if not self.include_independent
+            else self.dimensions - 1
+        )
+        # Per-dimension ability prior scale: noisy dimension gets larger variance
+        ability_scale = jnp.ones(
+            (self.num_people, ability_dims, 1, 1), dtype=self.dtype
+        )
+        if self.noisy_dim:
+            # Last dimension is the noisy one — wider prior
+            noisy_scale = jnp.array(self.noisy_dim_ability_scale, dtype=self.dtype)
+            ability_scale = ability_scale.at[:, -1, :, :].set(noisy_scale)
+
         grm_joint_distribution_dict["abilities"] = tfd.Independent(
             tfd.Normal(
                 loc=jnp.zeros(
-                    (
-                        self.num_people,
-                        (
-                            self.dimensions
-                            if not self.include_independent
-                            else self.dimensions - 1
-                        ),
-                        1,
-                        1,
-                    ),
-                    dtype=self.dtype,
+                    (self.num_people, ability_dims, 1, 1), dtype=self.dtype,
                 ),
-                scale=jnp.ones(
-                    (
-                        self.num_people,
-                        (
-                            self.dimensions
-                            if not self.include_independent
-                            else self.dimensions - 1
-                        ),
-                        1,
-                        1,
-                    ),
-                    dtype=self.dtype,
-                ),
+                scale=ability_scale,
             ),
             reinterpreted_batch_ndims=4,
         )
@@ -499,8 +516,11 @@ class NeuralGRModel(IRTModel):
             '_class_name': 'NeuralGRModel',
             'item_keys': list(self.item_keys),
             'num_people': int(self.num_people),
-            'dim': int(self.dimensions),
+            'dim': int(self._primary_dim),
             'decay': float(self.dimensional_decay),
+            'noisy_dim': bool(self.noisy_dim),
+            'noisy_dim_eta_scale': float(self.noisy_dim_eta_scale),
+            'noisy_dim_ability_scale': float(self.noisy_dim_ability_scale),
             'positive_discriminations': bool(self.positive_discriminations),
             'missing_val': int(self.missing_val),
             'full_rank': bool(self.full_rank),
@@ -554,12 +574,26 @@ class NeuralGRModel(IRTModel):
         Returns (N, I) integer response matrix with values in [0, K-1].
 
         Args:
-            abilities: Optional ability array. If None, uses model's calibrated.
+            abilities: Optional ability array of shape (N, dim, 1, 1) where
+                dim is the primary dimension (excluding noisy dim). If
+                noisy_dim=True, random noise abilities are appended.
+                If None, uses model's calibrated abilities.
             seed: Random seed (int) for categorical sampling.
         """
         discrimination = self.calibrated_expectations['discriminations']
         if abilities is None:
             abilities = self.calibrated_expectations['abilities']
+        elif self.noisy_dim:
+            # abilities provided are for the primary dimensions only;
+            # append random noisy-dimension abilities
+            N = abilities.shape[0]
+            rng = np.random.default_rng(seed + 7777)
+            noisy_abilities = rng.normal(
+                0, self.noisy_dim_ability_scale, size=(N, 1, 1, 1)
+            )
+            abilities = np.concatenate(
+                [np.array(abilities), noisy_abilities], axis=1
+            )
 
         nn_params = {
             k: self.calibrated_expectations[k]

@@ -24,7 +24,10 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
                  missing_respondent_frac=0.4,
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
                  lr_decay_factor=0.9, clip_norm=1.0,
-                 reload_neural_grm=False):
+                 reload_neural_grm=False,
+                 noisy_dim=False,
+                 noisy_dim_eta_scale=0.01,
+                 noisy_dim_ability_scale=2.0):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -85,6 +88,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         lr_decay_factor=lr_decay_factor,
         clip_norm=clip_norm,
         reload=reload_neural_grm,
+        noisy_dim=noisy_dim,
+        noisy_dim_eta_scale=noisy_dim_eta_scale,
+        noisy_dim_ability_scale=noisy_dim_ability_scale,
     )
 
     # 3. Sample fresh abilities from N(0,1) as ground truth
@@ -202,9 +208,31 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     mice_only_abilities = np.array(mice_only_model.calibrated_expectations['abilities'])
     imputed_abilities = np.array(imputed_model.calibrated_expectations['abilities'])
 
-    baseline_metrics = compare_ability_ordering(true_abilities, baseline_abilities)
-    mice_only_metrics = compare_ability_ordering(true_abilities, mice_only_abilities)
-    imputed_metrics = compare_ability_ordering(true_abilities, imputed_abilities)
+    # true_abilities shape: (N, 1, 1, 1) — single ground-truth dimension
+    # estimated shape: (N, D, 1, 1) where D=2 if noisy_dim
+    true_flat = true_abilities[:, 0, 0, 0]  # (N,)
+
+    def _extract_dim(abil, d):
+        """Extract dimension d from (N, D, 1, 1) abilities."""
+        a = np.array(abil)
+        if a.ndim == 4 and a.shape[1] > d:
+            return a[:, d, 0, 0]
+        elif d == 0:
+            return a.flatten()
+        else:
+            return None
+
+    def _extract_norm(abil):
+        """Compute L2 norm across latent dimensions: (N, D, 1, 1) -> (N,)."""
+        a = np.array(abil)
+        if a.ndim == 4:
+            return np.sqrt(np.sum(a[:, :, 0, 0] ** 2, axis=1))
+        return np.abs(a.flatten())
+
+    # Primary dimension (dim 0) comparisons
+    baseline_metrics = compare_ability_ordering(true_flat, _extract_dim(baseline_abilities, 0))
+    mice_only_metrics = compare_ability_ordering(true_flat, _extract_dim(mice_only_abilities, 0))
+    imputed_metrics = compare_ability_ordering(true_flat, _extract_dim(imputed_abilities, 0))
 
     results = {
         'dataset': dataset_name,
@@ -228,18 +256,53 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
             'patience': patience,
             'lr_decay_factor': lr_decay_factor,
             'clip_norm': clip_norm,
+            'noisy_dim': noisy_dim,
+            'noisy_dim_eta_scale': noisy_dim_eta_scale,
+            'noisy_dim_ability_scale': noisy_dim_ability_scale,
         },
     }
 
-    print(f"\n  Baseline:   Spearman r = {baseline_metrics['spearman_r']:.4f}, "
-          f"Kendall tau = {baseline_metrics['kendall_tau']:.4f}, "
-          f"RMSE = {baseline_metrics['rmse']:.4f}")
-    print(f"  MICE-only:  Spearman r = {mice_only_metrics['spearman_r']:.4f}, "
-          f"Kendall tau = {mice_only_metrics['kendall_tau']:.4f}, "
-          f"RMSE = {mice_only_metrics['rmse']:.4f}")
-    print(f"  Mixed:      Spearman r = {imputed_metrics['spearman_r']:.4f}, "
-          f"Kendall tau = {imputed_metrics['kendall_tau']:.4f}, "
-          f"RMSE = {imputed_metrics['rmse']:.4f}")
+    # Noisy dimension and norm comparisons (when noisy_dim is used)
+    if noisy_dim:
+        for label, abil in [('baseline', baseline_abilities),
+                            ('mice_only', mice_only_abilities),
+                            ('imputed', imputed_abilities)]:
+            dim1 = _extract_dim(abil, 1)
+            norm_abil = _extract_norm(abil)
+            if dim1 is not None:
+                results[f'{label}_dim1'] = compare_ability_ordering(true_flat, dim1)
+            results[f'{label}_norm'] = compare_ability_ordering(true_flat, norm_abil)
+
+    def _fmt_ci(m, key):
+        """Format metric with 95% CI."""
+        val = m[key]
+        ci = m.get(f'{key}_ci', None)
+        if ci:
+            return f"{val:.4f} [{ci[0]:.4f}, {ci[1]:.4f}]"
+        return f"{val:.4f}"
+
+    print(f"\n  Primary dimension (dim 0) vs ground truth:")
+    for label, m in [('Baseline', baseline_metrics),
+                     ('MICE-only', mice_only_metrics),
+                     ('Mixed', imputed_metrics)]:
+        print(f"  {label:<12} ρ = {_fmt_ci(m, 'spearman_r')}, "
+              f"τ = {_fmt_ci(m, 'kendall_tau')}, "
+              f"RMSE = {_fmt_ci(m, 'rmse')}")
+
+    if noisy_dim:
+        print(f"\n  Noisy dimension (dim 1) vs ground truth:")
+        for label in ['baseline', 'mice_only', 'imputed']:
+            m = results.get(f'{label}_dim1', {})
+            if m:
+                print(f"  {label:<12} ρ = {_fmt_ci(m, 'spearman_r')}, "
+                      f"τ = {_fmt_ci(m, 'kendall_tau')}")
+
+        print(f"\n  Vector norm (L2) vs ground truth:")
+        for label in ['baseline', 'mice_only', 'imputed']:
+            m = results.get(f'{label}_norm', {})
+            if m:
+                print(f"  {label:<12} ρ = {_fmt_ci(m, 'spearman_r')}, "
+                      f"τ = {_fmt_ci(m, 'kendall_tau')}")
 
     # 12. Generate plots
     print(f"\n--- Generating plots ---")
@@ -299,6 +362,12 @@ def main():
                         help="Gradient clipping norm (default 1.0)")
     parser.add_argument("--reload-neural-grm", action="store_true",
                         help="Reload saved NeuralGRM instead of re-training")
+    parser.add_argument("--noisy-dim", action="store_true",
+                        help="Add a loosely-coupled noisy second latent dimension")
+    parser.add_argument("--noisy-dim-eta-scale", type=float, default=0.01,
+                        help="Discrimination scale for noisy dimension (default 0.01)")
+    parser.add_argument("--noisy-dim-ability-scale", type=float, default=2.0,
+                        help="Ability prior scale for noisy dimension (default 2.0)")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -325,6 +394,9 @@ def main():
             lr_decay_factor=args.lr_decay_factor,
             clip_norm=args.clip_norm,
             reload_neural_grm=args.reload_neural_grm,
+            noisy_dim=args.noisy_dim,
+            noisy_dim_eta_scale=args.noisy_dim_eta_scale,
+            noisy_dim_ability_scale=args.noisy_dim_ability_scale,
         )
         all_results[ds] = results
 

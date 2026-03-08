@@ -42,6 +42,56 @@ from bayesianquilts.metrics.ais import (
 tfd = tfp.distributions
 
 
+def _horseshoe_log_prior(log_tau, log_local_scales, log_c, beta_raw,
+                          tau0, slab_scale=2.0, slab_df=4.0):
+    """Compute log prior for regularized horseshoe (Piironen & Vehtari 2017).
+
+    All scale parameters are on the log scale (unconstrained).
+    Returns scalar log-density including Jacobian corrections.
+    """
+    tau = jnp.exp(log_tau)
+    local_scales = jnp.exp(log_local_scales)
+    c2 = jnp.exp(2.0 * log_c)
+
+    # Half-Cauchy(0, tau0) on tau  →  log-density on log_tau
+    # p(tau) = 2/(pi*tau0) / (1 + (tau/tau0)^2),  tau > 0
+    # p(log_tau) = p(tau) * tau  (Jacobian)
+    lp_tau = (jnp.log(2.0) - jnp.log(jnp.pi) - jnp.log(tau0)
+              - jnp.log1p((tau / tau0) ** 2) + log_tau)
+
+    # Half-Cauchy(0, 1) on each local_scale
+    lp_local = jnp.sum(
+        jnp.log(2.0) - jnp.log(jnp.pi)
+        - jnp.log1p(local_scales ** 2) + log_local_scales
+    )
+
+    # InvGamma(slab_df/2, slab_df*slab_scale^2/2) on c^2  →  on log_c
+    # c2 = exp(2*log_c)
+    alpha = slab_df / 2.0
+    beta_ig = slab_df * slab_scale ** 2 / 2.0
+    # p(c2) = beta^alpha / Gamma(alpha) * c2^(-alpha-1) * exp(-beta/c2)
+    # p(log_c) = p(c2) * |dc2/d(log_c)| = p(c2) * 2*c2
+    from jax.scipy.special import gammaln
+    lp_c = (alpha * jnp.log(beta_ig) - gammaln(alpha)
+            + (-alpha - 1) * jnp.log(c2) - beta_ig / c2
+            + jnp.log(2.0) + 2.0 * log_c)
+
+    # beta_raw ~ N(0, 1)
+    lp_beta_raw = -0.5 * jnp.sum(beta_raw ** 2) - 0.5 * beta_raw.shape[0] * jnp.log(2.0 * jnp.pi)
+
+    return lp_tau + lp_local + lp_c + lp_beta_raw
+
+
+def _horseshoe_reconstruct_beta(beta_raw, log_tau, log_local_scales, log_c):
+    """Reconstruct beta from the non-centered horseshoe parameterization."""
+    tau = jnp.exp(log_tau)
+    local_scales = jnp.exp(log_local_scales)
+    c = jnp.exp(log_c)
+    # Regularized local scales: tilde_lambda_j^2 = c^2 * lam_j^2 / (c^2 + tau^2 * lam_j^2)
+    tilde_lambda = c * local_scales / jnp.sqrt(c ** 2 + tau ** 2 * local_scales ** 2)
+    return beta_raw * tau * tilde_lambda
+
+
 @dataclass
 class UnivariateModelResult:
     """Results from fitting a univariate model."""
@@ -72,59 +122,82 @@ class SimpleLinearRegression:
         n_predictors: int = 1,
         prior_scale: float = 1.0,
         noise_scale: float = 1.0,
-        dtype=jnp.float32
+        dtype=jnp.float32,
+        n_obs: int = 100,
     ):
         self.n_predictors = n_predictors
         self.prior_scale = prior_scale
         self.noise_scale = noise_scale
         self.dtype = dtype
-        self.var_list = ['beta', 'intercept', 'log_sigma']
+        self.n_obs = n_obs
+        # Regularized horseshoe: expected non-sparse = K/2
+        p0 = max(1, n_predictors // 2)
+        self.tau0 = p0 / max(1, n_predictors - p0) * noise_scale / np.sqrt(n_obs)
+        self.var_list = ['beta_raw', 'log_tau', 'log_local_scales', 'log_c',
+                         'intercept', 'log_sigma']
 
     def create_prior(self):
-        """Create prior distribution."""
+        """Create prior distribution (used for initialization only)."""
         return tfd.JointDistributionNamed({
-            'beta': tfd.Independent(
+            'beta_raw': tfd.Independent(
                 tfd.Normal(
                     loc=jnp.zeros(self.n_predictors, dtype=self.dtype),
-                    scale=self.prior_scale * jnp.ones(self.n_predictors, dtype=self.dtype)
+                    scale=jnp.ones(self.n_predictors, dtype=self.dtype)
                 ),
                 reinterpreted_batch_ndims=1
             ),
+            'log_tau': tfd.Normal(loc=jnp.log(jnp.array(self.tau0, dtype=self.dtype)), scale=1.0),
+            'log_local_scales': tfd.Independent(
+                tfd.Normal(
+                    loc=jnp.zeros(self.n_predictors, dtype=self.dtype),
+                    scale=jnp.ones(self.n_predictors, dtype=self.dtype)
+                ),
+                reinterpreted_batch_ndims=1
+            ),
+            'log_c': tfd.Normal(loc=jnp.log(jnp.array(2.0, dtype=self.dtype)), scale=0.5),
             'intercept': tfd.Normal(
                 loc=jnp.zeros([], dtype=self.dtype),
                 scale=self.prior_scale
             ),
             'log_sigma': tfd.Normal(
-                loc=jnp.log(self.noise_scale),
+                loc=jnp.log(jnp.array(self.noise_scale, dtype=self.dtype)),
                 scale=1.0
             )
         })
+
+    def _get_beta(self, params):
+        """Reconstruct beta from horseshoe parameterization."""
+        beta_raw = params['beta_raw']
+        log_tau = params['log_tau']
+        log_local_scales = params['log_local_scales']
+        log_c = params['log_c']
+        if beta_raw.ndim == 1:
+            return _horseshoe_reconstruct_beta(beta_raw, log_tau, log_local_scales, log_c)
+        else:
+            return jax.vmap(
+                lambda br, lt, ll, lc: _horseshoe_reconstruct_beta(br, lt, ll, lc)
+            )(beta_raw, log_tau, log_local_scales, log_c)
 
     def log_likelihood(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
         """Compute log-likelihood for each data point."""
         X = jnp.asarray(data['X'], dtype=self.dtype)
         y = jnp.asarray(data['y'], dtype=self.dtype)
 
-        beta = params['beta']
+        beta = self._get_beta(params)
         intercept = params['intercept']
         log_sigma = params['log_sigma']
-        sigma = jnp.exp(log_sigma)
 
         # Handle batch dimensions
         if beta.ndim == 1:
             mu = jnp.dot(X, beta) + intercept
         else:
-            # beta shape: (n_samples, n_predictors)
             mu = jnp.einsum('np,sp->sn', X, beta) + intercept[:, None]
 
         if log_sigma.ndim == 0:
             log_sigma = log_sigma[None]
         sigma = jnp.exp(log_sigma)
-            
-        # Log likelihood
+
         residuals = y - mu if mu.ndim == 1 else y[None, :] - mu
-        
-        # log_sigma is (S,) or (1,). log_sigma[:, None] is (S, 1) or (1, 1).
         log_lik = -0.5 * jnp.log(2 * jnp.pi) - log_sigma[:, None] - 0.5 * (residuals / sigma[:, None])**2
 
         return log_lik
@@ -134,10 +207,14 @@ class SimpleLinearRegression:
         log_lik = self.log_likelihood(data, params)
         total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
 
-        prior = self.create_prior()
-        log_prior = prior.log_prob(params)
+        # Horseshoe prior on beta + normal priors on intercept and log_sigma
+        lp_horseshoe = _horseshoe_log_prior(
+            params['log_tau'], params['log_local_scales'],
+            params['log_c'], params['beta_raw'], self.tau0)
+        lp_intercept = tfd.Normal(0.0, self.prior_scale).log_prob(params['intercept'])
+        lp_log_sigma = tfd.Normal(jnp.log(jnp.array(self.noise_scale, dtype=self.dtype)), 1.0).log_prob(params['log_sigma'])
 
-        return total_log_lik + log_prior
+        return total_log_lik + lp_horseshoe + lp_intercept + lp_log_sigma
 
 
 class SimpleLogisticRegression:
@@ -147,47 +224,73 @@ class SimpleLogisticRegression:
         self,
         n_predictors: int = 1,
         prior_scale: float = 1.0,
-        dtype=jnp.float32
+        dtype=jnp.float32,
+        n_obs: int = 100,
     ):
         self.n_predictors = n_predictors
         self.prior_scale = prior_scale
         self.dtype = dtype
-        self.var_list = ['beta', 'intercept']
+        self.n_obs = n_obs
+        # Regularized horseshoe: expected non-sparse = K/2
+        # sigma ~ pi/sqrt(3) for logistic
+        sigma_pseudo = np.pi / np.sqrt(3)
+        p0 = max(1, n_predictors // 2)
+        self.tau0 = p0 / max(1, n_predictors - p0) * sigma_pseudo / np.sqrt(n_obs)
+        self.var_list = ['beta_raw', 'log_tau', 'log_local_scales', 'log_c', 'intercept']
 
     def create_prior(self):
-        """Create prior distribution."""
+        """Create prior distribution (used for initialization)."""
         return tfd.JointDistributionNamed({
-            'beta': tfd.Independent(
+            'beta_raw': tfd.Independent(
                 tfd.Normal(
                     loc=jnp.zeros(self.n_predictors, dtype=self.dtype),
-                    scale=self.prior_scale * jnp.ones(self.n_predictors, dtype=self.dtype)
+                    scale=jnp.ones(self.n_predictors, dtype=self.dtype)
                 ),
                 reinterpreted_batch_ndims=1
             ),
+            'log_tau': tfd.Normal(loc=jnp.log(jnp.array(self.tau0, dtype=self.dtype)), scale=1.0),
+            'log_local_scales': tfd.Independent(
+                tfd.Normal(
+                    loc=jnp.zeros(self.n_predictors, dtype=self.dtype),
+                    scale=jnp.ones(self.n_predictors, dtype=self.dtype)
+                ),
+                reinterpreted_batch_ndims=1
+            ),
+            'log_c': tfd.Normal(loc=jnp.log(jnp.array(2.0, dtype=self.dtype)), scale=0.5),
             'intercept': tfd.Normal(
                 loc=jnp.zeros([], dtype=self.dtype),
                 scale=self.prior_scale
             )
         })
 
+    def _get_beta(self, params):
+        """Reconstruct beta from horseshoe parameterization."""
+        beta_raw = params['beta_raw']
+        log_tau = params['log_tau']
+        log_local_scales = params['log_local_scales']
+        log_c = params['log_c']
+        if beta_raw.ndim == 1:
+            return _horseshoe_reconstruct_beta(beta_raw, log_tau, log_local_scales, log_c)
+        else:
+            return jax.vmap(
+                lambda br, lt, ll, lc: _horseshoe_reconstruct_beta(br, lt, ll, lc)
+            )(beta_raw, log_tau, log_local_scales, log_c)
+
     def log_likelihood(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
         """Compute log-likelihood for each data point."""
         X = jnp.asarray(data['X'], dtype=self.dtype)
         y = jnp.asarray(data['y'], dtype=self.dtype)
 
-        beta = params['beta']
+        beta = self._get_beta(params)
         intercept = params['intercept']
 
-        # Handle batch dimensions
         if beta.ndim == 1:
             logits = jnp.dot(X, beta) + intercept
         else:
-            # batch
             if intercept.ndim == 0:
                  intercept = intercept[None]
             logits = jnp.einsum('np,sp->sn', X, beta) + intercept[:, None]
 
-        # Bernoulli log likelihood
         if logits.ndim == 1:
             log_lik = y * jax.nn.log_sigmoid(logits) + (1 - y) * jax.nn.log_sigmoid(-logits)
         else:
@@ -200,10 +303,12 @@ class SimpleLogisticRegression:
         log_lik = self.log_likelihood(data, params)
         total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
 
-        prior = self.create_prior()
-        log_prior = prior.log_prob(params)
+        lp_horseshoe = _horseshoe_log_prior(
+            params['log_tau'], params['log_local_scales'],
+            params['log_c'], params['beta_raw'], self.tau0)
+        lp_intercept = tfd.Normal(0.0, self.prior_scale).log_prob(params['intercept'])
 
-        return total_log_lik + log_prior
+        return total_log_lik + lp_horseshoe + lp_intercept
 
 
 
@@ -215,40 +320,40 @@ class SimpleOrdinalLogisticRegression:
         n_classes: int,
         n_predictors: int = 1,
         prior_scale: float = 1.0,
-        dtype=jnp.float32
+        dtype=jnp.float32,
+        n_obs: int = 100,
     ):
         self.n_classes = n_classes
         self.n_cutpoints = n_classes - 1
         self.n_predictors = n_predictors
         self.prior_scale = prior_scale
         self.dtype = dtype
-        # Use unconstrained parameters for optimization stability
-        self.var_list = ['beta', 'cutpoints_raw']
+        self.n_obs = n_obs
+        # Regularized horseshoe: expected non-sparse = K/2
+        sigma_pseudo = np.pi / np.sqrt(3)
+        p0 = max(1, n_predictors // 2)
+        self.tau0 = p0 / max(1, n_predictors - p0) * sigma_pseudo / np.sqrt(n_obs)
+        self.var_list = ['beta_raw', 'log_tau', 'log_local_scales', 'log_c', 'cutpoints_raw']
 
     def create_prior(self):
-        """
-        Create prior distribution.
-        
-        We use unconstrained 'cutpoints_raw' which will be transformed 
-        to ordered 'cutpoints' via tfb.Ascending() (or Softplus-cumsum).
-        """
+        """Create prior distribution (used for initialization)."""
         return tfd.JointDistributionNamed({
-            'beta': tfd.Independent(
+            'beta_raw': tfd.Independent(
                 tfd.Normal(
                     loc=jnp.zeros(self.n_predictors, dtype=self.dtype),
-                    scale=self.prior_scale * jnp.ones(self.n_predictors, dtype=self.dtype)
+                    scale=jnp.ones(self.n_predictors, dtype=self.dtype)
                 ),
                 reinterpreted_batch_ndims=1
             ),
-            # Unconstrained prior for cutpoints parameters
-            # We will transform these to ordered cutpoints in log_likelihood.
-            # Good initialization of the prior mean helps:
-            # If we want cutpoints roughly at [-2, -1, 0, 1], we can set prior locs 
-            # such that forward(locs) ~= [-2, ...].
-            # For simplicity, we use N(0, 5) but initialized loosely.
-            # Ascending bijector: y[0] = x[0], y[i] = x[0] + sum_j=1^i exp(x[j]) ?
-            # TFP Ascending is usually: [x0, x0 + exp(x1), x0 + exp(x1) + exp(x2)...]
-            # So x0 is location, x1... are logs of gaps.
+            'log_tau': tfd.Normal(loc=jnp.log(jnp.array(self.tau0, dtype=self.dtype)), scale=1.0),
+            'log_local_scales': tfd.Independent(
+                tfd.Normal(
+                    loc=jnp.zeros(self.n_predictors, dtype=self.dtype),
+                    scale=jnp.ones(self.n_predictors, dtype=self.dtype)
+                ),
+                reinterpreted_batch_ndims=1
+            ),
+            'log_c': tfd.Normal(loc=jnp.log(jnp.array(2.0, dtype=self.dtype)), scale=0.5),
             'cutpoints_raw': tfd.Independent(
                 tfd.Normal(
                     loc=jnp.zeros(self.n_cutpoints, dtype=self.dtype),
@@ -286,81 +391,73 @@ class SimpleOrdinalLogisticRegression:
         bij = tfb.Ascending()
         return bij.forward(cutpoints_raw)
 
+    def _get_beta(self, params):
+        """Reconstruct beta from horseshoe parameterization."""
+        beta_raw = params['beta_raw']
+        log_tau = params['log_tau']
+        log_local_scales = params['log_local_scales']
+        log_c = params['log_c']
+        if beta_raw.ndim == 1:
+            return _horseshoe_reconstruct_beta(beta_raw, log_tau, log_local_scales, log_c)
+        else:
+            return jax.vmap(
+                lambda br, lt, ll, lc: _horseshoe_reconstruct_beta(br, lt, ll, lc)
+            )(beta_raw, log_tau, log_local_scales, log_c)
+
     def log_likelihood(self, data: Dict[str, Any], params: Dict[str, Any]) -> jnp.ndarray:
         """Compute log-likelihood for each data point."""
         X = jnp.asarray(data['X'], dtype=self.dtype)
-        y = jnp.asarray(data['y'], dtype=self.dtype) # y should be integer 0..K-1
-        
-        beta = params['beta']
+        y = jnp.asarray(data['y'], dtype=self.dtype)
+
+        beta = self._get_beta(params)
         cutpoints_raw = params['cutpoints_raw']
-        
-        # Transform cutpoints
-        # Handle batching
+
         if cutpoints_raw.ndim == 1:
             cutpoints = self._transform_cutpoints(cutpoints_raw)
         else:
-            # vmap the transform over batch dimension
             cutpoints = jax.vmap(self._transform_cutpoints)(cutpoints_raw)
-        
-        # Linear predictor
-        # beta: (n_samples, n_predictors) or (n_predictors,)
+
         if beta.ndim == 1:
-            eta = jnp.dot(X, beta) # (N,)
+            eta = jnp.dot(X, beta)
         else:
-            eta = jnp.einsum('np,sp->sn', X, beta) # (n_samples, N)
-        
-        # Align dimensions
-        # Ensure cutpoints is at least 1D
+            eta = jnp.einsum('np,sp->sn', X, beta)
+
         if cutpoints.ndim == 0:
             cutpoints = cutpoints[None]
 
         if cutpoints.ndim == 1 and beta.ndim == 1:
-            # No batching
             dist = tfd.OrderedLogistic(cutpoints=cutpoints, loc=eta)
             return dist.log_prob(y)
-        
-        # Batching
+
         if cutpoints.ndim == 1:
-            # cutpoints is (K-1,), eta is (S, N)
-            # We need to broadcast cutpoints to (S, 1, K-1) or similar?
-            # tfd.OrderedLogistic: loc (...,) cutpoints (..., K-1)
-            # If loc is (S, N), we want cutpoints to be (S, 1, K-1) so it broadcasts to (S, N, K-1) 
-            # effectively using the same cutpoints for all N.
-            cutpoints_expanded = cutpoints[None, None, :] 
-            # But wait, if cutpoints is just (K-1,), TFP might broadcast automatically?
-            # loc (S, N), cutpoints (K-1). Broadcast -> (S, N, K-1) ?
-            # Let's try explicit broadcast to match batch dims (S).
-            # cutpoints_expanded = cutpoints[None, None, :]
-        elif cutpoints.ndim == 2: # (S, K-1)
-             cutpoints_expanded = cutpoints[:, None, :] # (S, 1, K-1)
+            cutpoints_expanded = cutpoints[None, None, :]
+        elif cutpoints.ndim == 2:
+             cutpoints_expanded = cutpoints[:, None, :]
         else:
-             cutpoints_expanded = cutpoints # Should likely not happen or be handled
-        
+             cutpoints_expanded = cutpoints
+
         dist = tfd.OrderedLogistic(cutpoints=cutpoints_expanded, loc=eta)
-        log_prob = dist.log_prob(y[None, :]) # (S, N)
+        log_prob = dist.log_prob(y[None, :])
         return log_prob
 
     def unormalized_log_prob(self, data: Dict[str, Any], scale_factor: float = 1.0, **params) -> jnp.ndarray:
-        """Compute unnormalized log probability (log joint).
-        
-        Args:
-            data: Dictionary with 'X' and 'y'
-            scale_factor: Factor to scale log-likelihood (for batch inference)
-            **params: Model parameters
-        """
-        # Note: We define prior on cutpoints_raw (gaussian).
-        # We do NOT include the Jacobian of the transform in the prior term 
-        # because the prior is explicitly on the raw parameter space.
-        # This effectively induces a prior on cutpoints that is pushforward of Normal.
-        # This is fine and standard for VI.
-        
+        """Compute unnormalized log probability (log joint)."""
         log_lik = self.log_likelihood(data, params)
         total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
 
-        prior = self.create_prior()
-        log_prior = prior.log_prob(params)
+        # Horseshoe prior on beta + N(0,5) prior on cutpoints_raw
+        lp_horseshoe = _horseshoe_log_prior(
+            params['log_tau'], params['log_local_scales'],
+            params['log_c'], params['beta_raw'], self.tau0)
+        lp_cutpoints = tfd.Independent(
+            tfd.Normal(
+                loc=jnp.zeros(self.n_cutpoints, dtype=self.dtype),
+                scale=5.0 * jnp.ones(self.n_cutpoints, dtype=self.dtype)
+            ),
+            reinterpreted_batch_ndims=1
+        ).log_prob(params['cutpoints_raw'])
 
-        return total_log_lik + log_prior
+        return total_log_lik + lp_horseshoe + lp_cutpoints
 
 class SimpleModelLikelihood(AutoDiffLikelihoodMixin, LikelihoodFunction):
     """Generic LikelihoodFunction wrapper for simple univariate models.
@@ -770,57 +867,16 @@ class MICEBayesianLOO(MICELogistic):
         khat_threshold: float = 0.7,
     ) -> Tuple[float, float, float, float]:
         """
-        Compute LOO-ELPD using PSIS, with AIS fallback when k-hat > threshold.
-
-        Args:
-            model: Model instance with log_likelihood method
-            data: Data dictionary
-            params: Posterior samples dict
-            surrogate_log_prob_fn: Log prob of the variational surrogate (for AIS)
-            prior_log_prob_fn: Log prob of the prior (for AIS)
-            khat_threshold: Threshold above which AIS is used
+        Compute LOO-ELPD using PSIS. No AIS fallback — models with
+        khat > threshold are discarded by the caller.
 
         Returns:
             Tuple of (elpd_loo, elpd_loo_se, khat_max, khat_mean)
         """
-        # Compute log-likelihood for each sample and data point
         log_lik = model.log_likelihood(data, params)  # (n_samples, n_data)
-
-        # Convert to numpy for PSIS
         log_lik_np = np.array(log_lik)
-
-        # Run PSIS-LOO
         loo, loos, ks = nppsis.psisloo(log_lik_np)
 
-        # If k-hat is high and we have surrogate/prior, use AIS to improve
-        if np.max(ks) > khat_threshold and surrogate_log_prob_fn is not None:
-            try:
-                likelihood_fn = SimpleModelLikelihood(model)
-                if prior_log_prob_fn is None:
-                    prior = model.create_prior()
-                    prior_log_prob_fn = lambda p: prior.log_prob(p)
-
-                sampler = AdaptiveImportanceSampler(
-                    likelihood_fn,
-                    prior_log_prob_fn=prior_log_prob_fn,
-                    surrogate_log_prob_fn=surrogate_log_prob_fn,
-                )
-                results = sampler.adaptive_is_loo(
-                    data, params,
-                    variational=True,
-                    khat_threshold=khat_threshold,
-                    transformations=['identity', 'mm1', 'mm2', 'pmm1', 'pmm2', 'll'],
-                )
-                best = results['best']
-                loos = np.array(best['ll_loo_psis'])
-                ks = np.array(best['khat'])
-                loo = float(np.sum(loos))
-            except Exception as e:
-                if self.verbose:
-                    print(f"    AIS fallback failed: {e}, using standard PSIS-LOO")
-
-        # Compute standard error of LOO ELPD
-        # SE = sqrt(n * var(loos)) where loos are pointwise contributions
         n = len(loos)
         elpd_se = np.sqrt(n * np.var(loos))
 
@@ -877,37 +933,37 @@ class MICEBayesianLOO(MICELogistic):
             model = SimpleLogisticRegression(
                 n_predictors=1,
                 prior_scale=self.prior_scale,
-                dtype=self.dtype
+                dtype=self.dtype,
+                n_obs=n_obs,
             )
         elif var_type == 'ordinal':
             # Use global ordinal values if available (for consistent n_classes)
             if getattr(self, 'global_ordinal_values', None) is not None:
-                # Use global set
                 unique_vals = self.global_ordinal_values
                 n_classes = self.n_global_classes
             else:
-                # Fallback to local unique values
                 unique_vals = np.unique(y_batch)
                 n_classes = len(unique_vals)
-            
-            # Map y_batch to 0..K-1 based on the CHOSEN unique values (global or local)
+
             val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
             y_mapped = np.array([val_map[val] for val in y_batch], dtype=np.float32)
-            
-            data_dict['y'] = y_mapped 
-            
+
+            data_dict['y'] = y_mapped
+
             model = SimpleOrdinalLogisticRegression(
                 n_classes=n_classes,
                 n_predictors=1,
                 prior_scale=self.prior_scale,
-                dtype=self.dtype
+                dtype=self.dtype,
+                n_obs=n_obs,
             )
         else:
             model = SimpleLinearRegression(
                 n_predictors=1,
                 prior_scale=self.prior_scale,
                 noise_scale=self.noise_scale,
-                dtype=self.dtype
+                dtype=self.dtype,
+                n_obs=n_obs,
             )
 
         # Run inference (Pathfinder or ADVI)
@@ -928,26 +984,28 @@ class MICEBayesianLOO(MICELogistic):
                 converged=False
             )
 
-        # Compute LOO-ELPD (with AIS fallback if k-hat > 0.7)
-        prior = model.create_prior()
-        prior_log_prob_fn = lambda p: prior.log_prob(p)
+        # Compute LOO-ELPD via PSIS
         elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(
             model, data_dict, params,
-            surrogate_log_prob_fn=surrogate_fn,
-            prior_log_prob_fn=prior_log_prob_fn,
         )
 
+        # Discard model if khat > 0.7
+        if khat_max > 0.7:
+            if self.verbose:
+                print(f"    khat={khat_max:.2f} > 0.7, discarding zero-predictor model")
+            return UnivariateModelResult(
+                n_obs=n_obs, elpd_loo=float('-inf'), elpd_loo_per_obs=float('-inf'),
+                elpd_loo_per_obs_se=float('inf'), khat_max=khat_max, khat_mean=khat_mean,
+                predictor_idx=None, target_idx=target_idx, converged=False)
+
         if params is not None:
-            # Compute point estimates before discarding params
-            # Standardize on numpy arrays to avoid JAX device memory hold
-            beta_mean = np.array(np.mean(params.get('beta', 0.0), axis=0)) if 'beta' in params else None
+            # Reconstruct effective beta from horseshoe params for point estimates
+            beta_eff = model._get_beta(params)
+            beta_mean = np.array(np.mean(beta_eff, axis=0))
             intercept_mean = float(np.mean(params['intercept'])) if 'intercept' in params else None
-            
-            # For ordinal, cutpoints
+
             cutpoints_mean = None
             if 'cutpoints_raw' in params:
-                 # Transform raw cutpoints to ordered ones and then average
-                 # Vmap the transform over samples
                  transformed_cutpoints = jax.vmap(model._transform_cutpoints)(params['cutpoints_raw'])
                  cutpoints_mean = np.array(np.mean(transformed_cutpoints, axis=0))
         else:
@@ -965,7 +1023,7 @@ class MICEBayesianLOO(MICELogistic):
             predictor_idx=None,
             target_idx=target_idx,
             converged=converged,
-            params=None, # Drop large posterior samples to save memory
+            params=None,
             beta_mean=beta_mean,
             intercept_mean=intercept_mean,
             cutpoints_mean=cutpoints_mean
@@ -1063,33 +1121,35 @@ class MICEBayesianLOO(MICELogistic):
             model = SimpleLogisticRegression(
                 n_predictors=n_predictors,
                 prior_scale=self.prior_scale,
-                dtype=self.dtype
+                dtype=self.dtype,
+                n_obs=n_obs,
             )
         elif target_var_type == 'ordinal':
-             # Use global ordinal values if available (for consistent n_classes)
             if getattr(self, 'global_ordinal_values', None) is not None:
                 unique_vals = self.global_ordinal_values
                 n_classes = self.n_global_classes
             else:
                 unique_vals = np.unique(y_batch)
                 n_classes = len(unique_vals)
-            
+
             val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
             y_mapped = np.array([val_map[val] for val in y_batch], dtype=np.float32)
             data_dict['y'] = y_mapped
-            
+
             model = SimpleOrdinalLogisticRegression(
                 n_classes=n_classes,
                 n_predictors=n_predictors,
                 prior_scale=self.prior_scale,
-                dtype=self.dtype
+                dtype=self.dtype,
+                n_obs=n_obs,
             )
         else:
             model = SimpleLinearRegression(
                 n_predictors=n_predictors,
                 prior_scale=self.prior_scale,
                 noise_scale=self.noise_scale,
-                dtype=self.dtype
+                dtype=self.dtype,
+                n_obs=n_obs,
             )
 
         # Run inference (Pathfinder or ADVI)
@@ -1112,24 +1172,29 @@ class MICEBayesianLOO(MICELogistic):
                 predictor_std=X_std
             )
 
-        # Compute LOO-ELPD (with AIS fallback if k-hat > 0.7)
-        prior = model.create_prior()
-        prior_log_prob_fn = lambda p: prior.log_prob(p)
+        # Compute LOO-ELPD via PSIS
         elpd_loo, elpd_se, khat_max, khat_mean = self._compute_loo_elpd(
             model, data_dict, params,
-            surrogate_log_prob_fn=surrogate_fn,
-            prior_log_prob_fn=prior_log_prob_fn,
         )
 
+        # Discard model if khat > 0.7
+        if khat_max > 0.7:
+            if self.verbose:
+                print(f"    khat={khat_max:.2f} > 0.7, discarding univariate model ({predictor_idx}->{target_idx})")
+            return UnivariateModelResult(
+                n_obs=n_obs, elpd_loo=float('-inf'), elpd_loo_per_obs=float('-inf'),
+                elpd_loo_per_obs_se=float('inf'), khat_max=khat_max, khat_mean=khat_mean,
+                predictor_idx=predictor_idx, target_idx=target_idx, converged=False,
+                predictor_mean=X_mean, predictor_std=X_std)
+
         if params is not None:
-             # Compute point estimates before discarding params
-             beta_mean = np.array(np.mean(params.get('beta', 0.0), axis=0)) if 'beta' in params else None
+             # Reconstruct effective beta from horseshoe params
+             beta_eff = model._get_beta(params)
+             beta_mean = np.array(np.mean(beta_eff, axis=0))
              intercept_mean = float(np.mean(params['intercept'])) if 'intercept' in params else None
-            
-             # For ordinal, cutpoints
+
              cutpoints_mean = None
              if 'cutpoints_raw' in params:
-                  # Transform raw cutpoints to ordered ones and then average
                   transformed_cutpoints = jax.vmap(model._transform_cutpoints)(params['cutpoints_raw'])
                   cutpoints_mean = np.array(np.mean(transformed_cutpoints, axis=0))
         else:
@@ -1147,7 +1212,7 @@ class MICEBayesianLOO(MICELogistic):
             predictor_idx=predictor_idx,
             target_idx=target_idx,
             converged=converged,
-            params=None, # Drop large posterior samples
+            params=None,
             predictor_mean=X_mean,
             predictor_std=X_std,
             beta_mean=beta_mean,
@@ -1162,7 +1227,9 @@ class MICEBayesianLOO(MICELogistic):
         seed: int = 42,
         save_dir: Optional[Union[str, Path]] = None,
         n_jobs: int = -1,
-        n_top_features: int = 50
+        n_top_features: int = 50,
+        resume: bool = False,
+        checkpoint_path: Optional[Union[str, Path]] = None
     ) -> 'MICEBayesianLOO':
         """
         Fit all univariate models for LOO-CV evaluation.
@@ -1174,6 +1241,12 @@ class MICEBayesianLOO(MICELogistic):
             save_dir: Directory to save incremental results. If None, keeps all in memory.
             n_jobs: Number of parallel jobs. -1 uses all cores.
             n_top_features: Number of top correlated features to consider as predictors.
+            resume: If True, skip models that are already fitted (i.e., present in
+                self.zero_predictor_results or self.univariate_results). Useful for
+                resuming after loading a partial checkpoint via ``self.load()``.
+            checkpoint_path: Path to auto-save a checkpoint after each target variable's
+                univariate models complete. If None but save_dir is provided, a default
+                checkpoint file is saved in save_dir.
 
         Returns:
             self
@@ -1249,39 +1322,53 @@ class MICEBayesianLOO(MICELogistic):
             if self.n_global_classes > 0:
                 print(f"  Global Ordinal Values: {self.global_ordinal_values} (n={self.n_global_classes})")
 
+        # Resolve checkpoint path
+        _checkpoint_path = None
+        if checkpoint_path is not None:
+            _checkpoint_path = Path(checkpoint_path)
+        elif save_dir is not None:
+            _checkpoint_path = Path(save_dir) / "checkpoint.yaml"
+
         # Fit zero-predictor models
         if fit_zero_predictors:
-            if self.verbose:
-                print("\nFitting zero-predictor models...")
+            # Determine which indices still need fitting
+            if resume:
+                zero_indices = [i for i in range(n_variables) if i not in self.zero_predictor_results]
+                if self.verbose and len(zero_indices) < n_variables:
+                    print(f"\nResuming zero-predictor models: {n_variables - len(zero_indices)} already fitted, {len(zero_indices)} remaining")
+            else:
+                zero_indices = list(range(n_variables))
 
-            if self.verbose:
-                print(f"  Scheduling {n_variables} zero-predictor jobs...")
-
-            def fit_zero(i):
-                return self._fit_zero_predictor(data, i, seed=seed + i)
-
-            # Use return_as="generator" to allow tqdm to track completion
-            results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-                delayed(fit_zero)(i) for i in range(n_variables)
-            )
-            
-            # Wrap generator with tqdm if verbose is off
-            if not self.verbose:
-                results_gen = tqdm(results_gen, total=n_variables, desc="Zero-Predictor Models")
-
-            # Collect results locally to avoid modifying self while pickling tasks
-            local_results = []
-            for i, result in zip(range(n_variables), results_gen):
-                local_results.append((i, result))
+            if zero_indices:
                 if self.verbose:
-                     if result.converged:
-                        print(f"  Var {i} ({self.variable_names[i]}): n_obs={result.n_obs}, elpd/n={result.elpd_loo_per_obs:.4f}")
-                     else:
-                        print(f"  Var {i} ({self.variable_names[i]}): FAILED/SKIPPED")
+                    print("\nFitting zero-predictor models...")
+                    print(f"  Scheduling {len(zero_indices)} zero-predictor jobs...")
 
-            # Update state after parallel execution finishes
-            for i, result in local_results:
-                self.zero_predictor_results[i] = result
+                def fit_zero(i):
+                    return self._fit_zero_predictor(data, i, seed=seed + i)
+
+                # Use return_as="generator" to allow tqdm to track completion
+                results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
+                    delayed(fit_zero)(i) for i in zero_indices
+                )
+
+                # Wrap generator with tqdm if verbose is off
+                if not self.verbose:
+                    results_gen = tqdm(results_gen, total=len(zero_indices), desc="Zero-Predictor Models")
+
+                # Collect results locally to avoid modifying self while pickling tasks
+                local_results = []
+                for i, result in zip(zero_indices, results_gen):
+                    local_results.append((i, result))
+                    if self.verbose:
+                         if result.converged:
+                            print(f"  Var {i} ({self.variable_names[i]}): n_obs={result.n_obs}, elpd/n={result.elpd_loo_per_obs:.4f}")
+                         else:
+                            print(f"  Var {i} ({self.variable_names[i]}): FAILED/SKIPPED")
+
+                # Update state after parallel execution finishes
+                for i, result in local_results:
+                    self.zero_predictor_results[i] = result
 
         # Fit one-predictor models
         if self.verbose:
@@ -1341,9 +1428,21 @@ class MICEBayesianLOO(MICELogistic):
                     print(f"Skipping {target_name}: No valid top-{n_top_features} predictors with >= {self.min_obs} obs.")
                 continue
 
+            # Filter out already-fitted models when resuming
+            if resume:
+                predictors_to_fit = [j for j in valid_predictors if (i, j) not in self.univariate_results]
+                if self.verbose and len(predictors_to_fit) < len(valid_predictors):
+                    print(f"  Resuming {target_name}: {len(valid_predictors) - len(predictors_to_fit)} already fitted, {len(predictors_to_fit)} remaining")
+                if not predictors_to_fit:
+                    if self.verbose:
+                        print(f"  Skipping {target_name}: all predictors already fitted")
+                    continue
+            else:
+                predictors_to_fit = valid_predictors
+
             # Parallelize fitting of valid predictors for this target
             if self.verbose:
-                print(f"  Processing {target_name} ({len(valid_predictors)} valid predictors)")
+                print(f"  Processing {target_name} ({len(predictors_to_fit)} predictors to fit)")
 
             def fit_single(j):
                 return self._fit_univariate(
@@ -1353,23 +1452,23 @@ class MICEBayesianLOO(MICELogistic):
 
             # Use return_as="generator" for inner loop progress
             results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-                delayed(fit_single)(j) for j in valid_predictors
+                delayed(fit_single)(j) for j in predictors_to_fit
             )
             
             # Optional inner progress bar
             if not self.verbose:
-                results_gen = tqdm(results_gen, total=len(valid_predictors), desc=f"Predictors for {target_name[:20]}...", leave=False)
+                results_gen = tqdm(results_gen, total=len(predictors_to_fit), desc=f"Predictors for {target_name[:20]}...", leave=False)
 
             # Collect results for this target locally
             target_results = {}
             if fit_zero_predictors and i in self.zero_predictor_results:
                 target_results['zero_predictor'] = self._result_to_dict(self.zero_predictor_results[i])
-            
+
             univariate_list = []
             local_updates = []
-            
+
             # Consume generator
-            for j, result in zip(valid_predictors, results_gen):
+            for j, result in zip(predictors_to_fit, results_gen):
                 # Stash for update later
                 local_updates.append((j, result))
                 
@@ -1397,6 +1496,12 @@ class MICEBayesianLOO(MICELogistic):
 
                 file_path = save_dir / f"model_target_{i}_{safe_name}.yaml"
                 self._save_yaml(file_path, target_results)
+
+            # Auto-save checkpoint after each target's univariate models complete
+            if _checkpoint_path is not None:
+                self.save(_checkpoint_path)
+                if self.verbose:
+                    print(f"  Checkpoint saved to {_checkpoint_path}")
 
         # Populate prediction graph
         self.prediction_graph = {}

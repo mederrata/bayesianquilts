@@ -142,6 +142,9 @@ def fit_neural_grm(
     kappa_scale=0.5, eta_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
     reload=False,
+    noisy_dim=False,
+    noisy_dim_eta_scale=0.01,
+    noisy_dim_ability_scale=2.0,
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
 
@@ -169,6 +172,9 @@ def fit_neural_grm(
         eta_scale=eta_scale,
         response_cardinality=response_cardinality,
         dtype=jnp.float64,
+        noisy_dim=noisy_dim,
+        noisy_dim_eta_scale=noisy_dim_eta_scale,
+        noisy_dim_ability_scale=noisy_dim_ability_scale,
     )
 
     steps_per_epoch = int(np.ceil(num_people / batch_size))
@@ -398,29 +404,56 @@ def generate_synthetic_data(model, item_keys, response_cardinality,
 # Comparison metrics
 # -------------------------------------------------------------------------
 
-def compare_ability_ordering(true_abilities, estimated_abilities):
-    """Compute rank correlation metrics between true and estimated abilities.
+def compare_ability_ordering(true_abilities, estimated_abilities,
+                             n_bootstrap=1000, ci_level=0.95, seed=42):
+    """Compute rank correlation metrics with bootstrap confidence intervals.
 
     Args:
         true_abilities: Array of true ability values (N,) or (N, D, 1, 1).
         estimated_abilities: Array of estimated ability values (same shape).
+        n_bootstrap: Number of bootstrap resamples for CI estimation.
+        ci_level: Confidence level (default 0.95 for 95% CI).
+        seed: Random seed for reproducibility.
 
     Returns:
-        Dict with spearman_r, spearman_p, kendall_tau, kendall_p, rmse.
+        Dict with spearman_r, kendall_tau, rmse, and bootstrap CIs.
     """
     true_flat = np.array(true_abilities).flatten()
     est_flat = np.array(estimated_abilities).flatten()
+    N = len(true_flat)
 
     spearman_r, spearman_p = stats.spearmanr(true_flat, est_flat)
     kendall_tau, kendall_p = stats.kendalltau(true_flat, est_flat)
     rmse = np.sqrt(np.mean((true_flat - est_flat) ** 2))
 
+    # Bootstrap CIs
+    rng = np.random.default_rng(seed)
+    boot_spearman = np.empty(n_bootstrap)
+    boot_kendall = np.empty(n_bootstrap)
+    boot_rmse = np.empty(n_bootstrap)
+
+    for b in range(n_bootstrap):
+        idx = rng.integers(0, N, size=N)
+        t, e = true_flat[idx], est_flat[idx]
+        boot_spearman[b] = stats.spearmanr(t, e).statistic
+        boot_kendall[b] = stats.kendalltau(t, e).statistic
+        boot_rmse[b] = np.sqrt(np.mean((t - e) ** 2))
+
+    alpha = 1 - ci_level
+    lo, hi = alpha / 2, 1 - alpha / 2
+
     return {
         'spearman_r': float(spearman_r),
         'spearman_p': float(spearman_p),
+        'spearman_ci': [float(np.percentile(boot_spearman, lo * 100)),
+                        float(np.percentile(boot_spearman, hi * 100))],
         'kendall_tau': float(kendall_tau),
         'kendall_p': float(kendall_p),
+        'kendall_ci': [float(np.percentile(boot_kendall, lo * 100)),
+                       float(np.percentile(boot_kendall, hi * 100))],
         'rmse': float(rmse),
+        'rmse_ci': [float(np.percentile(boot_rmse, lo * 100)),
+                    float(np.percentile(boot_rmse, hi * 100))],
     }
 
 

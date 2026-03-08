@@ -9,19 +9,19 @@ from bayesianquilts.data.rwa import get_data, item_keys
 from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
 
 df, num_people = get_data(polars_out=True)
-print(f"Loaded: {num_people} people, {len(item_keys)} items")
+print(f"Loaded: {num_people} people, {len(item_keys)} items", flush=True)
 
 imputation_df = df.select(item_keys).to_pandas()
 imputation_df = imputation_df.replace(-1, float('nan'))
-print(f"Missing values per item:\n{imputation_df.isna().sum()}")
+print(f"Missing values: {imputation_df.isna().sum().sum()}", flush=True)
 
 mice_loo = MICEBayesianLOO(
     prior_scale=1.0, pathfinder_num_samples=100,
-    pathfinder_maxiter=50, batch_size=512, verbose=True,
+    pathfinder_maxiter=50, batch_size=256, verbose=True,
 )
 mice_loo.fit_loo_models(
     imputation_df, n_top_features=22, n_jobs=1,
     fit_zero_predictors=True,
 )
 mice_loo.save('mice_loo_model.yaml')
-print("MICE LOO saved")
+print('MICE LOO saved', flush=True)

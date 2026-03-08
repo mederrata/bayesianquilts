@@ -51,6 +51,7 @@ class IrtMixedImputationModel:
         data_factory,
         uncertainty_penalty: float = 1.0,
         irt_elpd_batch_size: int = 4,
+        n_posterior_samples: int = 256,
     ):
         self.irt_model = irt_model
         self.mice_model = mice_model
@@ -67,7 +68,8 @@ class IrtMixedImputationModel:
         self._mice_elpd_per_item: Dict[str, float] = {}
         self._weights: Dict[str, float] = {}  # w_i for MICE; (1 - w_i) for IRT
 
-        self._compute_irt_elpd(data_factory, batch_size=irt_elpd_batch_size)
+        self._compute_irt_elpd(data_factory, batch_size=irt_elpd_batch_size,
+                               n_posterior_samples=n_posterior_samples)
         self._compute_mice_elpd()
         self._compute_weights()
         self._precompute_irt_pmfs()
@@ -76,63 +78,58 @@ class IrtMixedImputationModel:
     # ELPD computation
     # ------------------------------------------------------------------
 
-    def _compute_irt_elpd(self, data_factory, batch_size: int = 4):
-        """Compute per-item WAIC from the IRT model (comparable to LOO-ELPD).
+    def _compute_irt_elpd(self, data_factory, batch_size: int = 4,
+                          n_posterior_samples: int = 256):
+        """Compute per-item PSIS-LOO ELPD from the IRT model.
 
-        WAIC per item is::
+        Draws ``n_posterior_samples`` from the variational posterior and
+        computes the full ``(S, N, I)`` log-likelihood matrix in one
+        streaming pass over the data (chunked over posterior samples for
+        memory safety).  Then runs PSIS-LOO independently for each item
+        on its ``(S, N_i)`` slice of observed responses.
 
-            WAIC_i = lppd_i - p_waic_i
-
-        where::
-
-            lppd_i  = (1/N_i) sum_n log( (1/S) sum_s p(y_ni | theta_s) )
-            p_waic_i = (1/N_i) sum_n Var_s[ log p(y_ni | theta_s) ]
-
-        The WAIC correction ``p_waic`` penalises the in-sample lppd by the
-        effective number of parameters, making it asymptotically equivalent
-        to LOO-ELPD and therefore comparable to the MICE model's LOO-ELPD.
-
-        Streams over data batches and posterior sample chunks to stay
-        memory-safe.
+        Stores per-item ELPD, max khat, and per-observation LOO scores.
         """
-        from scipy.special import logsumexp as sp_logsumexp
+        from bayesianquilts.metrics.nppsis import psisloo
 
         model = self.irt_model
-        samples = model.surrogate_sample
         item_keys = model.item_keys
         K = model.response_cardinality
+        I = len(item_keys)
 
-        # FactorizedGRModel stores per-scale params; transform() assembles them
+        # Draw fresh posterior samples
+        surrogate = model.surrogate_distribution_generator(model.params)
+        key = jax.random.PRNGKey(314159)
+        samples = surrogate.sample(n_posterior_samples, seed=key)
+
         if hasattr(model, 'transform') and 'discriminations' not in samples:
             samples = model.transform(dict(samples))
 
-        disc_all = np.asarray(samples["discriminations"])    # (S, ...)
-        diff0_all = np.asarray(samples["difficulties0"])     # (S, ...)
+        disc_all = np.asarray(samples["discriminations"])
+        diff0_all = np.asarray(samples["difficulties0"])
         ddiff_all = np.asarray(samples["ddifficulties"]) if "ddifficulties" in samples else None
-        abil_all = np.asarray(samples["abilities"])          # (S, ...)
+        abil_all = np.asarray(samples["abilities"])
         S = disc_all.shape[0]
 
-        # Accumulators per item: sum of lppd and p_waic, plus count
-        item_lppd_sum = {k: 0.0 for k in item_keys}
-        item_pwaic_sum = {k: 0.0 for k in item_keys}
-        item_count = {k: 0 for k in item_keys}
+        # Accumulate per-item log-lik columns across data batches.
+        # Each entry is a list of (S, n_obs_in_batch) arrays.
+        item_log_liks: Dict[str, List[np.ndarray]] = {k: [] for k in item_keys}
 
         for batch in data_factory():
             people = np.asarray(batch[model.person_key], dtype=np.int64)
+            N_batch = len(people)
 
-            # Build observed responses matrix (N, I)
+            # Observed responses: (N_batch, I)
             responses = np.stack(
                 [np.asarray(batch[k], dtype=np.float64) for k in item_keys],
                 axis=-1,
             )
-            observed_mask = (
-                ~np.isnan(responses) & (responses >= 0) & (responses < K)
-            )
+            observed_mask = ~np.isnan(responses) & (responses >= 0) & (responses < K)
             responses_int = np.where(observed_mask, responses.astype(np.int64), 0)
 
-            # Collect per-sample log-probs in chunks: (S, N, I)
+            # Compute log P(y_ni | theta_s) for all items at once,
+            # chunked over posterior samples
             log_probs_chunks = []
-
             for s_start in range(0, S, batch_size):
                 s_end = min(s_start + batch_size, S)
 
@@ -142,48 +139,51 @@ class IrtMixedImputationModel:
                 abil_chunk = jnp.asarray(abil_all[s_start:s_end])
 
                 abil_people = abil_chunk[:, people, ...]
+                # (s_chunk, N_batch, I, K)
                 response_probs = np.asarray(
                     model.grm_model_prob_d(
                         abil_people, disc_chunk, diff0_chunk, ddiff_chunk,
                     )
-                )  # (s_chunk, N, I, K)
+                )
 
-                # Gather P(Y = y_obs) for each cell
+                # Gather observed response category: (s_chunk, N_batch, I)
                 resp_idx = responses_int[np.newaxis, :, :, np.newaxis]
                 obs_probs = np.take_along_axis(
                     response_probs, resp_idx, axis=-1,
-                )[..., 0]  # (s_chunk, N, I)
+                )[..., 0]
                 obs_probs = np.clip(obs_probs, 1e-30, None)
                 log_probs_chunks.append(np.log(obs_probs))
 
-            # log_probs: (S, N, I) — per-sample log-likelihood per cell
+            # (S, N_batch, I)
             log_probs = np.concatenate(log_probs_chunks, axis=0)
 
-            # lppd per cell: log E_s[p(y|theta_s)]
-            lppd_cell = sp_logsumexp(log_probs, axis=0) - np.log(S)  # (N, I)
-
-            # p_waic per cell: Var_s[log p(y|theta_s)]
-            pwaic_cell = np.var(log_probs, axis=0, ddof=1)  # (N, I)
-
+            # Split per item, keeping only observed observations
             for i_idx, item_key in enumerate(item_keys):
                 mask_i = observed_mask[:, i_idx]
                 if np.any(mask_i):
-                    item_lppd_sum[item_key] += float(
-                        lppd_cell[mask_i, i_idx].sum()
-                    )
-                    item_pwaic_sum[item_key] += float(
-                        pwaic_cell[mask_i, i_idx].sum()
-                    )
-                    item_count[item_key] += int(mask_i.sum())
+                    # (S, n_observed_in_batch)
+                    item_log_liks[item_key].append(log_probs[:, mask_i, i_idx])
 
-        # Per-item WAIC (on per-observation scale, comparable to LOO-ELPD)
-        for k in item_keys:
-            if item_count[k] > 0:
-                lppd = item_lppd_sum[k] / item_count[k]
-                pwaic = item_pwaic_sum[k] / item_count[k]
-                self._irt_elpd_per_item[k] = lppd - pwaic
-            else:
-                self._irt_elpd_per_item[k] = -np.inf
+        # Run PSIS-LOO independently per item
+        self._irt_khat_per_item: Dict[str, float] = {}
+        self._irt_elpd_loo_per_obs: Dict[str, np.ndarray] = {}
+
+        for item_key in item_keys:
+            chunks = item_log_liks[item_key]
+            if not chunks:
+                self._irt_elpd_per_item[item_key] = -np.inf
+                self._irt_khat_per_item[item_key] = np.inf
+                continue
+
+            # (S, N_i)
+            log_lik_i = np.concatenate(chunks, axis=1)
+            N_i = log_lik_i.shape[1]
+
+            loo_total, loos, ks = psisloo(log_lik_i)
+
+            self._irt_elpd_per_item[item_key] = float(loo_total) / N_i
+            self._irt_khat_per_item[item_key] = float(np.max(ks))
+            self._irt_elpd_loo_per_obs[item_key] = loos
 
     def _compute_mice_elpd(self):
         """Compute per-item ELPD from the MICE model.
@@ -262,10 +262,19 @@ class IrtMixedImputationModel:
 
         When w_mice is high, we trust the MICE imputation.
         When w_mice is low, we fall back toward the IRT baseline prediction.
+
+        If the IRT model's PSIS-LOO khat > 0.7 for an item, the IRT ELPD
+        estimate is unreliable and the IRT model is discarded for that item
+        (w_mice = 1.0).
         """
         for item_key in self.irt_model.item_keys:
             elpd_irt = self._irt_elpd_per_item.get(item_key, -np.inf)
             elpd_mice = self._mice_elpd_per_item.get(item_key, -np.inf)
+            khat_irt = self._irt_khat_per_item.get(item_key, np.inf)
+
+            # Discard IRT if khat > 0.7 (unreliable PSIS estimate)
+            if khat_irt > 0.7:
+                elpd_irt = -np.inf
 
             if not np.isfinite(elpd_mice) and not np.isfinite(elpd_irt):
                 self._weights[item_key] = 0.5
@@ -432,14 +441,20 @@ class IrtMixedImputationModel:
         """Per-item best ELPD from the MICE model."""
         return dict(self._mice_elpd_per_item)
 
+    @property
+    def irt_khat(self) -> Dict[str, float]:
+        """Per-item max khat from PSIS-LOO on the IRT model."""
+        return dict(self._irt_khat_per_item)
+
     def summary(self) -> str:
         """Return a human-readable summary of per-item weights."""
-        lines = ["Item Weights (MICE vs IRT):"]
-        lines.append(f"{'Item':<12} {'w_mice':>8} {'ELPD_mice':>10} {'ELPD_irt':>10}")
-        lines.append("-" * 44)
+        lines = ["Item Weights (MICE vs IRT, PSIS-LOO):"]
+        lines.append(f"{'Item':<12} {'w_mice':>8} {'ELPD_mice':>10} {'ELPD_irt':>10} {'khat_irt':>9}")
+        lines.append("-" * 53)
         for k in self.irt_model.item_keys:
             w = self._weights.get(k, float('nan'))
             em = self._mice_elpd_per_item.get(k, float('nan'))
             ei = self._irt_elpd_per_item.get(k, float('nan'))
-            lines.append(f"{k:<12} {w:>8.3f} {em:>10.4f} {ei:>10.4f}")
+            kh = self._irt_khat_per_item.get(k, float('nan'))
+            lines.append(f"{k:<12} {w:>8.3f} {em:>10.4f} {ei:>10.4f} {kh:>9.3f}")
         return "\n".join(lines)

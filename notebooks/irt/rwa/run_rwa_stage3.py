@@ -53,10 +53,18 @@ model_baseline = GRModel(
     kappa_scale=0.1, response_cardinality=response_cardinality,
     dtype=jnp.float64,
 )
-model_baseline.load_from_disk('grm_baseline')
+# Initialize then load saved params
+import h5py
+with h5py.File('grm_baseline/params.h5', 'r') as f:
+    loaded_params = {}
+    for key in f.keys():
+        loaded_params[key] = jnp.array(f[key][:])
+model_baseline.params = loaded_params
 
-# Get snapshot params (use current params as snapshot since we saved after full training)
-snapshot_params = model_baseline.params
+# Load snapshot params from epoch 50
+import pickle
+with open('snapshot_params.pkl', 'rb') as f:
+    snapshot_params = pickle.load(f)
 
 def calibrate_manually(model, n_samples=32, seed=42):
     try:
@@ -75,7 +83,7 @@ calibrate_manually(model_baseline, n_samples=32, seed=101)
 print("Loading MICE LOO...")
 mice_loo = MICEBayesianLOO(
     prior_scale=1.0, pathfinder_num_samples=100,
-    pathfinder_maxiter=50, batch_size=512, verbose=True,
+    pathfinder_maxiter=50, batch_size=256, verbose=True,
 )
 mice_loo.load('mice_loo_model.yaml')
 
@@ -111,13 +119,7 @@ model_imputed.save_to_disk('grm_imputed')
 # Actually let's load from the baseline training - check if losses were saved
 # We don't have them saved, so we'll recompute a quick eval
 print("Computing baseline loss for comparison...")
-losses_baseline_path = 'losses_baseline.npy'
-if os.path.exists(losses_baseline_path):
-    losses_baseline = np.load(losses_baseline_path)
-else:
-    # Re-run baseline briefly to get loss curve (or use saved model eval)
-    print("  No cached baseline losses, using model eval as single point")
-    losses_baseline = losses_imputed  # fallback
+losses_baseline = np.load('losses_baseline.npy')
 
 # Generate all plots
 print("Generating plots...")
