@@ -94,7 +94,11 @@ class BayesianModel(nnx.Module, ABC):
         **kwargs,
     ):
         # Auto-detect from self, allow override
-        pe_vars = point_estimate_vars or getattr(self, 'point_estimate_vars', None)
+        pe_vars = point_estimate_vars
+        if pe_vars is None:
+            attr = getattr(self, 'point_estimate_vars', None)
+            if isinstance(attr, dict):
+                pe_vars = attr
 
         def infinite_data_iterator():
             while True:

@@ -74,13 +74,26 @@ def load_dataset(dataset_name: str, cache_dir=None):
 # -------------------------------------------------------------------------
 
 def make_data_factory(data_dict, batch_size, num_people):
-    """Create a batched data factory for GRM fitting."""
+    """Create a batched data factory for GRM fitting.
+
+    Shuffles indices and yields fixed-size batches by wrapping around
+    (repeat) so all batches have exactly batch_size elements. This
+    prevents the last batch from being smaller and producing a
+    differently-scaled loss.
+    """
+    steps_per_epoch = int(np.ceil(num_people / batch_size))
     def data_factory():
         indices = np.arange(num_people)
         np.random.shuffle(indices)
-        for start in range(0, num_people, batch_size):
-            end = min(start + batch_size, num_people)
-            idx_batch = indices[start:end]
+        # Repeat indices so we can always fill full batches
+        n_needed = steps_per_epoch * batch_size
+        if n_needed > num_people:
+            indices = np.concatenate([
+                indices,
+                np.random.choice(num_people, n_needed - num_people, replace=True),
+            ])
+        for start in range(0, n_needed, batch_size):
+            idx_batch = indices[start:start + batch_size]
             yield {k: v[idx_batch] for k, v in data_dict.items()}
     return data_factory
 
@@ -117,6 +130,12 @@ def calibrate_model(model, n_samples=32, seed=42):
             if conc_key in model.params:
                 point_estimates[param_name] = value / (model.params[conc_key] + 1)
 
+    # Include point-estimate variables (e.g. nn_log_a, nn_log_b)
+    pe_vars = getattr(model, 'point_estimate_vars', None)
+    if isinstance(pe_vars, dict):
+        for k, v in pe_vars.items():
+            point_estimates[k] = v
+
     model.calibrated_expectations = point_estimates
 
     # --- Also store posterior samples for uncertainty analysis ---
@@ -143,8 +162,8 @@ def fit_neural_grm(
     lr_decay_factor=0.9, clip_norm=1.0,
     reload=False,
     noisy_dim=False,
-    noisy_dim_eta_scale=0.01,
-    noisy_dim_ability_scale=2.0,
+    noisy_dim_eta_scale=0.1,
+    noisy_dim_ability_scale=1.0,
     sample_size=32,
     seed=42,
     parameterization="log_scale",

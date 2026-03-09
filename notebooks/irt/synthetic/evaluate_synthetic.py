@@ -26,8 +26,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
                  lr_decay_factor=0.9, clip_norm=1.0,
                  reload_neural_grm=False,
                  noisy_dim=True,
-                 noisy_dim_eta_scale=0.01,
-                 noisy_dim_ability_scale=2.0,
+                 noisy_dim_eta_scale=0.1,
+                 noisy_dim_ability_scale=1.0,
                  sample_size=32,
                  seed=42,
                  parameterization="log_scale",
@@ -396,10 +396,10 @@ def main():
                         help="Add a loosely-coupled noisy second latent dimension")
     parser.add_argument("--no-noisy-dim", action="store_false", dest="noisy_dim",
                         help="Disable the noisy second latent dimension")
-    parser.add_argument("--noisy-dim-eta-scale", type=float, default=0.01,
-                        help="Discrimination scale for noisy dimension (default 0.01)")
-    parser.add_argument("--noisy-dim-ability-scale", type=float, default=2.0,
-                        help="Ability prior scale for noisy dimension (default 2.0)")
+    parser.add_argument("--noisy-dim-eta-scale", type=float, default=0.1,
+                        help="Discrimination scale for noisy dimension (default 0.1)")
+    parser.add_argument("--noisy-dim-ability-scale", type=float, default=1.0,
+                        help="Ability prior scale for noisy dimension (default 1.0)")
     parser.add_argument("--sample-size", type=int, default=32,
                         help="MC samples per ADVI gradient step (default 32)")
     parser.add_argument("--seed", type=int, default=42,

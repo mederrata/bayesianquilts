@@ -88,12 +88,18 @@ def compute_weights(dataset_name, batch_size=256):
     df, num_people = mod.get_data(polars_out=True)
     batch = make_data_dict(df)
 
+    steps_per_epoch = int(np.ceil(num_people / batch_size))
     def data_factory():
         indices = np.arange(num_people)
         np.random.shuffle(indices)
-        for start in range(0, num_people, batch_size):
-            end = min(start + batch_size, num_people)
-            idx_batch = indices[start:end]
+        n_needed = steps_per_epoch * batch_size
+        if n_needed > num_people:
+            indices = np.concatenate([
+                indices,
+                np.random.choice(num_people, n_needed - num_people, replace=True),
+            ])
+        for start in range(0, n_needed, batch_size):
+            idx_batch = indices[start:start + batch_size]
             yield {k: v[idx_batch] for k, v in batch.items()}
 
     # Load baseline GRM

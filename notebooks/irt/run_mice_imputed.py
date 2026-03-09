@@ -93,9 +93,14 @@ def run_mice_imputed(dataset_name, work_dir, skip_mice=False,
     def data_factory():
         indices = np.arange(SUBSAMPLE_N)
         np.random.shuffle(indices)
-        for start in range(0, SUBSAMPLE_N, batch_size):
-            end = min(start + batch_size, SUBSAMPLE_N)
-            idx_batch = indices[start:end]
+        n_needed = steps_per_epoch * batch_size
+        if n_needed > SUBSAMPLE_N:
+            indices = np.concatenate([
+                indices,
+                np.random.choice(SUBSAMPLE_N, n_needed - SUBSAMPLE_N, replace=True),
+            ])
+        for start in range(0, n_needed, batch_size):
+            idx_batch = indices[start:start + batch_size]
             yield {k: v[idx_batch] for k, v in batch.items()}
 
     # ---- Re-create baseline model from saved params ----

@@ -18,6 +18,31 @@ from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 from bayesianquilts.irt.irt import IRTModel
 
 
+@jax.custom_jvp
+def _safe_power(x, a):
+    """Compute x^a with gradient clipping to prevent NaN.
+
+    Forward: standard power.
+    Backward: clips d/da = x^a * log(x) to avoid huge gradients
+    when log(x) is very negative (x near 0).
+    """
+    return jnp.power(x, a)
+
+@_safe_power.defjvp
+def _safe_power_jvp(primals, tangents):
+    x, a = primals
+    dx, da = tangents
+    val = jnp.power(x, a)
+    # d/dx [x^a] = a * x^(a-1), stable
+    dval_dx = a * jnp.power(x, jnp.maximum(a - 1.0, 0.0))
+    # d/da [x^a] = x^a * log(x), can be huge when x≈0
+    log_x = jnp.log(jnp.maximum(x, 1e-7))
+    # Clip the log factor to prevent gradient explosion
+    log_x_clipped = jnp.clip(log_x, -5.0, 0.0)
+    dval_da = val * log_x_clipped
+    return val, dval_dx * dx + dval_da * da
+
+
 class NeuralGRModel(IRTModel):
     """Graded Response Model with a per-item Kumaraswamy CDF response function.
 
@@ -63,8 +88,8 @@ class NeuralGRModel(IRTModel):
         imputation_model=None,
         dtype=jnp.float64,
         noisy_dim=False,
-        noisy_dim_eta_scale=0.01,
-        noisy_dim_ability_scale=2.0,
+        noisy_dim_eta_scale=0.1,
+        noisy_dim_ability_scale=1.0,
         parameterization="softplus",
         rank=0,
         # Legacy params accepted but ignored for backward compat
@@ -142,15 +167,17 @@ class NeuralGRModel(IRTModel):
         Returns:
             Array of same shape as z, with values in (0, 1).
         """
-        log_a = nn_params['nn_log_a']  # (batch..., I)
-        log_b = nn_params['nn_log_b']  # (batch..., I)
+        raw_a = nn_params['nn_log_a']  # (batch..., I)
+        raw_b = nn_params['nn_log_b']  # (batch..., I)
 
-        # Positive shape params via exp, clipped for numerical stability
-        a = jnp.clip(jnp.exp(log_a), 0.1, 10.0)
-        b = jnp.clip(jnp.exp(log_b), 0.1, 10.0)
+        # Positive shape params via softplus (better gradients than exp near 0)
+        # softplus(0) = ln(2) ≈ 0.693, so initial a,b ≈ 0.7 (near 1)
+        # Shift so softplus(0) ≈ 1: a = softplus(raw + 0.5413)
+        a = jax.nn.softplus(raw_a + 0.5413)
+        b = jax.nn.softplus(raw_b + 0.5413)
 
         # Determine batch dims: everything before the I dimension
-        n_batch_dims = log_a.ndim - 1
+        n_batch_dims = raw_a.ndim - 1
 
         # Reshape a, b: (batch..., I) -> (batch..., 1, 1, I, 1)
         for _ in range(2):  # insert N, D dims
@@ -159,13 +186,15 @@ class NeuralGRModel(IRTModel):
         a = jnp.expand_dims(a, axis=-1)  # insert K-1 dim
         b = jnp.expand_dims(b, axis=-1)
 
-        # Apply sigmoid, then Kumaraswamy CDF
-        x = jax.nn.sigmoid(z)  # (..., N, D, I, K-1) in (0, 1)
-        x = jnp.clip(x, 1e-7, 1 - 1e-7)
-
-        # Kumaraswamy CDF: 1 - (1 - x^a)^b
-        x_a = jnp.power(x, a)
-        return 1.0 - jnp.power(1.0 - x_a, b)
+        # Kumaraswamy CDF: g(z) = 1 - (1 - sigmoid(z)^a)^b
+        # Uses _safe_power which clips d/da gradients to prevent NaN
+        # when sigmoid(z) is near 0 (large negative z).
+        x = jax.nn.sigmoid(z)
+        x = jnp.clip(x, 1e-6, 1.0 - 1e-6)
+        x_a = _safe_power(x, a)
+        x_a = jnp.clip(x_a, 1e-7, 1.0 - 1e-7)
+        result = 1.0 - _safe_power(1.0 - x_a, b)
+        return result
 
     def _get_nn_param_names(self):
         """Return list of Kumaraswamy CDF parameter names."""
@@ -361,7 +390,7 @@ class NeuralGRModel(IRTModel):
             ),
             difficulties0=lambda mu: tfd.Independent(
                 tfd.Normal(
-                    loc=mu,
+                    loc=jnp.asarray(mu, dtype=self.dtype),
                     scale=jnp.ones(
                         (1, self.dimensions, self.num_items, 1), dtype=self.dtype
                     ),
@@ -371,7 +400,7 @@ class NeuralGRModel(IRTModel):
             discriminations=(
                 (
                     lambda eta, kappa: tfd.Independent(
-                        AbsHorseshoe(scale=eta * kappa), reinterpreted_batch_ndims=4
+                        AbsHorseshoe(scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype)), reinterpreted_batch_ndims=4
                     )
                 )
                 if self.positive_discriminations
@@ -382,7 +411,7 @@ class NeuralGRModel(IRTModel):
                                 (1, self.dimensions, self.num_items, 1),
                                 dtype=self.dtype,
                             ),
-                            scale=eta * kappa,
+                            scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype),
                         ),
                         reinterpreted_batch_ndims=4,
                     )
@@ -489,14 +518,17 @@ class NeuralGRModel(IRTModel):
         self.params = self.surrogate_parameter_initializer()
 
     def unormalized_log_prob(self, data, prior_weight=1., **params):
-        """Compute unnormalized log probability (prior + likelihood - entropy)."""
+        """Compute unnormalized log probability (prior + likelihood).
+
+        Unlike the standard GRM, the NeuralGRM omits the discrimination
+        entropy term (-xlogy(w,w)/eta) because the per-item Kumaraswamy
+        shape parameters already provide sufficient flexibility, and the
+        1/eta factor causes NaN when eta approaches zero under the
+        Horseshoe prior.
+        """
         log_prior = self.joint_prior_distribution.log_prob(params)
         prediction = self.predictive_distribution(data, **params)
         log_likelihood = prediction["log_likelihood"]
-        weights = prediction["discriminations"]
-        weights = weights / jnp.sum(weights, axis=-3, keepdims=True)
-        entropy = -xlogy(weights, weights) / params["eta"]
-        entropy = jnp.sum(entropy, axis=[-1, -2, -3, -4])
 
         finite_portion = jnp.where(
             jnp.isfinite(log_likelihood),
@@ -509,7 +541,7 @@ class NeuralGRModel(IRTModel):
             log_likelihood,
             jnp.ones_like(log_likelihood) * min_val,
         )
-        return jnp.astype(prior_weight, log_prior.dtype) * (log_prior - entropy) + jnp.sum(
+        return jnp.astype(prior_weight, log_prior.dtype) * log_prior + jnp.sum(
             log_likelihood, axis=-1
         )
 
@@ -548,6 +580,10 @@ class NeuralGRModel(IRTModel):
                     arr = np.array(v)
                     if arr.size > 0:
                         grp.create_dataset(k, data=arr)
+            if isinstance(self.point_estimate_vars, dict):
+                pe_grp = f.create_group('point_estimate_vars')
+                for k, v in self.point_estimate_vars.items():
+                    pe_grp.create_dataset(k, data=np.array(v))
 
     @classmethod
     def load_from_disk(cls, path):
@@ -570,6 +606,10 @@ class NeuralGRModel(IRTModel):
             with h5py.File(path / 'params.h5', 'r') as f:
                 if 'params' in f:
                     instance.params = {k: jnp.array(v) for k, v in f['params'].items()}
+                if 'point_estimate_vars' in f:
+                    instance.point_estimate_vars = {
+                        k: jnp.array(v) for k, v in f['point_estimate_vars'].items()
+                    }
 
         return instance
 

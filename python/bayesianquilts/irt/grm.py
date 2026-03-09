@@ -544,7 +544,7 @@ class GRModel(IRTModel):
             ),
             difficulties0=lambda mu: tfd.Independent(
                 tfd.Normal(
-                    loc=mu,
+                    loc=jnp.asarray(mu, dtype=self.dtype),
                     scale=jnp.ones(
                         (1, self.dimensions, self.num_items, 1), dtype=self.dtype
                     ),
@@ -554,7 +554,7 @@ class GRModel(IRTModel):
             discriminations=(
                 (
                     lambda eta, kappa: tfd.Independent(
-                        AbsHorseshoe(scale=eta * kappa), reinterpreted_batch_ndims=4
+                        AbsHorseshoe(scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype)), reinterpreted_batch_ndims=4
                     )
                 )
                 if self.positive_discriminations
@@ -565,7 +565,7 @@ class GRModel(IRTModel):
                                 (1, self.dimensions, self.num_items, 1),
                                 dtype=self.dtype,
                             ),
-                            scale=eta * kappa,
+                            scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype),
                         ),
                         reinterpreted_batch_ndims=4,
                     )
@@ -617,7 +617,7 @@ class GRModel(IRTModel):
             grm_joint_distribution_dict["mu_ability"] = lambda sigma: tfd.Independent(
                 tfd.Normal(
                     loc=jnp.zeros((self.dimensions, self.num_groups), self.dtype),
-                    scale=sigma,
+                    scale=jnp.asarray(sigma, dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=2,
             )
