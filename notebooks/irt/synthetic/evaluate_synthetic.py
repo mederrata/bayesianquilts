@@ -27,7 +27,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
                  reload_neural_grm=False,
                  noisy_dim=False,
                  noisy_dim_eta_scale=0.01,
-                 noisy_dim_ability_scale=2.0):
+                 noisy_dim_ability_scale=2.0,
+                 sample_size=64):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -91,6 +92,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         noisy_dim=noisy_dim,
         noisy_dim_eta_scale=noisy_dim_eta_scale,
         noisy_dim_ability_scale=noisy_dim_ability_scale,
+        sample_size=sample_size,
     )
 
     # 3. Sample fresh abilities from N(0,1) as ground truth
@@ -160,7 +162,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
-        snapshot_epoch=snapshot_epoch,
+        snapshot_epoch=snapshot_epoch, sample_size=sample_size,
     )
     if snapshot_params is not None:
         print(f"  Using baseline epoch-{snapshot_epoch} snapshot to warm-start imputed model")
@@ -176,7 +178,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
-        initial_values=snapshot_params,
+        initial_values=snapshot_params, sample_size=sample_size,
     )
 
     # 9. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
@@ -190,7 +192,15 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
     )
     print(mixed_imputation.summary())
 
+    # Save diagnostics to HDF5 and free pointwise LOO arrays
+    mixed_imputation.save_diagnostics(str(output_dir / "mixed_diagnostics.h5"))
+    mixed_imputation._irt_elpd_loo_per_obs = {}
+    print(f"  Diagnostics saved to {output_dir / 'mixed_diagnostics.h5'}")
+
     # 10. Fit mixed-imputed GRM on all data
+    #     Uses weighted Rao-Blackwellization: each missing cell
+    #     contributes w_mice * log[sum_k q_mice(k) * p(Y=k|theta)]
+    #     When w_mice=0, contribution is 0 (ignorability).
     print(f"\n--- Fitting mixed-imputed GRM on all data ({num_people} people) ---")
     imputed_model = fit_grm_imputed(
         synth_data, item_keys, response_cardinality, num_people,
@@ -199,7 +209,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
-        initial_values=snapshot_params,
+        initial_values=snapshot_params, sample_size=sample_size,
     )
 
     # 11. Compare ability ordering preservation
@@ -368,6 +378,8 @@ def main():
                         help="Discrimination scale for noisy dimension (default 0.01)")
     parser.add_argument("--noisy-dim-ability-scale", type=float, default=2.0,
                         help="Ability prior scale for noisy dimension (default 2.0)")
+    parser.add_argument("--sample-size", type=int, default=64,
+                        help="MC samples per ADVI gradient step (default 64)")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -397,6 +409,7 @@ def main():
             noisy_dim=args.noisy_dim,
             noisy_dim_eta_scale=args.noisy_dim_eta_scale,
             noisy_dim_ability_scale=args.noisy_dim_ability_scale,
+            sample_size=args.sample_size,
         )
         all_results[ds] = results
 

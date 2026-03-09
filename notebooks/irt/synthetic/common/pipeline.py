@@ -145,6 +145,7 @@ def fit_neural_grm(
     noisy_dim=False,
     noisy_dim_eta_scale=0.01,
     noisy_dim_ability_scale=2.0,
+    sample_size=64,
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
 
@@ -192,6 +193,7 @@ def fit_neural_grm(
         clip_norm=clip_norm,
         zero_nan_grads=True,
         compute_elpd_loo=False,  # NeuralGRM is for data generation, not comparison
+        sample_size=sample_size,
     )
 
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -207,7 +209,7 @@ def fit_grm_baseline(
     dim=1, batch_size=256, num_epochs=500, learning_rate=2e-4,
     patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
-    snapshot_epoch=None,
+    snapshot_epoch=None, sample_size=8,
 ):
     """Fit a standard GRM (no imputation) and save to disk.
 
@@ -241,6 +243,7 @@ def fit_grm_baseline(
         clip_norm=clip_norm,
         zero_nan_grads=True,
         snapshot_epoch=snapshot_epoch,
+        sample_size=sample_size,
     )
     losses = res[0]
     snapshot_params = res[2] if len(res) > 2 else None
@@ -259,7 +262,7 @@ def fit_grm_imputed(
     imputation_model, dim=1, batch_size=256, num_epochs=500,
     learning_rate=2e-4, patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
-    initial_values=None,
+    initial_values=None, sample_size=8,
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
 
@@ -296,6 +299,7 @@ def fit_grm_imputed(
         clip_norm=clip_norm,
         zero_nan_grads=True,
         initial_values=initial_values,
+        sample_size=sample_size,
     )
     losses = res[0]
 
@@ -306,6 +310,53 @@ def fit_grm_imputed(
     np.save(save_dir / 'losses.npy', np.array(losses))
 
     return model
+
+
+def fit_grm_is(
+    baseline_model, data_dict, item_keys, num_people,
+    imputation_model, save_dir, batch_size=256,
+    n_samples=256, is_batch_size=4,
+):
+    """Reweight a fitted baseline GRM via importance sampling.
+
+    Uses the baseline (ignorability) posterior as proposal and
+    reweights samples by the imputation-adjusted likelihood ratio.
+    This avoids refitting and guarantees that when all stacking
+    weights are zero, the result is identical to the baseline.
+
+    Args:
+        baseline_model: A fitted GRModel (baseline, ignorability).
+        data_dict: Synthetic data dict with missingness.
+        item_keys: List of item column names.
+        num_people: Number of respondents.
+        imputation_model: IrtMixedImputationModel with per-item weights.
+        save_dir: Directory to save IS diagnostics.
+        batch_size: Data batch size for iterating over respondents.
+        n_samples: Number of posterior samples for IS.
+        is_batch_size: Chunk size over posterior samples (memory).
+
+    Returns:
+        dict with IS results (weights, abilities, diagnostics).
+    """
+    factory = make_data_factory(data_dict, batch_size, num_people)
+    is_results = baseline_model.fit_is(
+        data_factory=factory,
+        imputation_model=imputation_model,
+        n_samples=n_samples,
+        batch_size=is_batch_size,
+    )
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        save_dir / 'is_diagnostics.npz',
+        log_is_weights=is_results['log_is_weights'],
+        psis_weights=is_results['psis_weights'],
+        khat=is_results['khat'],
+        ess=is_results['ess'],
+    )
+
+    return is_results
 
 
 # -------------------------------------------------------------------------

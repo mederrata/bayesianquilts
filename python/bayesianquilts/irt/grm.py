@@ -454,6 +454,7 @@ class GRModel(IRTModel):
         log_probs = rv_responses.log_prob(choices)
 
         imputation_pmfs = data.get('_imputation_pmfs')
+        imputation_weights = data.get('_imputation_weights')
         if imputation_pmfs is not None:
             # Analytic Rao-Blackwellization: log[ sum_k q(k) * p(Y=k|phi) ]
             log_rp = jnp.log(jnp.maximum(response_probs, 1e-30))  # (S, N, I, K)
@@ -461,7 +462,21 @@ class GRModel(IRTModel):
             rb = jax.scipy.special.logsumexp(
                 log_rp + log_q[jnp.newaxis, ...], axis=-1
             )  # (S, N, I)
-            log_probs = jnp.where(bad_choices[jnp.newaxis, ...], rb, log_probs)
+
+            if imputation_weights is not None:
+                # Importance-sampling mode: weight RB contribution by
+                # per-item stacking weight.  When w_mice=0, the missing
+                # cell contributes 0 (ignorability).  When w_mice=1,
+                # full Rao-Blackwellization with MICE PMFs.
+                w = jnp.asarray(imputation_weights)  # (I,)
+                weighted_rb = w[jnp.newaxis, jnp.newaxis, :] * rb  # (S, N, I)
+                log_probs = jnp.where(
+                    bad_choices[jnp.newaxis, ...], weighted_rb, log_probs
+                )
+            else:
+                log_probs = jnp.where(
+                    bad_choices[jnp.newaxis, ...], rb, log_probs
+                )
         else:
             # Missing responses are marginalized out: sum_k p(k|theta) = 1,
             # so they contribute log(1) = 0 to the log-likelihood.

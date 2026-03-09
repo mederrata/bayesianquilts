@@ -292,9 +292,9 @@ def training_loop(
                                 best_params=best_params
                             )
 
-                            # Reduce learning rate more aggressively for NaN recovery
-                            recovery_lr_factor = 0.1 if nan_recovery_count > 1 else 0.5
-                            current_lr *= recovery_lr_factor
+                            # Gentle LR reduction on NaN — use the same decay factor
+                            # as plateau decay rather than aggressively halving
+                            current_lr *= lr_decay_factor
 
                             # Reinitialize optimizer with new parameters and learning rate
                             base_optimizer = base_optimizer_fn(current_lr)

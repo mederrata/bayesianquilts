@@ -200,24 +200,38 @@ class IRTModel(BayesianModel):
     def _compute_batch_pmfs(self, batch):
         """Compute imputation PMFs for missing cells using the imputation model.
 
-        Delegates to ``self.imputation_model.predict_pmf()`` for each
-        missing cell (n, i).  Observed cells get zeros.
+        When the imputation model supports importance-sampling mode
+        (has ``predict_mice_pmf`` and ``get_item_weight``), returns
+        MICE-only PMFs and per-item stacking weights.  Otherwise falls
+        back to the blended ``predict_pmf`` interface.
 
         Args:
             batch: dict mapping keys to arrays.
 
         Returns:
-            np.ndarray of shape (N, I, K) with PMFs for missing cells.
+            tuple (pmfs, weights) where:
+              - pmfs: np.ndarray (N, I, K) with PMFs for missing cells
+              - weights: np.ndarray (I,) with per-item stacking weights,
+                or None if the imputation model doesn't support IS mode
         """
         N = len(batch[self.item_keys[0]])
         I = self.num_items
         K = self.response_cardinality
         pmfs = np.zeros((N, I, K), dtype=np.float64)
 
+        # Check if the imputation model supports IS mode
+        use_is = (hasattr(self.imputation_model, 'predict_mice_pmf')
+                  and hasattr(self.imputation_model, 'get_item_weight'))
+        weights = np.zeros(I, dtype=np.float64) if use_is else None
+
         for i, item_key in enumerate(self.item_keys):
             col = np.asarray(batch[item_key], dtype=np.float64)
             bad = np.isnan(col) | (col < 0) | (col >= K)
             bad_indices = np.where(bad)[0]
+
+            if use_is:
+                weights[i] = self.imputation_model.get_item_weight(item_key)
+
             if len(bad_indices) == 0:
                 continue
 
@@ -236,50 +250,58 @@ class IRTModel(BayesianModel):
                     person_idx = int(batch[self.person_key][row_idx])
 
                 try:
-                    kwargs = {}
-                    if person_idx is not None:
-                        kwargs['person_idx'] = person_idx
-                    pmf = self.imputation_model.predict_pmf(
-                        observed_items, target=item_key, n_categories=K,
-                        **kwargs,
-                    )
+                    if use_is:
+                        pmf = self.imputation_model.predict_mice_pmf(
+                            observed_items, target=item_key, n_categories=K,
+                        )
+                    else:
+                        kwargs = {}
+                        if person_idx is not None:
+                            kwargs['person_idx'] = person_idx
+                        pmf = self.imputation_model.predict_pmf(
+                            observed_items, target=item_key, n_categories=K,
+                            **kwargs,
+                        )
                     pmfs[row_idx, i, :] = pmf
                 except (ValueError, KeyError, AttributeError, TypeError):
                     pmfs[row_idx, i, :] = 1.0 / K
 
-        return pmfs
+        return pmfs, weights
 
     def _wrap_factory_with_imputation(self, factory):
         """Wrap a data factory to attach imputation PMFs from the imputation model.
 
-        Returns a new factory that adds ``_imputation_pmfs`` to every batch.
+        Returns a new factory that adds ``_imputation_pmfs`` and optionally
+        ``_imputation_weights`` to every batch.  When weights are present,
+        the GRM uses importance-sampling mode where the contribution of
+        each missing cell is scaled by its stacking weight, so that
+        w_mice=0 items reduce to ignorability.
         """
         model_ref = self
+
+        def _attach_imputation(batch):
+            if model_ref._has_missing_values(batch):
+                pmfs, weights = model_ref._compute_batch_pmfs(batch)
+                batch['_imputation_pmfs'] = pmfs
+                if weights is not None:
+                    batch['_imputation_weights'] = weights
+            else:
+                N = len(batch[model_ref.item_keys[0]])
+                batch['_imputation_pmfs'] = np.zeros(
+                    (N, model_ref.num_items, model_ref.response_cardinality),
+                    dtype=np.float64,
+                )
 
         def imputing_factory():
             def imputing_iterator():
                 iterator = factory()
                 try:
                     for batch in iterator:
-                        if model_ref._has_missing_values(batch):
-                            batch['_imputation_pmfs'] = model_ref._compute_batch_pmfs(batch)
-                        else:
-                            N = len(batch[model_ref.item_keys[0]])
-                            batch['_imputation_pmfs'] = np.zeros(
-                                (N, model_ref.num_items, model_ref.response_cardinality),
-                                dtype=np.float64,
-                            )
+                        _attach_imputation(batch)
                         yield batch
                 except TypeError:
                     batch = iterator
-                    if model_ref._has_missing_values(batch):
-                        batch['_imputation_pmfs'] = model_ref._compute_batch_pmfs(batch)
-                    else:
-                        N = len(batch[model_ref.item_keys[0]])
-                        batch['_imputation_pmfs'] = np.zeros(
-                            (N, model_ref.num_items, model_ref.response_cardinality),
-                            dtype=np.float64,
-                        )
+                    _attach_imputation(batch)
                     yield batch
             return imputing_iterator()
 
@@ -434,3 +456,256 @@ class IRTModel(BayesianModel):
             )
 
         return res
+
+    def fit_is(self, data_factory, imputation_model,
+               n_samples=256, batch_size=4, seed=271828):
+        """Reweight the baseline posterior via importance sampling.
+
+        Instead of refitting with imputation, draws samples from the
+        baseline (ignorability) posterior and reweights them by the
+        ratio of the imputation-adjusted to the baseline likelihood.
+
+        Since observed cells cancel and the prior cancels, the IS
+        log-weight for sample s reduces to:
+
+            log w_s = Σ_{missing (n,i)} w_mice_i * log[Σ_k q_mice(k) * p(Y=k|θ_s)]
+
+        When w_mice=0 for all items, all log-weights are 0 and the
+        result is identical to the baseline (ignorability).
+
+        Uses PSIS (Vehtari et al. 2024) to smooth the weights and
+        diagnose reliability via k-hat.
+
+        Parameters
+        ----------
+        data_factory : callable
+            Returns an iterator over data batches.
+        imputation_model : IrtMixedImputationModel
+            Fitted mixed imputation model with ``predict_mice_pmf``
+            and ``get_item_weight`` methods.
+        n_samples : int
+            Number of posterior samples to draw.
+        batch_size : int
+            Chunk size over posterior samples (memory control).
+        seed : int
+            Random seed for sampling.
+
+        Returns
+        -------
+        dict with keys:
+            - ``is_weights``: normalized IS weights, shape (S,)
+            - ``log_is_weights``: unnormalized log IS weights, shape (S,)
+            - ``psis_weights``: PSIS-smoothed weights, shape (S,)
+            - ``khat``: PSIS diagnostic (< 0.7 is reliable)
+            - ``ess``: effective sample size
+            - ``abilities_is``: IS-reweighted ability point estimates (N, D, 1, 1)
+            - ``samples``: the posterior samples dict
+        """
+        from bayesianquilts.metrics.nppsis import psisloo
+
+        item_keys = self.item_keys
+        K = self.response_cardinality
+        I = len(item_keys)
+
+        # Per-item stacking weights
+        item_weights = np.array(
+            [imputation_model.get_item_weight(k) for k in item_keys],
+            dtype=np.float64,
+        )  # (I,)
+
+        # Skip IS entirely if all weights are zero (pure ignorability)
+        if np.allclose(item_weights, 0.0):
+            print("  All stacking weights are 0 — IS is identical to baseline.")
+            self.is_weights = None
+            self.is_khat = 0.0
+            return {
+                'is_weights': None,
+                'log_is_weights': None,
+                'psis_weights': None,
+                'khat': 0.0,
+                'ess': float(n_samples),
+                'abilities_is': self.calibrated_expectations.get('abilities'),
+                'samples': self.surrogate_sample,
+            }
+
+        # Draw posterior samples from baseline
+        surrogate = self.surrogate_distribution_generator(self.params)
+        key = jax.random.PRNGKey(seed)
+        samples = surrogate.sample(n_samples, seed=key)
+
+        if hasattr(self, 'transform') and 'discriminations' not in samples:
+            samples = self.transform(dict(samples))
+
+        disc_all = np.asarray(samples["discriminations"])
+        diff0_all = np.asarray(samples["difficulties0"])
+        ddiff_all = (np.asarray(samples["ddifficulties"])
+                     if "ddifficulties" in samples else None)
+        abil_all = np.asarray(samples["abilities"])
+        S = disc_all.shape[0]
+
+        # Precompute MICE-only PMFs for all missing cells
+        # We accumulate log IS weights across batches
+        log_is_weights = np.zeros(S, dtype=np.float64)
+
+        for batch in data_factory():
+            people = np.asarray(batch[self.person_key], dtype=np.int64)
+            N_batch = len(people)
+
+            # Identify missing cells: (N_batch, I)
+            responses = np.stack(
+                [np.asarray(batch[k], dtype=np.float64) for k in item_keys],
+                axis=-1,
+            )
+            bad_mask = np.isnan(responses) | (responses < 0) | (responses >= K)
+
+            if not np.any(bad_mask):
+                continue
+
+            # Compute MICE PMFs for missing cells in this batch: (N_batch, I, K)
+            mice_pmfs = np.zeros((N_batch, I, K), dtype=np.float64)
+            for i, item_key in enumerate(item_keys):
+                if item_weights[i] == 0.0:
+                    continue
+                bad_rows = np.where(bad_mask[:, i])[0]
+                if len(bad_rows) == 0:
+                    continue
+                for row_idx in bad_rows:
+                    observed_items = {}
+                    for j, other_key in enumerate(item_keys):
+                        if other_key == item_key:
+                            continue
+                        val = float(responses[row_idx, j])
+                        if not (np.isnan(val) or val < 0 or val >= K):
+                            observed_items[other_key] = val
+                    try:
+                        mice_pmfs[row_idx, i, :] = imputation_model.predict_mice_pmf(
+                            observed_items, target=item_key, n_categories=K,
+                        )
+                    except (ValueError, KeyError, AttributeError, TypeError):
+                        mice_pmfs[row_idx, i, :] = 1.0 / K
+
+            # Compute response probs p(Y=k|θ_s) chunked over S
+            for s_start in range(0, S, batch_size):
+                s_end = min(s_start + batch_size, S)
+                s_chunk = s_end - s_start
+
+                disc_chunk = jnp.asarray(disc_all[s_start:s_end])
+                diff0_chunk = jnp.asarray(diff0_all[s_start:s_end])
+                ddiff_chunk = (jnp.asarray(ddiff_all[s_start:s_end])
+                               if ddiff_all is not None else None)
+                abil_chunk = jnp.asarray(abil_all[s_start:s_end])
+
+                abil_people = abil_chunk[:, people, ...]
+
+                # (s_chunk, N_batch, I, K)
+                response_probs = np.asarray(
+                    self.grm_model_prob_d(
+                        abil_people, disc_chunk, diff0_chunk, ddiff_chunk,
+                    )
+                )
+
+                # For each missing cell, compute:
+                # w_i * log[sum_k q_mice(k) * p(Y=k|theta_s)]
+                log_rp = np.log(np.maximum(response_probs, 1e-30))  # (s_chunk, N, I, K)
+                log_q = np.log(np.maximum(mice_pmfs, 1e-30))  # (N, I, K)
+
+                # log[sum_k q(k)*p(k|theta)] via logsumexp
+                rb = np.asarray(jax.scipy.special.logsumexp(
+                    jnp.asarray(log_rp) + jnp.asarray(log_q)[jnp.newaxis, ...],
+                    axis=-1,
+                ))  # (s_chunk, N_batch, I)
+
+                # Weight by w_mice per item and mask to missing only
+                weighted_rb = rb * item_weights[np.newaxis, np.newaxis, :]  # (s_chunk, N, I)
+                weighted_rb = np.where(bad_mask[np.newaxis, ...], weighted_rb, 0.0)
+
+                # Sum over people and items, accumulate per sample
+                log_is_weights[s_start:s_end] += weighted_rb.sum(axis=(1, 2))
+
+        # PSIS smoothing
+        # psisloo expects (S, N) log-likelihood matrix, but we have
+        # aggregate log-weights (S,). Use PSIS on the weights directly.
+        # Reshape to (S, 1) for the psisloo interface.
+        log_w_matrix = log_is_weights[:, np.newaxis]
+
+        # Normalize for numerical stability
+        log_w_matrix -= log_w_matrix.max()
+
+        # Use PSIS to smooth
+        try:
+            _, _, ks = psisloo(log_w_matrix)
+            khat = float(ks[0])
+        except Exception:
+            khat = np.inf
+
+        # Compute normalized IS weights
+        log_w = log_is_weights - log_is_weights.max()
+        raw_weights = np.exp(log_w)
+        raw_weights /= raw_weights.sum()
+
+        # PSIS-smoothed weights (truncated Pareto smoothing)
+        from bayesianquilts.metrics.nppsis import gpdfitnew as gpdfit
+        try:
+            # Sort and smooth the tail
+            sorted_idx = np.argsort(log_is_weights)
+            log_w_sorted = log_is_weights[sorted_idx]
+            # Use top min(S/5, 3*sqrt(S)) for tail fitting
+            M = min(S // 5, int(3 * np.sqrt(S)))
+            if M > 4:
+                cutoff = log_w_sorted[-(M + 1)]
+                tail = log_w_sorted[-M:] - cutoff
+                k_est, sigma = gpdfit(tail)
+                if k_est < 0.7:
+                    # Replace tail with smoothed values
+                    from scipy.stats import genpareto
+                    order = np.arange(1, M + 1, dtype=np.float64)
+                    p = (order - 0.5) / M
+                    smoothed_tail = genpareto.ppf(p, k_est, scale=sigma) + cutoff
+                    psis_log_w = log_is_weights.copy()
+                    psis_log_w[sorted_idx[-M:]] = smoothed_tail
+                else:
+                    psis_log_w = log_is_weights.copy()
+            else:
+                psis_log_w = log_is_weights.copy()
+        except Exception:
+            psis_log_w = log_is_weights.copy()
+
+        psis_w = np.exp(psis_log_w - psis_log_w.max())
+        psis_w /= psis_w.sum()
+
+        # Effective sample size
+        ess = 1.0 / np.sum(psis_w ** 2)
+
+        # IS-reweighted ability estimates
+        abilities = np.asarray(samples["abilities"])  # (S, N, D, 1, 1)
+        abilities_is = np.einsum('s,s...->...', psis_w, abilities)
+
+        print(f"  IS reweighting: k-hat={khat:.3f}, ESS={ess:.1f}/{S}, "
+              f"max log-w={log_is_weights.max():.2f}, "
+              f"min log-w={log_is_weights.min():.2f}")
+
+        # Store on model for downstream use
+        self.is_weights = psis_w
+        self.is_log_weights = log_is_weights
+        self.is_khat = khat
+        self.is_ess = ess
+        self.is_abilities = abilities_is
+        self.is_samples = samples
+
+        # Also update calibrated expectations with IS-reweighted values
+        self.calibrated_expectations_is = {}
+        for key in samples:
+            arr = np.asarray(samples[key])
+            self.calibrated_expectations_is[key] = np.einsum(
+                's,s...->...', psis_w, arr
+            )
+
+        return {
+            'is_weights': raw_weights,
+            'log_is_weights': log_is_weights,
+            'psis_weights': psis_w,
+            'khat': khat,
+            'ess': ess,
+            'abilities_is': abilities_is,
+            'samples': samples,
+        }
