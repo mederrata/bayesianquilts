@@ -200,9 +200,9 @@ def _qmc_sample_elbo(key, surrogate_posterior, qmc_base, sample_size):
     """
     import tensorflow_probability.substrates.jax.distributions as tfd
 
-    shift = jax.random.uniform(key, shape=(qmc_base.shape[-1],))
+    shift = jax.random.uniform(key, shape=(qmc_base.shape[-1],), dtype=qmc_base.dtype)
     shifted = (qmc_base + shift[None, :]) % 1.0
-    normals = jax.scipy.special.ndtri(jnp.clip(shifted, 1e-6, 1 - 1e-6))
+    normals = jax.scipy.special.ndtri(jnp.clip(shifted, 1e-6, 1 - 1e-6)).astype(qmc_base.dtype)
 
     samples = {}
     offset = 0
@@ -281,8 +281,13 @@ def minibatch_fit_surrogate_posterior(
             for d in test_surrogate.model.values()
         )
         n_pow2 = int(2 ** np.ceil(np.log2(max(sample_size, 2))))
-        sobol = scipy_qmc.Sobol(d=total_dim, scramble=False)
-        qmc_base = jnp.array(sobol.random(n_pow2)[:sample_size])
+        if total_dim > 21201:
+            print(f"  QMC: total_dim={total_dim} exceeds Sobol limit (21201), falling back to iid sampling")
+            qmc = False
+            qmc_base = None
+        else:
+            sobol = scipy_qmc.Sobol(d=total_dim, scramble=False)
+            qmc_base = jnp.array(sobol.random(n_pow2)[:sample_size], dtype=jnp.float32)
 
     # KL annealing: track step count via mutable closure
     step_counter = [0]
