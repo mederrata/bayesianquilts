@@ -1,11 +1,14 @@
+import inspect
 import numbers
 from typing import Any, Callable, Iterator
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from flax.core import unfreeze
+from jax import random
 from tensorflow_probability.substrates.jax import tf2jax as tf
 from tqdm import tqdm
 
@@ -131,6 +134,8 @@ def training_loop(
     zero_nan_grads: bool = False,
     verbose: bool = True,
     snapshot_epoch: int | None = None,
+    seed: int | None = None,
+    compute_dtype: jnp.dtype | None = None,
 ):
     """
     Advanced training loop with checkpointing, early stopping, LR decay on plateau,
@@ -177,6 +182,16 @@ def training_loop(
         but may hide underlying numerical instability issues (default: False).
     verbose : bool, optional
         Whether to print progress and logs (default: True)
+    seed : int, optional
+        Random seed for reproducible PRNG key threading. When provided, a JAX
+        PRNG key is split at each step and passed to loss_fn as a third
+        argument (if the loss function accepts a 'seed' parameter). This
+        ensures reproducible sampling under JIT (default: None).
+    compute_dtype : jnp.dtype, optional
+        If provided, cast data arrays to this dtype before passing to loss_fn.
+        Useful for mixed precision training where likelihood computation can
+        use float16/bfloat16 while variational parameters stay in float32
+        (default: None, no casting).
 
     Returns
     -------
@@ -210,20 +225,33 @@ def training_loop(
             merged[k] = updated_subset[k]
         return merged
 
-    # Create base optimizer
-    base_optimizer = base_optimizer_fn(current_lr)
+    # Create optimizer with inject_hyperparams for LR decay without
+    # destroying momentum/second-moment state
+    def _make_optimizer(learning_rate):
+        base = base_optimizer_fn(learning_rate)
+        if clip_norm is not None:
+            return optax.chain(
+                optax.clip_by_global_norm(clip_norm),
+                base,
+            )
+        return base
 
-    # Add gradient clipping if specified
-    if clip_norm is not None:
-        optimizer = optax.chain(
-            optax.clip_by_global_norm(clip_norm),
-            base_optimizer
-        )
-    else:
-        optimizer = base_optimizer
+    optimizer = optax.inject_hyperparams(_make_optimizer)(
+        learning_rate=jnp.array(current_lr)
+    )
 
     opt_state = optimizer.init(filter_params(initial_values))
-    value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
+
+    # Set up PRNG key threading if seed is provided
+    rng_key = random.PRNGKey(seed) if seed is not None else None
+    loss_accepts_seed = 'seed' in inspect.signature(loss_fn).parameters
+
+    if loss_accepts_seed:
+        def _loss_with_seed(data, params, seed):
+            return loss_fn(data=data, params=params, seed=seed)
+        value_and_grad_fn = jax.jit(jax.value_and_grad(_loss_with_seed, argnums=[1]))
+    else:
+        value_and_grad_fn = jax.jit(jax.value_and_grad(loss_fn, argnums=[1]))
     if checkpoint_dir is not None:
         ocp.test_utils.erase_and_create_empty(checkpoint_dir)
         checkpointer = ocp.Checkpointer(ocp.CompositeCheckpointHandler())
@@ -258,7 +286,25 @@ def training_loop(
                 for _ in pbar:
                     try:
                         batch = next(data_iterator)
-                        loss_val, grads = value_and_grad_fn(batch, params)
+
+                        # Mixed precision: cast data to compute_dtype
+                        if compute_dtype is not None:
+                            batch = jax.tree_util.tree_map(
+                                lambda x: x.astype(compute_dtype)
+                                if hasattr(x, 'astype') and jnp.issubdtype(x.dtype, jnp.floating)
+                                else x,
+                                batch,
+                            )
+
+                        # Thread PRNG key if loss_fn accepts seed
+                        if loss_accepts_seed and rng_key is not None:
+                            rng_key, step_key = random.split(rng_key)
+                            loss_val, grads = value_and_grad_fn(batch, params, step_key)
+                        elif loss_accepts_seed:
+                            step_key = random.PRNGKey(np.random.randint(0, 2**31))
+                            loss_val, grads = value_and_grad_fn(batch, params, step_key)
+                        else:
+                            loss_val, grads = value_and_grad_fn(batch, params)
 
                         # Comprehensive NaN/Inf checking
                         loss_has_issues, loss_location = check_nan_inf(loss_val, "loss")
@@ -296,16 +342,11 @@ def training_loop(
                             # as plateau decay rather than aggressively halving
                             current_lr *= lr_decay_factor
 
-                            # Reinitialize optimizer with new parameters and learning rate
-                            base_optimizer = base_optimizer_fn(current_lr)
-                            if clip_norm is not None:
-                                optimizer = optax.chain(
-                                    optax.clip_by_global_norm(clip_norm),
-                                    base_optimizer
-                                )
-                            else:
-                                optimizer = base_optimizer
+                            # Update LR via inject_hyperparams (preserves momentum)
+                            opt_state.hyperparams['learning_rate'] = jnp.array(current_lr)
+                            # Re-init optimizer state for recovered params
                             opt_state = optimizer.init(filter_params(params))
+                            opt_state.hyperparams['learning_rate'] = jnp.array(current_lr)
 
                             # Reset gradient accumulator
                             grad_accumulator = jax.tree_util.tree_map(
@@ -332,8 +373,9 @@ def training_loop(
                         )
                         total_steps += 1
                         if (total_steps + 1) % accumulation_steps == 0:
+                            # Average accumulated gradients
                             tot_grads = jax.tree_util.tree_map(
-                                lambda g: g, grad_accumulator
+                                lambda g: g / accumulation_steps, grad_accumulator
                             )
                             # Only update selected keys
                             filtered_params = filter_params(params)
@@ -401,19 +443,9 @@ def training_loop(
                         print(
                             f"  -> No improvement in loss for {checks_no_improve} check(s).                    "
                         )
-                    # Decay learning rate
+                    # Decay learning rate (preserves optimizer momentum)
                     current_lr *= lr_decay_factor
-                    base_optimizer = base_optimizer_fn(current_lr)
-                    if clip_norm is not None:
-                        optimizer = optax.chain(
-                            optax.clip_by_global_norm(clip_norm),
-                            base_optimizer
-                        )
-                    else:
-                        optimizer = base_optimizer
-                    opt_state = optimizer.init(
-                        filter_params(params)
-                    )  # Re-initialize optimizer state with new LR
+                    opt_state.hyperparams['learning_rate'] = jnp.array(current_lr)
                     if verbose:
                         print(f"  -> Decaying learning rate to: {current_lr:.6f}")
 
