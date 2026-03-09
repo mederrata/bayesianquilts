@@ -227,7 +227,7 @@ def build_trainable_concentration_scale_distribution(
     name = "" if None else name
 
     dtype = dtype_util.common_dtype(
-        [initial_concentration, initial_scale], dtype_hint=jnp.float64
+        [initial_concentration, initial_scale], dtype_hint=jnp.float32
     )
     initial_concentration = initial_concentration.astype(dtype)
     initial_scale = initial_scale.astype(dtype)

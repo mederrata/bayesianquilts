@@ -149,6 +149,8 @@ def fit_neural_grm(
     seed=42,
     parameterization="log_scale",
     pathfinder_init=False,
+    qmc=False,
+    kl_anneal_epochs=0,
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
 
@@ -200,6 +202,8 @@ def fit_neural_grm(
         sample_size=sample_size,
         seed=seed,
         pathfinder_init=pathfinder_init,
+        qmc=qmc,
+        kl_anneal_epochs=kl_anneal_epochs,
     )
 
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -219,6 +223,8 @@ def fit_grm_baseline(
     seed=42,
     parameterization="log_scale",
     pathfinder_init=False,
+    qmc=False,
+    kl_anneal_epochs=0,
 ):
     """Fit a standard GRM (no imputation) and save to disk.
 
@@ -256,6 +262,8 @@ def fit_grm_baseline(
         sample_size=sample_size,
         seed=seed,
         pathfinder_init=pathfinder_init,
+        qmc=qmc,
+        kl_anneal_epochs=kl_anneal_epochs,
     )
     losses = res[0]
     snapshot_params = res[2] if len(res) > 2 else None
@@ -278,6 +286,8 @@ def fit_grm_imputed(
     seed=42,
     parameterization="log_scale",
     pathfinder_init=False,
+    qmc=False,
+    kl_anneal_epochs=0,
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
 
@@ -318,6 +328,8 @@ def fit_grm_imputed(
         sample_size=sample_size,
         seed=seed,
         pathfinder_init=pathfinder_init,
+        qmc=qmc,
+        kl_anneal_epochs=kl_anneal_epochs,
     )
     losses = res[0]
 

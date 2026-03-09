@@ -60,6 +60,7 @@ class BayesianModel(nnx.Module, ABC):
     data: Any = nnx.data(None)
     data_cardinality: Any = nnx.data(None)
     params: Any = nnx.data(None)
+    point_estimate_vars: Any = nnx.data(None)
     var_list: list = []
     bijectors: list = []
 
@@ -89,8 +90,12 @@ class BayesianModel(nnx.Module, ABC):
         self,
         batched_data_factory,
         initial_values: Dict[str, jax.typing.ArrayLike] = None,
+        point_estimate_vars: dict | None = None,
         **kwargs,
     ):
+        # Auto-detect from self, allow override
+        pe_vars = point_estimate_vars or getattr(self, 'point_estimate_vars', None)
+
         def infinite_data_iterator():
             while True:
                 # Re-instantiate the iterator from the factory
@@ -100,9 +105,10 @@ class BayesianModel(nnx.Module, ABC):
                 except TypeError:
                     # If it's not iterable?
                     yield iterator
-        
+
         res = self._calibrate_minibatch_advi(
-            infinite_data_iterator(), initial_values=initial_values, **kwargs
+            infinite_data_iterator(), initial_values=initial_values,
+            point_estimate_vars=pe_vars, **kwargs
         )
         self.params = res[1]
         return res
@@ -195,6 +201,7 @@ class BayesianModel(nnx.Module, ABC):
         snapshot_epoch: int | None = None,
         pathfinder_init: bool = False,
         pathfinder_kwargs: dict | None = None,
+        point_estimate_vars: dict | None = None,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -250,16 +257,31 @@ class BayesianModel(nnx.Module, ABC):
                 verbose=verbose,
                 zero_nan_grads=zero_nan_grads,
                 snapshot_epoch=snapshot_epoch,
+                point_estimate_vars=point_estimate_vars,
                 **kwargs,
             )
             return losses
 
         result = run_approximation()
         losses, params = result[0], result[1]
-        self.params = params
+
+        # Separate point-estimate params from surrogate params
+        from bayesianquilts.vi.minibatch import PE_PREFIX
+        surrogate_params = {}
+        point_params = {}
+        for k, v in params.items():
+            if k.startswith(PE_PREFIX):
+                point_params[k[len(PE_PREFIX):]] = v
+            else:
+                surrogate_params[k] = v
+
+        self.params = surrogate_params
+        if point_params:
+            self.point_estimate_vars = point_params
+
         if len(result) > 2:
-            return losses, params, result[2]
-        return losses, params
+            return losses, surrogate_params, result[2]
+        return losses, surrogate_params
 
     def set_calibration_expectations(self, samples: int = 24, variational: bool = True):
         if variational:
@@ -271,7 +293,7 @@ class BayesianModel(nnx.Module, ABC):
                     dist = self.surrogate_distribution
             except Exception:
                 dist = self.surrogate_distribution
-                
+
             mean, var = FactorizedDistributionMoments(
                 dist, samples=samples
             )
@@ -287,6 +309,12 @@ class BayesianModel(nnx.Module, ABC):
                 k: jnp.std(v, axis=0, keepdims=True)
                 for k, v in self.surrogate_sample.items()
             }
+
+        # Point-estimate vars have zero variance by definition
+        if self.point_estimate_vars:
+            for k, v in self.point_estimate_vars.items():
+                self.calibrated_expectations[k] = v
+                self.calibrated_sd[k] = jnp.zeros_like(v)
 
     @abstractmethod
     def predictive_distribution(self, data, **params):
@@ -753,10 +781,17 @@ class BayesianModel(nnx.Module, ABC):
             else:
                 params = self.prior_distribution.sample(batch_shape, seed=sample_key)
         elif batch_shape is None:
-            return surrogate.sample(seed=sample_key)
+            params = surrogate.sample(seed=sample_key)
         else:
             params = surrogate.sample(batch_shape, seed=sample_key)
         params = self.transform(params)
+        # Merge point-estimate values (no sampling, just broadcast)
+        if self.point_estimate_vars and not prior:
+            for k, v in self.point_estimate_vars.items():
+                if batch_shape is not None:
+                    params[k] = jnp.broadcast_to(v, batch_shape + v.shape)
+                else:
+                    params[k] = v
         return params
 
     # =========================================================================
@@ -1060,11 +1095,208 @@ class BayesianModel(nnx.Module, ABC):
         return InferenceData(**idict)
 
 class QuiltedBayesianModel(BayesianModel):
-    """Quailted Bayesian Model
+    """Quilted Bayesian Model
 
     Initially a global model, Quilted Bayesian Models can be expanded along a given
     interaction alignment to create a larger model.
+
+    Provides staged_fit() for progressive training by interaction order with
+    sparsity-based pruning of unnecessary higher-order components.
     """
+
+    def _get_decompositions(self) -> dict:
+        """Return all Decomposed objects in this model.
+
+        Subclasses should override if they use non-standard attribute names.
+        Default implementation collects any attribute that is a Decomposed instance.
+        """
+        from bayesianquilts.jax.parameter import Decomposed
+        decomps = {}
+        for attr_name in dir(self):
+            if attr_name.startswith('_'):
+                continue
+            try:
+                val = getattr(self, attr_name)
+            except Exception:
+                continue
+            if isinstance(val, Decomposed):
+                decomps[attr_name] = val
+        return decomps
+
+    def staged_fit(
+        self,
+        batched_data_factory,
+        max_order: int | None = None,
+        sparsity_threshold: float = 0.1,
+        sparsity_method: str = "relative_norm",
+        epochs_per_stage: int | None = None,
+        final_epochs: int | None = None,
+        freeze_between_stages: bool = True,
+        coarse_dtype: jnp.dtype | None = jnp.float32,
+        verbose: bool = True,
+        **kwargs,
+    ):
+        """Train progressively by interaction order with sparsity-based pruning.
+
+        For each order 0..max_order:
+        1. Train new components at this order as full Bayes (ADVI)
+        2. Previously-trained non-sparse components are frozen as point estimates
+        3. Assess sparsity, exclude descendants of sparse components
+
+        This leverages the hybrid point-estimate + full Bayes system:
+        frozen components pass through the likelihood as point estimates
+        (no reparameterization, no KL cost), while new components get
+        full surrogate posterior treatment.
+
+        Args:
+            batched_data_factory: Data factory (same as fit())
+            max_order: Maximum interaction order to train. None = auto-detect.
+            sparsity_threshold: Threshold for sparse_components()
+            sparsity_method: Method for sparse_components()
+            epochs_per_stage: Epochs per warmup stage
+            final_epochs: Epochs for final joint training
+            freeze_between_stages: If True, freeze trained components as point
+                estimates between stages. If False, keep all as full Bayes
+                (just use optimize_keys to control which get gradients).
+            coarse_dtype: Dtype for early (coarse) stages. None = use model dtype.
+            verbose: Whether to print stage progress
+            **kwargs: Forwarded to _calibrate_minibatch_advi (batch_size,
+                dataset_size, learning_rate, etc.)
+        """
+        from bayesianquilts.jax.parameter import Decomposed
+
+        decompositions = self._get_decompositions()
+
+        if max_order is None:
+            max_order = max(d.max_order() for d in decompositions.values())
+
+        num_epochs = kwargs.pop("num_epochs", 100)
+        if epochs_per_stage is None:
+            epochs_per_stage = max(num_epochs // (max_order + 2), 1)
+        if final_epochs is None:
+            final_epochs = num_epochs
+
+        # Collect ALL component names across all decompositions
+        all_component_names = set()
+        for d in decompositions.values():
+            all_component_names.update(d._tensor_parts.keys())
+
+        # Auxiliary keys (horseshoe, noise) - always optimized
+        all_keys = list(self.params.keys())
+        aux_keys = Decomposed.non_component_keys(all_component_names, all_keys)
+
+        # Track state
+        excluded = set()       # Components pruned by sparsity
+        frozen_point = {}      # Component name -> point-estimate value (posterior mean)
+        active_bayes = set()   # Components currently in the surrogate
+
+        def infinite_data_iterator():
+            while True:
+                iterator = batched_data_factory()
+                try:
+                    yield from iterator
+                except TypeError:
+                    yield iterator
+
+        for order in range(max_order + 1):
+            # Determine which components at this order to activate
+            new_components = set()
+            for d in decompositions.values():
+                for name in d.components_at_order(order):
+                    if name not in excluded:
+                        new_components.add(name)
+                        active_bayes.add(name)
+
+            # Build optimize_keys: active Bayes components + aux keys
+            opt_keys = (
+                Decomposed.surrogate_keys_for_components(active_bayes, all_keys)
+                + aux_keys
+            )
+
+            # Build point_estimate_vars from frozen components
+            pe_vars = dict(frozen_point) if freeze_between_stages and frozen_point else None
+
+            # Use coarse dtype for early stages, full precision for final
+            stage_kwargs = dict(kwargs)
+            if coarse_dtype is not None and order < max_order:
+                stage_kwargs["compute_dtype"] = coarse_dtype
+
+            if verbose:
+                n_bayes = len(active_bayes)
+                n_frozen = len(frozen_point)
+                n_excluded = len(excluded)
+                print(f"Stage order={order}: {n_bayes} Bayes, "
+                      f"{n_frozen} frozen, {n_excluded} excluded")
+
+            self._calibrate_minibatch_advi(
+                infinite_data_iterator(),
+                num_epochs=epochs_per_stage,
+                optimize_keys=opt_keys,
+                point_estimate_vars=pe_vars,
+                **stage_kwargs,
+            )
+
+            # After training: assess sparsity and freeze non-sparse components
+            if order < max_order:
+                all_sparse = set()
+                for d in decompositions.values():
+                    sparse = d.sparse_components(
+                        self.params, threshold=sparsity_threshold,
+                        method=sparsity_method,
+                    )
+                    new_excl = d.hereditary_exclusions(sparse)
+                    if verbose and new_excl:
+                        sparse_at_order = [n for n in sparse
+                                           if d.component_order(n) == order]
+                        if sparse_at_order:
+                            print(f"  Sparse at order {order}: {sparse_at_order}")
+                            print(f"  Excluding descendants: {new_excl}")
+                    excluded |= new_excl
+                    all_sparse |= sparse
+
+                # Freeze trained non-sparse components as point estimates
+                if freeze_between_stages:
+                    for name in list(active_bayes):
+                        if name in excluded or name in all_sparse:
+                            continue
+                        loc_key = next(
+                            (k for k in self.params
+                             if k.startswith(name + "\\") and k.endswith("\\loc")),
+                            None
+                        )
+                        if loc_key is not None:
+                            frozen_point[name] = self.params[loc_key]
+                            active_bayes.discard(name)
+
+                # Zero out sparse components
+                for name in all_sparse:
+                    for k in all_keys:
+                        if k.startswith(name + "\\") and k.endswith("\\loc"):
+                            self.params[k] = jnp.zeros_like(self.params[k])
+
+        # Final training: unfreeze everything for joint optimization
+        all_active = active_bayes | set(frozen_point.keys())
+        opt_keys = (
+            Decomposed.surrogate_keys_for_components(all_active, all_keys)
+            + aux_keys
+        )
+        if verbose:
+            print(f"Final training: {len(all_active)} active components, "
+                  f"{final_epochs} epochs (full precision)")
+
+        res = self._calibrate_minibatch_advi(
+            infinite_data_iterator(),
+            num_epochs=final_epochs,
+            optimize_keys=opt_keys,
+            # No point estimates in final stage - full Bayes for all active
+            point_estimate_vars=None,
+            **kwargs,  # original kwargs, no coarse_dtype
+        )
+
+        self.active_components = all_active
+        self.excluded_components = excluded
+        return res
+
     @abstractmethod
     def expand(self, interaction: Interactions):
         pass

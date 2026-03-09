@@ -784,6 +784,132 @@ class Decomposed(object):
 
         return cumulative
 
+    def component_order(self, component_name):
+        """Return the interaction order (number of vars) of a component."""
+        return len(self._tensor_part_interactions.get(component_name, ()))
+
+    def components_at_order(self, order):
+        """Return component names at a given interaction order."""
+        return [name for name, vars_ in self._tensor_part_interactions.items()
+                if len(vars_) == order]
+
+    def max_order(self):
+        """Return the maximum interaction order."""
+        if not self._tensor_part_interactions:
+            return 0
+        return max(len(v) for v in self._tensor_part_interactions.values())
+
+    def component_norms(self, params):
+        """Compute L2 norms of each component from surrogate params.
+
+        Works with both raw component tensors and surrogate param dicts.
+        For surrogate params, extracts the loc parameter (posterior mean).
+
+        Returns dict mapping component name to L2 norm.
+        """
+        norms = {}
+        for name in self._tensor_parts:
+            if name in params:
+                norms[name] = float(jnp.linalg.norm(params[name]))
+            else:
+                loc_key = next(
+                    (k for k in params
+                     if k.startswith(name + "\\") and k.endswith("\\loc")),
+                    None
+                )
+                if loc_key is not None:
+                    norms[name] = float(jnp.linalg.norm(params[loc_key]))
+        return norms
+
+    def sparse_components(self, params, threshold=0.1, method="relative_norm"):
+        """Identify components that are effectively zero.
+
+        Args:
+            params: Parameter dict (component values or surrogate params)
+            threshold: Sparsity threshold
+            method:
+                "relative_norm" - norm relative to global component
+                "absolute_norm" - absolute L2 norm
+                "snr" - signal-to-noise ratio (needs surrogate params with loc+scale)
+
+        Returns:
+            Set of component names identified as sparse.
+        """
+        norms = self.component_norms(params)
+        global_name = self._name + "__"
+        global_norm = norms.get(global_name, 1.0)
+
+        sparse = set()
+        for name, norm in norms.items():
+            if name == global_name:
+                continue
+            if method == "relative_norm":
+                if norm / (global_norm + 1e-10) < threshold:
+                    sparse.add(name)
+            elif method == "absolute_norm":
+                if norm < threshold:
+                    sparse.add(name)
+            elif method == "snr":
+                scale_key = next(
+                    (k for k in params
+                     if k.startswith(name + "\\") and k.endswith("\\scale")),
+                    None
+                )
+                if scale_key is not None:
+                    scale_norm = float(jnp.linalg.norm(params[scale_key]))
+                    if norm / (scale_norm + 1e-10) < threshold:
+                        sparse.add(name)
+        return sparse
+
+    def hereditary_exclusions(self, sparse_names):
+        """Generate exclusions from sparse components via the hereditary principle.
+
+        If a component is sparse, all higher-order interactions that contain
+        its variables should be excluded.
+
+        Returns:
+            Set of component names to exclude.
+        """
+        excluded = set()
+        for name in sparse_names:
+            vars_set = set(self._tensor_part_interactions.get(name, ()))
+            if len(vars_set) == 0:
+                continue
+            for other_name, other_vars in self._tensor_part_interactions.items():
+                if vars_set.issubset(set(other_vars)) and len(other_vars) > len(vars_set):
+                    excluded.add(other_name)
+        return excluded
+
+    @staticmethod
+    def surrogate_keys_for_components(component_names, all_keys):
+        """Map decomposition component names to surrogate parameter keys.
+
+        A surrogate key belongs to component C if key.split("\\\\")[0] == C.
+
+        Args:
+            component_names: set of active component names
+            all_keys: full list of surrogate param keys
+
+        Returns:
+            List of surrogate param keys to optimize.
+        """
+        result = []
+        for k in all_keys:
+            prefix = k.split("\\")[0]
+            if prefix in component_names:
+                result.append(k)
+        return result
+
+    @staticmethod
+    def non_component_keys(all_component_names, all_keys):
+        """Return surrogate keys that don't belong to any decomposition component.
+
+        These are auxiliary params (horseshoe tau/lambda_j/c2, noise, etc.)
+        that should always be optimized.
+        """
+        return [k for k in all_keys
+                if k.split("\\")[0] not in all_component_names]
+
     def __str__(self):
         """String representation of the decomposed parameter."""
         out = f"Parameter shape: {self._param_shape} \n"

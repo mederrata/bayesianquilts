@@ -581,7 +581,7 @@ class GRModel(IRTModel):
             kappa=lambda kappa_a: tfd.Independent(
                 SqrtInverseGamma(
                     0.5 * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
-                    1.0 / kappa_a,
+                    jnp.asarray(1.0, dtype=self.dtype) / jnp.asarray(kappa_a, dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=4,
             ),

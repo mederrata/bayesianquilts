@@ -11,13 +11,13 @@ import tensorflow_probability.substrates.jax as tfp
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 from bayesianquilts.jax.parameter import Decomposed
-from bayesianquilts.model import BayesianModel
+from bayesianquilts.model import QuiltedBayesianModel
 from bayesianquilts.util import flatten
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 jax.config.update("jax_enable_x64", True)
 
-class LogisticBayesianquilt(BayesianModel):
+class LogisticBayesianquilt(QuiltedBayesianModel):
     def __init__(
         self,
         split_repr_model,
@@ -465,60 +465,31 @@ class LogisticBayesianquilt(BayesianModel):
 
         return energy
 
+    def expand(self, interaction):
+        raise NotImplementedError("expand() not yet implemented for this model")
+
     def fit(
         self,
         batched_data_factory,
         batch_size,
         dataset_size,
-        num_steps,
-        warmup=25,
         warmup_max_order=6,
-        clip_value=5,
+        sparsity_threshold=0.1,
+        sparsity_method="relative_norm",
+        epochs_per_stage=25,
+        num_epochs=100,
         learning_rate=0.005,
-        test_fn=None,
-        *args,
         **kwargs,
     ):
-
-        # train
-        if warmup == 0:
-            return self._calibrate_advi(num_steps=num_steps, *args, **kwargs)
-        else:
-            # train weibull scale first few epochs
-            for max_order in range(warmup_max_order):
-
-                # cut out higher order terms
-                hot = [
-                    k for k, v in self.regression_vars.items() if len(v) > max_order
-                ] + [k for k, v in self.intercept_vars.items() if len(v) > max_order]
-                if len(hot) == 0:
-                    print("Done warming")
-                    break
-                
-                print(f"Training up to {max_order} order")
-                trainable_params = {k: v for k, v in self.params.items() if k not in hot}
-                losses = self._calibrate_minibatch_advi(
-                    batched_data_factory=batched_data_factory,
-                    num_steps=warmup,
-                    clip_value=clip_value,
-                    batch_size=batch_size,
-                    dataset_size=dataset_size,
-                    trainable_variables=trainable_params,
-                    learning_rate=learning_rate,
-                    test_fn=test_fn,
-                    **kwargs,
-                )
-
-            print(f"Training for remaining {num_steps} steps")
-            losses = self._calibrate_minibatch_advi(
-                batched_data_factory=batched_data_factory,
-                num_steps=num_steps,
-                clip_value=clip_value,
-                batch_size=batch_size,
-                dataset_size=dataset_size,
-                trainable_variables=self.params,
-                learning_rate=learning_rate,
-                test_fn=test_fn,
-                **kwargs,
-            )
-        return losses
+        return self.staged_fit(
+            batched_data_factory,
+            max_order=warmup_max_order,
+            sparsity_threshold=sparsity_threshold,
+            sparsity_method=sparsity_method,
+            epochs_per_stage=epochs_per_stage,
+            final_epochs=num_epochs,
+            batch_size=batch_size,
+            dataset_size=dataset_size,
+            learning_rate=learning_rate,
+            **kwargs,
+        )

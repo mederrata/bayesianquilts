@@ -25,13 +25,15 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
                  lr_decay_factor=0.9, clip_norm=1.0,
                  reload_neural_grm=False,
-                 noisy_dim=False,
+                 noisy_dim=True,
                  noisy_dim_eta_scale=0.01,
                  noisy_dim_ability_scale=2.0,
                  sample_size=32,
                  seed=42,
                  parameterization="log_scale",
-                 pathfinder_init=False):
+                 pathfinder_init=False,
+                 qmc=False,
+                 kl_anneal_epochs=0):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -99,6 +101,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         seed=seed,
         parameterization=parameterization,
         pathfinder_init=pathfinder_init,
+        qmc=qmc,
+        kl_anneal_epochs=kl_anneal_epochs,
     )
 
     # 3. Sample fresh abilities from N(0,1) as ground truth
@@ -171,6 +175,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         snapshot_epoch=snapshot_epoch, sample_size=sample_size,
         seed=seed, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
+        qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
     )
     if snapshot_params is not None:
         print(f"  Using baseline epoch-{snapshot_epoch} snapshot to warm-start imputed model")
@@ -189,6 +194,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         initial_values=snapshot_params, sample_size=sample_size,
         seed=seed + 1, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
+        qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
     )
 
     # 9. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
@@ -222,6 +228,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         initial_values=snapshot_params, sample_size=sample_size,
         seed=seed + 2, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
+        qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
     )
 
     # 11. Compare ability ordering preservation
@@ -385,8 +392,10 @@ def main():
                         help="Gradient clipping norm (default 1.0)")
     parser.add_argument("--reload-neural-grm", action="store_true",
                         help="Reload saved NeuralGRM instead of re-training")
-    parser.add_argument("--noisy-dim", action="store_true",
+    parser.add_argument("--noisy-dim", action="store_true", default=True,
                         help="Add a loosely-coupled noisy second latent dimension")
+    parser.add_argument("--no-noisy-dim", action="store_false", dest="noisy_dim",
+                        help="Disable the noisy second latent dimension")
     parser.add_argument("--noisy-dim-eta-scale", type=float, default=0.01,
                         help="Discrimination scale for noisy dimension (default 0.01)")
     parser.add_argument("--noisy-dim-ability-scale", type=float, default=2.0,
@@ -400,6 +409,10 @@ def main():
                         help="ADVI scale parameterization (default log_scale)")
     parser.add_argument("--pathfinder-init", action="store_true",
                         help="Use Pathfinder to initialize ADVI parameters")
+    parser.add_argument("--qmc", action="store_true",
+                        help="Use quasi-Monte Carlo (Sobol) sampling for ~2x variance reduction")
+    parser.add_argument("--kl-anneal-epochs", type=int, default=0,
+                        help="Number of epochs to linearly ramp KL weight from 0 to 1 (default 0)")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -433,6 +446,8 @@ def main():
             seed=args.seed,
             parameterization=args.parameterization,
             pathfinder_init=args.pathfinder_init,
+            qmc=args.qmc,
+            kl_anneal_epochs=args.kl_anneal_epochs,
         )
         all_results[ds] = results
 
