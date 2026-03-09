@@ -136,6 +136,7 @@ def training_loop(
     snapshot_epoch: int | None = None,
     seed: int | None = None,
     compute_dtype: jnp.dtype | None = None,
+    monitor_grad_variance: bool = False,
 ):
     """
     Advanced training loop with checkpointing, early stopping, LR decay on plateau,
@@ -190,8 +191,15 @@ def training_loop(
     compute_dtype : jnp.dtype, optional
         If provided, cast data arrays to this dtype before passing to loss_fn.
         Useful for mixed precision training where likelihood computation can
-        use float16/bfloat16 while variational parameters stay in float32
-        (default: None, no casting).
+        use float16/bfloat16 while variational parameters stay in float32.
+        Note: float16 data is experimental; float32 is recommended as the
+        minimum precision for variational parameters (default: None, no casting).
+    monitor_grad_variance : bool, optional
+        If True, track per-parameter gradient signal-to-noise ratio (SNR)
+        using Welford's online algorithm. SNR = |mean_grad| / std_grad is
+        printed every ``check_convergence_every`` epochs and returned as
+        ``grad_snr_history`` (a third return element alongside losses and
+        params). Useful for diagnosing gradient noise issues (default: False).
 
     Returns
     -------
@@ -199,6 +207,17 @@ def training_loop(
         Loss values for each epoch
     final_params : dict
         Final or best parameter values
+    grad_snr_history : list[dict], optional
+        Only returned when ``monitor_grad_variance=True`` or
+        ``snapshot_epoch`` is set. Each entry maps parameter names to
+        ``{'mean_snr': float, 'min_snr': float}``.
+
+    Notes
+    -----
+    Checkpoints saved by this function use ``optax.inject_hyperparams``
+    optimizer state which includes a ``.hyperparams`` dict. Checkpoints
+    from before the ``inject_hyperparams`` change are incompatible and
+    cannot be restored; users should retrain from scratch.
     """
     # 1. Setup for new features
 
@@ -208,6 +227,13 @@ def training_loop(
     nan_recovery_count = 0
     best_params = None
     snapshot_params = None
+
+    # Gradient variance monitoring (Welford's online algorithm)
+    grad_snr_history = []
+    if monitor_grad_variance:
+        grad_means = {}
+        grad_m2 = {}
+        grad_counts = {}
     if base_optimizer_fn is None:
         base_optimizer_fn = lambda lr: optax.adam(learning_rate=lr)
     # 2. Initial Optimizer Setup
@@ -367,7 +393,17 @@ def training_loop(
                             filtered_grads = jax.tree_util.tree_map(
                                 lambda g: jnp.nan_to_num(g, nan=0.0, posinf=0.0, neginf=0.0), filtered_grads
                             )
-                        
+
+                        # Welford online update for gradient variance monitoring
+                        if monitor_grad_variance:
+                            for k, g in filtered_grads.items():
+                                flat_g = g.reshape(-1)
+                                n = grad_counts[k] = grad_counts.get(k, 0) + 1
+                                delta = flat_g - grad_means.get(k, jnp.zeros_like(flat_g))
+                                grad_means[k] = grad_means.get(k, jnp.zeros_like(flat_g)) + delta / n
+                                delta2 = flat_g - grad_means[k]
+                                grad_m2[k] = grad_m2.get(k, jnp.zeros_like(flat_g)) + delta * delta2
+
                         grad_accumulator = jax.tree_util.tree_map(
                             lambda acc, g: acc + g, grad_accumulator, filtered_grads
                         )
@@ -407,6 +443,26 @@ def training_loop(
 
             # 4. Check for improvement, save checkpoints, and decay LR
             if (epoch + 1) % check_convergence_every == 0:
+                # Report gradient SNR if monitoring is enabled
+                if monitor_grad_variance and grad_counts:
+                    snr_entry = {}
+                    if verbose:
+                        print("  Gradient SNR:")
+                    for k in grad_means:
+                        variance = grad_m2[k] / max(grad_counts[k] - 1, 1)
+                        snr = jnp.abs(grad_means[k]) / (jnp.sqrt(variance) + 1e-8)
+                        mean_snr = float(jnp.mean(snr))
+                        min_snr = float(jnp.min(snr))
+                        snr_entry[k] = {"mean_snr": mean_snr, "min_snr": min_snr}
+                        if verbose:
+                            print(f"    {k}: mean_snr={mean_snr:.3f}, "
+                                  f"min_snr={min_snr:.3f}")
+                    grad_snr_history.append(snr_entry)
+                    # Reset for next window
+                    grad_means.clear()
+                    grad_m2.clear()
+                    grad_counts.clear()
+
                 if avg_epoch_loss < best_loss:
                     best_loss = avg_epoch_loss
                     best_params = dict(params)  # Track best parameters for NaN recovery
@@ -492,6 +548,8 @@ def training_loop(
 
     if snapshot_epoch is not None:
         return epoch_losses, final_params, snapshot_params
+    if monitor_grad_variance:
+        return epoch_losses, final_params, grad_snr_history
     return epoch_losses, final_params
 
 

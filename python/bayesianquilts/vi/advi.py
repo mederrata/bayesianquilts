@@ -65,6 +65,153 @@ def _build_lowrank_mvn(loc_flat, log_diag_scale, factor, event_shape=None):
 
 
 # ---------------------------------------------------------------------------
+# Cross-variable MVN for global low-rank covariance (Task 21)
+# ---------------------------------------------------------------------------
+
+class CrossVariableMVN:
+    """Joint distribution over multiple variables with cross-variable correlations.
+
+    Parameterizes:
+        q(z) = N(mu_concat, diag(s_concat^2) + F_global @ F_global^T)
+
+    where ``mu_concat`` and ``s_concat`` are the concatenated per-variable
+    loc and diagonal scale vectors, and ``F_global`` is a shared low-rank
+    factor matrix capturing cross-variable correlations.
+
+    Provides the same interface as ``tfd.JointDistributionNamed``
+    (dict-based sample/log_prob), so it can be used as a drop-in
+    replacement in ``minibatch_mc_variational_loss``.
+    """
+
+    def __init__(self, var_names, var_locs, var_log_diag_scales,
+                 var_event_shapes, var_bijectors, factor_global):
+        self._var_names = list(var_names)
+        self._var_event_shapes = var_event_shapes
+        self._var_bijectors = var_bijectors
+
+        # Compute per-variable flat dimensions and offsets
+        self._var_dims = {}
+        self._var_offsets = {}
+        offset = 0
+        for n in self._var_names:
+            es = var_event_shapes[n]
+            d = int(np.prod(es)) if es else 1
+            self._var_dims[n] = d
+            self._var_offsets[n] = offset
+            offset += d
+        self._d_total = offset
+
+        # Build the global MVN
+        loc_flat = jnp.concatenate([var_locs[n].reshape(-1) for n in self._var_names])
+        log_diag_flat = jnp.concatenate(
+            [var_log_diag_scales[n].reshape(-1) for n in self._var_names]
+        )
+        self._diag_scale = jnp.exp(log_diag_flat)
+
+        cov = jnp.diag(self._diag_scale ** 2) + factor_global @ factor_global.T
+        scale_tril = jnp.linalg.cholesky(cov)
+        self._mvn = tfd.MultivariateNormalTriL(loc=loc_flat, scale_tril=scale_tril)
+        self._loc_flat = loc_flat
+
+    def _split_and_reshape(self, flat):
+        """Split flat samples into per-variable dict, applying bijectors."""
+        result = {}
+        for name in self._var_names:
+            s = self._var_offsets[name]
+            e = s + self._var_dims[name]
+            z = flat[..., s:e]
+            es = self._var_event_shapes[name]
+            if es and es != (self._var_dims[name],):
+                z = z.reshape(flat.shape[:-1] + es)
+            bij = self._var_bijectors.get(name)
+            if bij is not None:
+                z = bij.forward(z)
+            result[name] = z
+        return result
+
+    def _flatten_dict(self, d):
+        """Flatten per-variable dict back to concatenated vector (in unconstrained space)."""
+        parts = []
+        for name in self._var_names:
+            z = d[name]
+            bij = self._var_bijectors.get(name)
+            if bij is not None:
+                z = tfb.Invert(bij)(z)
+            ndims = len(self._var_event_shapes[name]) or 1
+            parts.append(z.reshape(*z.shape[:-ndims], -1))
+        return jnp.concatenate(parts, axis=-1)
+
+    def _bijector_ildj(self, samples_dict):
+        """Compute total inverse log det jacobian from bijectors."""
+        ildj = 0.0
+        for name in self._var_names:
+            bij = self._var_bijectors.get(name)
+            if bij is not None:
+                ildj = ildj + bij.inverse_log_det_jacobian(
+                    samples_dict[name],
+                    event_ndims=len(self._var_event_shapes[name]),
+                )
+        return ildj
+
+    def sample(self, sample_shape=(), seed=None):
+        flat = self._mvn.sample(sample_shape, seed=seed)
+        return self._split_and_reshape(flat)
+
+    def log_prob(self, d):
+        if isinstance(d, dict):
+            flat = self._flatten_dict(d)
+            lp = self._mvn.log_prob(flat)
+            # Add inverse log det jacobian for bijector transforms
+            lp = lp + self._bijector_ildj(d)
+            return lp
+        return self._mvn.log_prob(d)
+
+    def experimental_sample_and_log_prob(self, sample_shape, seed=None):
+        flat = self._mvn.sample(sample_shape, seed=seed)
+        lp = self._mvn.log_prob(flat)
+        samples = self._split_and_reshape(flat)
+        lp = lp + self._bijector_ildj(samples)
+        return samples, lp
+
+    def mean(self):
+        return self._split_and_reshape(self._mvn.mean())
+
+    def variance(self):
+        diag_var = jnp.diag(self._mvn.covariance())
+        result = {}
+        for name in self._var_names:
+            s = self._var_offsets[name]
+            e = s + self._var_dims[name]
+            v = diag_var[s:e]
+            es = self._var_event_shapes[name]
+            if es and es != (self._var_dims[name],):
+                v = v.reshape(es)
+            result[name] = v
+        return result
+
+    @property
+    def model(self):
+        """Per-variable marginal distributions (for QMC / composition)."""
+        result = {}
+        loc = self._mvn.mean()
+        for name in self._var_names:
+            s = self._var_offsets[name]
+            e = s + self._var_dims[name]
+            es = self._var_event_shapes[name]
+            marginal_loc = loc[s:e].reshape(es) if es else loc[s:e]
+            marginal_scale = self._diag_scale[s:e].reshape(es) if es else self._diag_scale[s:e]
+            dist = tfd.Independent(
+                tfd.Normal(loc=marginal_loc, scale=marginal_scale),
+                reinterpreted_batch_ndims=len(es),
+            )
+            bij = self._var_bijectors.get(name)
+            if bij is not None:
+                dist = bij(dist)
+            result[name] = dist
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Distribution builders
 # ---------------------------------------------------------------------------
 
@@ -213,6 +360,7 @@ def build_factored_surrogate_posterior_generator(
     dtype=jnp.float32,
     parameterization: str = "softplus",
     rank: int = 0,
+    global_rank: int = 0,
 ):
     """Builds a stateless surrogate posterior generator from a prior.
 
@@ -227,6 +375,10 @@ def build_factored_surrogate_posterior_generator(
         gaussian_only: If True, use Normal surrogates even for InverseGamma
             priors.
         noise: Initial scale for surrogate standard deviations.
+            For natural parameterization, use noise >= 0.1 to avoid extremely
+            large initial eta1 values. With noise=0.01 (default), eta1 = mu /
+            0.0001 which can cause overflow. Recommended: noise=1.0 for natural
+            parameterization.
         dtype: Parameter dtype.
         parameterization: Scale parameterization for Normal surrogates.
             - "softplus": scale = softplus(raw_scale) (original, default)
@@ -239,10 +391,24 @@ def build_factored_surrogate_posterior_generator(
             0 = mean-field (default), >0 = diagonal + low-rank covariance.
             Each variable gets a factor matrix of shape (prod(event_shape), rank)
             to capture the top correlations within that variable.
+        global_rank: Rank of cross-variable low-rank covariance correction.
+            0 = no cross-variable correlations (default), >0 = adds a shared
+            factor matrix of shape (total_dim, global_rank) to capture
+            correlations between different variables. Cannot be combined
+            with per-variable ``rank > 0``.
 
     Returns:
         Tuple of (distribution_generator_fn, parameter_initializer_fn).
     """
+    if global_rank > 0 and rank > 0:
+        raise ValueError(
+            "Cannot combine per-variable low-rank (rank > 0) with "
+            "cross-variable low-rank (global_rank > 0). Use one or the other."
+        )
+    # When using global_rank, force log_scale parameterization internally
+    # so we have direct access to loc and log_diag_scale.
+    if global_rank > 0 and parameterization not in ("log_scale",):
+        parameterization = "log_scale"
     if surrogate_initializers is None:
         surrogate_initializers = {}
     _, sample_key = random.split(random.PRNGKey(np.random.randint(0, 1e8)))
@@ -339,7 +505,8 @@ def build_factored_surrogate_posterior_generator(
             elif param_type == "eta1":
                 # Natural param: eta1 = mu / sigma^2
                 # With initial mu = means[k] and sigma^2 = noise^2:
-                sigma_sq = noise ** 2
+                # Floor sigma_sq to prevent extreme eta1 when noise is tiny
+                sigma_sq = max(noise ** 2, 0.01)
                 _params[label] = (means[k] / sigma_sq).astype(dtype)
             elif param_type == "neg_half_prec":
                 # Natural param: neg_half_precision raw value
@@ -358,6 +525,22 @@ def build_factored_surrogate_posterior_generator(
                 _params[label] = jnp.ones_like(means[k]) * 2.0
             else:
                 raise ValueError(f"Unknown parameter type: {param_type}")
+
+        # Global low-rank factor for cross-variable correlations
+        if global_rank > 0:
+            total_dim = sum(
+                int(np.prod(var_event_shapes[k]))
+                for k in var_event_shapes
+                if k not in exclude
+            )
+            factor_label = (
+                f"{prefix}\\__global__\\factor" if prefix else "__global__\\factor"
+            )
+            _params[factor_label] = noise * 0.01 * random.normal(
+                random.PRNGKey(hash("global_factor") % (2**31)),
+                (total_dim, global_rank),
+                dtype=dtype,
+            )
         return _params
 
     def _make_dist_fn(surrogate_params: dict[str, jax.typing.ArrayLike]):
@@ -448,8 +631,41 @@ def build_factored_surrogate_posterior_generator(
                         )
                     )
 
-        surrogate = tfd.JointDistributionNamed(surrogate_dict)
-        return surrogate
+        if global_rank > 0:
+            factor_label = (
+                f"{prefix}\\__global__\\factor" if prefix else "__global__\\factor"
+            )
+            # Collect per-variable unconstrained locs and log_diag_scales
+            ordered_vars = [
+                k for k in joint_distribution_named.model if k not in exclude
+            ]
+            var_locs = {}
+            var_log_diag_scales = {}
+            var_bijs = {}
+            for k in ordered_vars:
+                lbl = k if prefix is None else f"{prefix}\\{k}"
+                bij = bijectors.get(k, tfb.Identity())
+                bij_name = bij.name if k in bijectors.keys() else bijectors.get(k, tfb.Identity()).name
+                lbl += f"\\{bij_name}\\normal"
+                var_locs[k] = tfb.Invert(bij)(
+                    surrogate_params[lbl + "\\loc"]
+                ).reshape(-1)
+                var_log_diag_scales[k] = surrogate_params[
+                    lbl + "\\log_scale"
+                ].reshape(-1)
+                var_bijs[k] = bij if k in bijectors else None
+
+            return CrossVariableMVN(
+                var_names=ordered_vars,
+                var_locs=var_locs,
+                var_log_diag_scales=var_log_diag_scales,
+                var_event_shapes={k: var_event_shapes[k] for k in ordered_vars},
+                var_bijectors=var_bijs,
+                factor_global=surrogate_params[factor_label],
+            )
+        else:
+            surrogate = tfd.JointDistributionNamed(surrogate_dict)
+            return surrogate
 
     return _make_dist_fn, _init_params_fn
 
@@ -507,6 +723,9 @@ def pathfinder_initialize(
     for label in default_params:
         parts = label.split("\\")
         var_name = parts[-4] if len(parts) >= 4 else parts[0]
+        # Skip the global factor parameter (cross-variable low-rank)
+        if "__global__" in var_name:
+            continue
         param_type = parts[-1]
         if var_name not in var_param_map:
             var_param_map[var_name] = {}

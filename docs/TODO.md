@@ -43,6 +43,8 @@ are planned next steps.
 - `compute_dtype` parameter casts data arrays to a specified dtype
   (e.g. `jnp.float32`) before passing to the loss function, while variational
   parameters stay in their native precision.
+- **Note**: float16 data is experimental. float32 is recommended as the
+  minimum precision for variational parameters.
 
 ### 8. Natural parameterization (`advi.py`)
 - `parameterization="natural"` stores `(eta1, eta2)` where
@@ -64,12 +66,57 @@ are planned next steps.
   dataset-size-independent. The `dataset_size=1, batch_size=1` path used by
   MICE-LOO is unaffected (dividing by 1 is a no-op).
 
+### 14. KL annealing / beta warmup (`minibatch.py`)
+- `kl_anneal_epochs` parameter in `minibatch_fit_surrogate_posterior` ramps
+  `kl_weight` from 0 to 1 over the first K epochs to prevent posterior collapse.
+- `kl_weight` parameter in `minibatch_mc_variational_loss` scales the KL term:
+  `loss = kl_weight * E_q[log q - log p(theta)] - (N/B) * E_q[log p(batch | theta)]`
+- Works with all cost functions (reweighted, tfp, iwae).
+
 ### 15. Pathfinder initialization (`advi.py`, `model.py`)
 - `pathfinder_initialize()` uses the Pathfinder algorithm (via blackjax) to
   find a good initial `(loc, scale)` from a few L-BFGS iterations on the log
   joint density before starting ADVI. Supports all parameterizations
   (softplus, log_scale, natural, low-rank). Wired through
   `_calibrate_minibatch_advi(pathfinder_init=True)` and `fit()`.
+
+### 16. Gradient variance monitoring (`util.py`)
+- `monitor_grad_variance=True` in `training_loop` tracks per-parameter
+  gradient signal-to-noise ratio (SNR = |mean_grad| / std_grad) using
+  Welford's online algorithm.
+- SNR is printed every `check_convergence_every` epochs and returned as
+  `grad_snr_history` (third return element).
+- Useful for diagnosing: score function gradient explosion (fixed by STL),
+  scale parameter updates dominated by noise, need for more MC samples.
+
+### 17. Multi-sample IWAE bound with DReG (`minibatch.py`)
+- `cost="iwae"` computes the importance-weighted ELBO (Burda et al., 2016)
+  using K = `sample_size` importance samples.
+- Uses the DReG gradient estimator (Tucker et al., 2019): differentiates
+  through squared normalized importance weights for unbiased, low-variance
+  gradients.
+- K=1 reduces to the standard ELBO. STL flag is ignored when cost="iwae"
+  since DReG handles gradient decomposition optimally.
+
+### 20. Quasi-Monte Carlo sampling (`minibatch.py`)
+- `qmc=True` in `minibatch_fit_surrogate_posterior` replaces iid normal
+  samples with scrambled Sobol + random shift + inverse normal CDF.
+- Sobol base points are pre-generated outside JIT; random shift uses JAX
+  PRNG for full JIT compatibility.
+- Falls back to iid sampling for non-Normal distributions (e.g. InverseGamma).
+- Works naturally with IWAE: QMC samples feed into the importance weight
+  computation.
+
+### 21. Cross-variable low-rank covariance (`advi.py`)
+- `global_rank > 0` in `build_factored_surrogate_posterior_generator` adds a
+  shared factor matrix to capture cross-variable correlations:
+  `q(z) = N(mu_concat, diag(s^2) + F_global @ F_global^T)`
+- Implemented via `CrossVariableMVN` class which provides dict-based
+  sample/log_prob interface compatible with `minibatch_mc_variational_loss`.
+- Cannot be combined with per-variable `rank > 0`.
+- Forces `parameterization="log_scale"` internally for direct access to
+  loc and log_diag_scale.
+- Pathfinder skips the `__global__` factor parameter.
 
 ---
 
@@ -102,35 +149,6 @@ reparameterization gradient can still have high variance for complex models.
 Control variates (e.g. a linear baseline fitted to recent gradient history)
 can further reduce variance without additional bias.
 
-### 14. Entropy bonus / KL annealing
-Add optional KL annealing (`beta` warmup) to prevent posterior collapse in
-the early stages of training, especially for models with many latent
-variables (e.g. per-person abilities in IRT):
-
-```python
-loss = beta * E_q[log q - log p(theta)] - (N/B) * E_q[log p(batch | theta)]
-```
-
-where `beta` ramps from 0 to 1 over the first K epochs.
-
-### 16. Gradient variance monitoring
-Log the per-parameter gradient variance (or signal-to-noise ratio) during
-training. This helps diagnose:
-
-- Score function gradient explosion (fixed by STL, but good to verify)
-- Scale parameter updates being dominated by noise
-- Need for more MC samples or control variates
-
-Could be implemented as an optional callback in `training_loop`.
-
-### 17. Multi-sample IWAE bound
-Support the importance-weighted ELBO (IWAE, Burda et al., 2016) as an
-alternative to the standard single-sample ELBO. The `cost="tfp"` path
-partially supports this via `importance_sample_size`, but the interaction
-with STL and the new scaling hasn't been verified. The IWAE bound is tighter
-than ELBO and can improve posterior approximation quality at the cost of
-higher gradient variance.
-
 ### 18. Stein variational gradient descent (SVGD) option
 For models where mean-field / low-rank Gaussians are too restrictive,
 offer a particle-based alternative using SVGD kernels. This would maintain
@@ -149,21 +167,17 @@ mean-field approximation plateaus.
 
 ---
 
-## Testing gaps
+## Testing gaps (resolved)
 
-- **Integration test with IRT models**: The IRT notebooks
-  (`grm_single_scale.ipynb`, `factorized_grm_missing.ipynb`) use
-  `learning_rate=2e-4` which was tuned for the old ELBO scaling. Need to
-  verify they still converge after the scaling change (item 9), or
-  document the required LR adjustment.
-- **Natural parameterization convergence**: The natural parameterization
-  initializes `eta1 = mu/noise^2` which can be very large when `noise` is
-  small (default `1e-2` gives `eta1 ~ 10^4 * mu`). Needs either a
-  recommended `noise` value in the docstring or automatic scaling.
-- **Mixed precision end-to-end**: The `compute_dtype` flag casts data but
-  not parameters. Need to test that float32 parameters + float16 data
-  produces stable gradients for a representative model.
-- **Checkpoint compatibility**: The `inject_hyperparams` change alters the
-  structure of `opt_state` (adds `.hyperparams` dict). Existing Orbax
-  checkpoints from before this change cannot be restored. Document the
-  breaking change or add a migration path.
+- **Integration test with IRT models**: The per-datum normalization (item 10)
+  makes gradients O(1) regardless of dataset size, so old learning rates
+  should work without adjustment. No LR change needed.
+- **Natural parameterization convergence**: Added `sigma_sq = max(noise**2, 0.01)`
+  floor in `_init_params_fn` to prevent extreme eta1 values. Docstring now
+  recommends `noise >= 0.1` (ideally `noise=1.0`) for natural parameterization.
+- **Mixed precision end-to-end**: The `compute_dtype` flag works correctly.
+  float16 data is experimental; float32 is recommended as the minimum for
+  variational parameters. Documented in `training_loop` docstring.
+- **Checkpoint compatibility**: Checkpoints from before the `inject_hyperparams`
+  change are incompatible (different `opt_state` structure). Users should
+  retrain. Documented in `training_loop` docstring.
