@@ -65,6 +65,8 @@ class NeuralGRModel(IRTModel):
         noisy_dim=False,
         noisy_dim_eta_scale=0.01,
         noisy_dim_ability_scale=2.0,
+        parameterization="softplus",
+        rank=0,
         # Legacy params accepted but ignored for backward compat
         nn_hidden_sizes=None,
         per_item_nn=None,
@@ -96,6 +98,8 @@ class NeuralGRModel(IRTModel):
             include_independent=include_independent,
             vi_mode=vi_mode,
             imputation_model=imputation_model,
+            parameterization=parameterization,
+            rank=rank,
             dtype=dtype,
         )
         # Store the user-facing dim (before noisy augmentation)

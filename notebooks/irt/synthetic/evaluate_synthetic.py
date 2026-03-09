@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 
-def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
+def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
                  batch_size=256, missingness_rate=0.25,
                  missing_respondent_frac=0.4,
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
@@ -30,7 +30,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
                  noisy_dim_ability_scale=2.0,
                  sample_size=32,
                  seed=42,
-                 parameterization="log_scale"):
+                 parameterization="log_scale",
+                 pathfinder_init=False):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -97,6 +98,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         sample_size=sample_size,
         seed=seed,
         parameterization=parameterization,
+        pathfinder_init=pathfinder_init,
     )
 
     # 3. Sample fresh abilities from N(0,1) as ground truth
@@ -168,6 +170,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         snapshot_epoch=snapshot_epoch, sample_size=sample_size,
         seed=seed, parameterization=parameterization,
+        pathfinder_init=pathfinder_init,
     )
     if snapshot_params is not None:
         print(f"  Using baseline epoch-{snapshot_epoch} snapshot to warm-start imputed model")
@@ -185,6 +188,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         initial_values=snapshot_params, sample_size=sample_size,
         seed=seed + 1, parameterization=parameterization,
+        pathfinder_init=pathfinder_init,
     )
 
     # 9. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
@@ -217,6 +221,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         initial_values=snapshot_params, sample_size=sample_size,
         seed=seed + 2, parameterization=parameterization,
+        pathfinder_init=pathfinder_init,
     )
 
     # 11. Compare ability ordering preservation
@@ -359,7 +364,8 @@ def main():
     )
     parser.add_argument("--output-dir", default="./results", help="Output directory")
     parser.add_argument("--epochs", type=int, default=500, help="Training epochs")
-    parser.add_argument("--lr", type=float, default=2e-4, help="NeuralGRM learning rate")
+    parser.add_argument("--lr", type=float, default=1e-3,
+                        help="Learning rate (per-datum ELBO, default 1e-3)")
     parser.add_argument("--grm-lr", type=float, default=None,
                         help="GRM learning rate (defaults to --lr if not set)")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
@@ -392,6 +398,8 @@ def main():
     parser.add_argument("--parameterization", default="log_scale",
                         choices=["softplus", "log_scale", "natural"],
                         help="ADVI scale parameterization (default log_scale)")
+    parser.add_argument("--pathfinder-init", action="store_true",
+                        help="Use Pathfinder to initialize ADVI parameters")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -424,6 +432,7 @@ def main():
             sample_size=args.sample_size,
             seed=args.seed,
             parameterization=args.parameterization,
+            pathfinder_init=args.pathfinder_init,
         )
         all_results[ds] = results
 

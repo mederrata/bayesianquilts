@@ -85,7 +85,7 @@ def calibrate_manually(model, n_samples=32, seed=42):
 
 
 def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
-                num_epochs=200, batch_size=256, learning_rate=2e-4,
+                num_epochs=200, batch_size=256, learning_rate=1e-3,
                 lr_decay_factor=0.975, sample_size=32, seed=42,
                 parameterization="log_scale"):
     import importlib
@@ -274,7 +274,7 @@ def main():
                         help='Load existing MICE model instead of re-fitting')
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--lr', type=float, default=2e-4)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--lr-decay-factor', type=float, default=0.975)
     parser.add_argument('--sample-size', type=int, default=32,
                         help='MC samples per ADVI gradient step (default 32)')

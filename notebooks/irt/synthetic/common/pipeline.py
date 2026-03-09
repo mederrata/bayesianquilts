@@ -138,7 +138,7 @@ def calibrate_model(model, n_samples=32, seed=42):
 def fit_neural_grm(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     dim=1, batch_size=256,
-    num_epochs=500, learning_rate=2e-4, patience=10,
+    num_epochs=500, learning_rate=1e-3, patience=10,
     kappa_scale=0.5, eta_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
     reload=False,
@@ -148,6 +148,7 @@ def fit_neural_grm(
     sample_size=32,
     seed=42,
     parameterization="log_scale",
+    pathfinder_init=False,
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
 
@@ -198,6 +199,7 @@ def fit_neural_grm(
         compute_elpd_loo=False,  # NeuralGRM is for data generation, not comparison
         sample_size=sample_size,
         seed=seed,
+        pathfinder_init=pathfinder_init,
     )
 
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -210,12 +212,13 @@ def fit_neural_grm(
 
 def fit_grm_baseline(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
-    dim=1, batch_size=256, num_epochs=500, learning_rate=2e-4,
+    dim=1, batch_size=256, num_epochs=500, learning_rate=1e-3,
     patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
     snapshot_epoch=None, sample_size=32,
     seed=42,
     parameterization="log_scale",
+    pathfinder_init=False,
 ):
     """Fit a standard GRM (no imputation) and save to disk.
 
@@ -252,6 +255,7 @@ def fit_grm_baseline(
         snapshot_epoch=snapshot_epoch,
         sample_size=sample_size,
         seed=seed,
+        pathfinder_init=pathfinder_init,
     )
     losses = res[0]
     snapshot_params = res[2] if len(res) > 2 else None
@@ -268,11 +272,12 @@ def fit_grm_baseline(
 def fit_grm_imputed(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     imputation_model, dim=1, batch_size=256, num_epochs=500,
-    learning_rate=2e-4, patience=10, kappa_scale=0.1,
+    learning_rate=1e-3, patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
     initial_values=None, sample_size=32,
     seed=42,
     parameterization="log_scale",
+    pathfinder_init=False,
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
 
@@ -312,6 +317,7 @@ def fit_grm_imputed(
         initial_values=initial_values,
         sample_size=sample_size,
         seed=seed,
+        pathfinder_init=pathfinder_init,
     )
     losses = res[0]
 
@@ -442,10 +448,10 @@ def generate_synthetic_data(model, item_keys, response_cardinality,
     responses = np.clip(responses, 0, response_cardinality - 1).astype(np.int32)
 
     N, I = responses.shape
-    data_dict = {'person': np.arange(N, dtype=np.float64)}
+    data_dict = {'person': np.arange(N, dtype=np.float32)}
 
     for i, key in enumerate(item_keys):
-        data_dict[key] = responses[:, i].astype(np.float64)
+        data_dict[key] = responses[:, i].astype(np.float32)
 
     # Introduce MCAR missingness for a subset of respondents
     if missingness_rate > 0:

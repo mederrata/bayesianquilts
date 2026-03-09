@@ -110,7 +110,7 @@ model_imputed = GRModel(
 res_imputed = model_imputed.fit(
     data_factory, batch_size=BATCH_SIZE, dataset_size=SUBSAMPLE_N,
     num_epochs=NUM_EPOCHS, steps_per_epoch=steps_per_epoch,
-    learning_rate=2e-4, patience=10, zero_nan_grads=True,
+    learning_rate=1e-3, patience=10, zero_nan_grads=True,
     initial_values=snapshot_params, lr_decay_factor=0.975,
     sample_size=32, seed=43,
 )
