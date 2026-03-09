@@ -28,7 +28,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
                  noisy_dim=False,
                  noisy_dim_eta_scale=0.01,
                  noisy_dim_ability_scale=2.0,
-                 sample_size=64):
+                 sample_size=32,
+                 seed=42,
+                 parameterization="log_scale"):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -93,6 +95,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         noisy_dim_eta_scale=noisy_dim_eta_scale,
         noisy_dim_ability_scale=noisy_dim_ability_scale,
         sample_size=sample_size,
+        seed=seed,
+        parameterization=parameterization,
     )
 
     # 3. Sample fresh abilities from N(0,1) as ground truth
@@ -163,6 +167,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         snapshot_epoch=snapshot_epoch, sample_size=sample_size,
+        seed=seed, parameterization=parameterization,
     )
     if snapshot_params is not None:
         print(f"  Using baseline epoch-{snapshot_epoch} snapshot to warm-start imputed model")
@@ -179,6 +184,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         initial_values=snapshot_params, sample_size=sample_size,
+        seed=seed + 1, parameterization=parameterization,
     )
 
     # 9. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
@@ -210,6 +216,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=2e-4, grm_lr=None,
         learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         initial_values=snapshot_params, sample_size=sample_size,
+        seed=seed + 2, parameterization=parameterization,
     )
 
     # 11. Compare ability ordering preservation
@@ -378,8 +385,13 @@ def main():
                         help="Discrimination scale for noisy dimension (default 0.01)")
     parser.add_argument("--noisy-dim-ability-scale", type=float, default=2.0,
                         help="Ability prior scale for noisy dimension (default 2.0)")
-    parser.add_argument("--sample-size", type=int, default=64,
-                        help="MC samples per ADVI gradient step (default 64)")
+    parser.add_argument("--sample-size", type=int, default=32,
+                        help="MC samples per ADVI gradient step (default 32)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducible ADVI training (default 42)")
+    parser.add_argument("--parameterization", default="log_scale",
+                        choices=["softplus", "log_scale", "natural"],
+                        help="ADVI scale parameterization (default log_scale)")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -410,6 +422,8 @@ def main():
             noisy_dim_eta_scale=args.noisy_dim_eta_scale,
             noisy_dim_ability_scale=args.noisy_dim_ability_scale,
             sample_size=args.sample_size,
+            seed=args.seed,
+            parameterization=args.parameterization,
         )
         all_results[ds] = results
 

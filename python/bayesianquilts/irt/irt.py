@@ -35,6 +35,8 @@ class IRTModel(BayesianModel):
             include_independent=False,
             vi_mode='advi',
             imputation_model=None,
+            parameterization="softplus",
+            rank=0,
             dtype=tf.float64):
         super(IRTModel, self).__init__(dtype=dtype)
 
@@ -57,6 +59,8 @@ class IRTModel(BayesianModel):
         self.num_groups = num_groups
 
         self.imputation_model = imputation_model
+        self.parameterization = parameterization
+        self.rank = rank
 
         self.set_dimension(dim, decay)
 

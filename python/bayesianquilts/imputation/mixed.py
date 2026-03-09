@@ -85,110 +85,125 @@ class IrtMixedImputationModel:
 
     def _compute_irt_elpd(self, data_factory, batch_size: int = 4,
                           n_posterior_samples: int = 256):
-        """Compute per-item PSIS-LOO ELPD from the IRT model.
+        """Compute per-item conditional ELPD from the IRT model via quadrature.
 
-        Draws ``n_posterior_samples`` from the variational posterior and
-        computes the full ``(S, N, I)`` log-likelihood matrix in one
-        streaming pass over the data (chunked over posterior samples for
-        memory safety).  Then runs PSIS-LOO independently for each item
-        on its ``(S, N_i)`` slice of observed responses.
+        Computes the conditional predictive density for each item given
+        all other observed items for the same person:
 
-        Stores per-item ELPD, max khat, and per-observation LOO scores.
+            p(y_ni | y_{n,-i}) = ∫ p(y_ni | θ) · p(θ | y_{n,-i}) dθ
+
+        where p(θ | y_{n,-i}) ∝ p(θ) · Π_{j≠i} p(y_nj | θ, params_j)
+
+        Uses Gauss-Hermite quadrature (exact for dim=1 with N(0,1) prior).
+        This makes the IRT ELPD directly comparable to the MICE conditional
+        predictive density, since both measure p(y_ni | y_{n,-i}).
+
+        Stores per-item ELPD and per-observation LOO scores.
         """
-        from bayesianquilts.metrics.nppsis import psisloo
+        from numpy.polynomial.hermite import hermgauss
 
         model = self.irt_model
         item_keys = model.item_keys
         K = model.response_cardinality
         I = len(item_keys)
 
-        # Draw fresh posterior samples
-        surrogate = model.surrogate_distribution_generator(model.params)
-        key = jax.random.PRNGKey(314159)
-        samples = surrogate.sample(n_posterior_samples, seed=key)
-
+        # Point estimates of item parameters (posterior mean)
+        samples = model.surrogate_sample
         if hasattr(model, 'transform') and 'discriminations' not in samples:
             samples = model.transform(dict(samples))
 
-        disc_all = np.asarray(samples["discriminations"])
-        diff0_all = np.asarray(samples["difficulties0"])
-        ddiff_all = np.asarray(samples["ddifficulties"]) if "ddifficulties" in samples else None
-        abil_all = np.asarray(samples["abilities"])
-        S = disc_all.shape[0]
+        disc_mean = np.asarray(samples["discriminations"]).mean(0)
+        diff0_mean = np.asarray(samples["difficulties0"]).mean(0)
+        ddiff_mean = (np.asarray(samples["ddifficulties"]).mean(0)
+                      if "ddifficulties" in samples else None)
 
-        # Accumulate per-item log-lik columns across data batches.
-        # Each entry is a list of (S, n_obs_in_batch) arrays.
-        item_log_liks: Dict[str, List[np.ndarray]] = {k: [] for k in item_keys}
+        # Gauss-Hermite quadrature for N(0,1) prior
+        n_quad = 61
+        nodes, weights = hermgauss(n_quad)
+        quad_points = nodes * np.sqrt(2)        # θ values on N(0,1) scale
+        quad_weights = weights / np.sqrt(np.pi)  # normalized for N(0,1)
+
+        # Compute GRM category probabilities at all quadrature points.
+        # abilities shape: (Q, D, 1, 1) — Q quadrature points
+        D = disc_mean.shape[0] if disc_mean.ndim >= 2 else 1
+        theta_q = np.zeros((n_quad, D, 1, 1), dtype=np.float64)
+        theta_q[:, 0, 0, 0] = quad_points  # primary dimension
+
+        probs_at_quad = np.asarray(model.grm_model_prob_d(
+            jnp.asarray(theta_q),
+            jnp.asarray(disc_mean),
+            jnp.asarray(diff0_mean),
+            jnp.asarray(ddiff_mean) if ddiff_mean is not None else None,
+        ))  # (Q, I, K)
+        probs_at_quad = np.clip(probs_at_quad, 1e-30, None)
+        log_probs_at_quad = np.log(probs_at_quad)  # (Q, I, K)
+        log_quad_w = np.log(quad_weights)  # (Q,)
+
+        # Accumulate per-item conditional LOO scores
+        item_loo_scores: Dict[str, List[np.ndarray]] = {k: [] for k in item_keys}
 
         for batch in data_factory():
-            people = np.asarray(batch[model.person_key], dtype=np.int64)
-            N_batch = len(people)
-
-            # Observed responses: (N_batch, I)
             responses = np.stack(
                 [np.asarray(batch[k], dtype=np.float64) for k in item_keys],
                 axis=-1,
-            )
-            observed_mask = ~np.isnan(responses) & (responses >= 0) & (responses < K)
-            responses_int = np.where(observed_mask, responses.astype(np.int64), 0)
+            )  # (N_batch, I)
+            observed = ~np.isnan(responses) & (responses >= 0) & (responses < K)
+            responses_int = np.where(observed, responses.astype(np.int64), 0)
+            N_batch = responses.shape[0]
 
-            # Compute log P(y_ni | theta_s) for all items at once,
-            # chunked over posterior samples
-            log_probs_chunks = []
-            for s_start in range(0, S, batch_size):
-                s_end = min(s_start + batch_size, S)
+            # Gather log p(y_nj | θ_q) for each person and item
+            # log_probs_at_quad: (Q, I, K), responses_int: (N_batch, I)
+            # Result: (Q, N_batch, I)
+            log_lik_per_item = log_probs_at_quad[
+                :, np.newaxis, :, :
+            ]  # (Q, 1, I, K)
+            resp_idx = responses_int[np.newaxis, :, :, np.newaxis]  # (1, N, I, 1)
+            log_lik_qi = np.take_along_axis(
+                log_lik_per_item, resp_idx, axis=-1
+            )[..., 0]  # (Q, N_batch, I)
 
-                disc_chunk = jnp.asarray(disc_all[s_start:s_end])
-                diff0_chunk = jnp.asarray(diff0_all[s_start:s_end])
-                ddiff_chunk = jnp.asarray(ddiff_all[s_start:s_end]) if ddiff_all is not None else None
-                abil_chunk = jnp.asarray(abil_all[s_start:s_end])
+            # Zero out unobserved items
+            log_lik_qi = np.where(observed[np.newaxis, :, :], log_lik_qi, 0.0)
 
-                abil_people = abil_chunk[:, people, ...]
-                # (s_chunk, N_batch, I, K)
-                response_probs = np.asarray(
-                    model.grm_model_prob_d(
-                        abil_people, disc_chunk, diff0_chunk, ddiff_chunk,
-                    )
-                )
+            # Total log-lik across all items per person: (Q, N_batch)
+            total_ll = np.sum(log_lik_qi, axis=-1)
 
-                # Gather observed response category: (s_chunk, N_batch, I)
-                resp_idx = responses_int[np.newaxis, :, :, np.newaxis]
-                obs_probs = np.take_along_axis(
-                    response_probs, resp_idx, axis=-1,
-                )[..., 0]
-                obs_probs = np.clip(obs_probs, 1e-30, None)
-                log_probs_chunks.append(np.log(obs_probs))
-
-            # (S, N_batch, I)
-            log_probs = np.concatenate(log_probs_chunks, axis=0)
-
-            # Split per item, keeping only observed observations
             for i_idx, item_key in enumerate(item_keys):
-                mask_i = observed_mask[:, i_idx]
-                if np.any(mask_i):
-                    # (S, n_observed_in_batch)
-                    item_log_liks[item_key].append(log_probs[:, mask_i, i_idx])
+                mask_i = observed[:, i_idx]
+                if not np.any(mask_i):
+                    continue
 
-        # Run PSIS-LOO independently per item
+                # Leave-one-out log-lik (remove item i): (Q, N_batch)
+                loo_ll = total_ll - log_lik_qi[:, :, i_idx]
+
+                # LOO posterior: log w_q + loo_ll  (prior absorbed in quadrature)
+                log_posterior = log_quad_w[:, np.newaxis] + loo_ll  # (Q, N_batch)
+
+                # Normalize over quadrature points
+                log_Z = np.logaddexp.reduce(log_posterior, axis=0)  # (N_batch,)
+                log_post_norm = log_posterior - log_Z[np.newaxis, :]
+
+                # Conditional predictive density:
+                # log p(y_ni | y_{n,-i}) = logsumexp(log_post_norm + log p(y_ni|θ_q))
+                log_pred = log_post_norm + log_lik_qi[:, :, i_idx]
+                log_cond_pred = np.logaddexp.reduce(log_pred, axis=0)  # (N_batch,)
+
+                item_loo_scores[item_key].append(log_cond_pred[mask_i])
+
+        # Aggregate per-item
         self._irt_khat_per_item: Dict[str, float] = {}
         self._irt_elpd_loo_per_obs: Dict[str, np.ndarray] = {}
 
         for item_key in item_keys:
-            chunks = item_log_liks[item_key]
-            if not chunks:
+            scores = item_loo_scores[item_key]
+            if scores:
+                all_scores = np.concatenate(scores)
+                self._irt_elpd_per_item[item_key] = float(np.mean(all_scores))
+                self._irt_khat_per_item[item_key] = 0.0  # exact quadrature, no PSIS
+                self._irt_elpd_loo_per_obs[item_key] = all_scores
+            else:
                 self._irt_elpd_per_item[item_key] = -np.inf
                 self._irt_khat_per_item[item_key] = np.inf
-                continue
-
-            # (S, N_i)
-            log_lik_i = np.concatenate(chunks, axis=1)
-            N_i = log_lik_i.shape[1]
-
-            loo_total, loos, ks = psisloo(log_lik_i)
-
-            self._irt_elpd_per_item[item_key] = float(loo_total) / N_i
-            self._irt_khat_per_item[item_key] = float(np.max(ks))
-            self._irt_elpd_loo_per_obs[item_key] = loos
 
     def _compute_mice_elpd(self):
         """Compute per-item ELPD from the MICE model.

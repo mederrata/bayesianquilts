@@ -18,7 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats
 
-jax.config.update("jax_enable_x64", True)
+# Using float32 for training (with log_scale parameterization + STL for stability)
 
 
 # -------------------------------------------------------------------------
@@ -63,8 +63,8 @@ def load_dataset(dataset_name: str, cache_dir=None):
     # Convert to numpy data dict
     data = {}
     for col in df.columns:
-        data[col] = df[col].to_numpy().astype(np.float64)
-    data['person'] = np.arange(num_people, dtype=np.float64)
+        data[col] = df[col].to_numpy().astype(np.float32)
+    data['person'] = np.arange(num_people, dtype=np.float32)
 
     return data, item_keys, response_cardinality, num_people
 
@@ -145,7 +145,9 @@ def fit_neural_grm(
     noisy_dim=False,
     noisy_dim_eta_scale=0.01,
     noisy_dim_ability_scale=2.0,
-    sample_size=64,
+    sample_size=32,
+    seed=42,
+    parameterization="log_scale",
 ):
     """Fit a NeuralGRModel on the given data and save to disk.
 
@@ -172,10 +174,11 @@ def fit_neural_grm(
         kappa_scale=kappa_scale,
         eta_scale=eta_scale,
         response_cardinality=response_cardinality,
-        dtype=jnp.float64,
+        dtype=jnp.float32,
         noisy_dim=noisy_dim,
         noisy_dim_eta_scale=noisy_dim_eta_scale,
         noisy_dim_ability_scale=noisy_dim_ability_scale,
+        parameterization=parameterization,
     )
 
     steps_per_epoch = int(np.ceil(num_people / batch_size))
@@ -194,6 +197,7 @@ def fit_neural_grm(
         zero_nan_grads=True,
         compute_elpd_loo=False,  # NeuralGRM is for data generation, not comparison
         sample_size=sample_size,
+        seed=seed,
     )
 
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +213,9 @@ def fit_grm_baseline(
     dim=1, batch_size=256, num_epochs=500, learning_rate=2e-4,
     patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
-    snapshot_epoch=None, sample_size=8,
+    snapshot_epoch=None, sample_size=32,
+    seed=42,
+    parameterization="log_scale",
 ):
     """Fit a standard GRM (no imputation) and save to disk.
 
@@ -225,7 +231,8 @@ def fit_grm_baseline(
         dim=dim,
         kappa_scale=kappa_scale,
         response_cardinality=response_cardinality,
-        dtype=jnp.float64,
+        dtype=jnp.float32,
+        parameterization=parameterization,
     )
 
     steps_per_epoch = int(np.ceil(num_people / batch_size))
@@ -244,6 +251,7 @@ def fit_grm_baseline(
         zero_nan_grads=True,
         snapshot_epoch=snapshot_epoch,
         sample_size=sample_size,
+        seed=seed,
     )
     losses = res[0]
     snapshot_params = res[2] if len(res) > 2 else None
@@ -262,7 +270,9 @@ def fit_grm_imputed(
     imputation_model, dim=1, batch_size=256, num_epochs=500,
     learning_rate=2e-4, patience=10, kappa_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
-    initial_values=None, sample_size=8,
+    initial_values=None, sample_size=32,
+    seed=42,
+    parameterization="log_scale",
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
 
@@ -281,8 +291,9 @@ def fit_grm_imputed(
         dim=dim,
         kappa_scale=kappa_scale,
         response_cardinality=response_cardinality,
-        dtype=jnp.float64,
+        dtype=jnp.float32,
         imputation_model=imputation_model,
+        parameterization=parameterization,
     )
     steps_per_epoch = int(np.ceil(num_people / batch_size))
     factory = make_data_factory(data_dict, batch_size, num_people)
@@ -300,6 +311,7 @@ def fit_grm_imputed(
         zero_nan_grads=True,
         initial_values=initial_values,
         sample_size=sample_size,
+        seed=seed,
     )
     losses = res[0]
 

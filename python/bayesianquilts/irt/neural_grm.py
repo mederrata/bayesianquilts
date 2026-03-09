@@ -478,6 +478,8 @@ class NeuralGRModel(IRTModel):
                 self.joint_prior_distribution,
                 bijectors=self.bijectors,
                 dtype=self.dtype,
+                parameterization=self.parameterization,
+                rank=self.rank,
             )
         )
         self.params = self.surrogate_parameter_initializer()

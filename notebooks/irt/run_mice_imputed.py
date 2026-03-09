@@ -21,7 +21,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_enable_x64", True)
+# float32 with log_scale parameterization + STL for stability
 
 DATASET_CONFIGS = {
     'grit': {'module': 'bayesianquilts.data.grit', 'n_top_features': 12},
@@ -36,8 +36,8 @@ DATASET_CONFIGS = {
 def make_data_dict(dataframe):
     data = {}
     for col in dataframe.columns:
-        data[col] = dataframe[col].to_numpy().astype(np.float64)
-    data['person'] = np.arange(len(dataframe), dtype=np.float64)
+        data[col] = dataframe[col].to_numpy().astype(np.float32)
+    data['person'] = np.arange(len(dataframe), dtype=np.float32)
     return data
 
 
@@ -64,7 +64,8 @@ def calibrate_manually(model, n_samples=32, seed=42):
 
 def run_mice_imputed(dataset_name, work_dir, skip_mice=False,
                      num_epochs=200, batch_size=256, learning_rate=2e-4,
-                     lr_decay_factor=0.975):
+                     lr_decay_factor=0.975, sample_size=32, seed=42,
+                     parameterization="log_scale"):
     import importlib
     from pathlib import Path
     from bayesianquilts.irt.grm import GRModel
@@ -105,7 +106,8 @@ def run_mice_imputed(dataset_name, work_dir, skip_mice=False,
         dim=1,
         kappa_scale=0.1,
         response_cardinality=response_cardinality,
-        dtype=jnp.float64,
+        dtype=jnp.float32,
+        parameterization=parameterization,
     )
     array_data = GRModel._load_arrays_hdf5(work_dir / 'grm_baseline')
     for name, val in array_data.items():
@@ -170,8 +172,9 @@ def run_mice_imputed(dataset_name, work_dir, skip_mice=False,
         dim=1,
         kappa_scale=0.1,
         response_cardinality=response_cardinality,
-        dtype=jnp.float64,
+        dtype=jnp.float32,
         imputation_model=mixed_imputation,
+        parameterization=parameterization,
     )
 
     res_imputed = model_imputed.fit(
@@ -184,6 +187,8 @@ def run_mice_imputed(dataset_name, work_dir, skip_mice=False,
         lr_decay_factor=lr_decay_factor,
         patience=10,
         zero_nan_grads=True,
+        sample_size=sample_size,
+        seed=seed,
     )
     losses_imputed = res_imputed[0]
     print(f"Imputed final loss: {losses_imputed[-1]:.2f}")
@@ -202,6 +207,13 @@ def main():
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--lr-decay-factor', type=float, default=0.975)
+    parser.add_argument('--sample-size', type=int, default=32,
+                        help='MC samples per ADVI gradient step (default 32)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducible ADVI training')
+    parser.add_argument('--parameterization', default='log_scale',
+                        choices=['softplus', 'log_scale', 'natural'],
+                        help='ADVI scale parameterization (default log_scale)')
     args = parser.parse_args()
 
     work_dir = os.path.join(
@@ -215,6 +227,9 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.lr,
         lr_decay_factor=args.lr_decay_factor,
+        sample_size=args.sample_size,
+        seed=args.seed,
+        parameterization=args.parameterization,
     )
 
 

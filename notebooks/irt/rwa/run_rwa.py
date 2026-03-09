@@ -32,9 +32,9 @@ print(f"Loaded: {num_people} people, {len(item_keys)} items, K={response_cardina
 def make_data_dict(dataframe):
     data = {}
     for col in dataframe.columns:
-        arr = dataframe[col].to_numpy().astype(np.float64)
+        arr = dataframe[col].to_numpy().astype(np.float32)
         data[col] = arr
-    data['person'] = np.arange(len(dataframe), dtype=np.float64)
+    data['person'] = np.arange(len(dataframe), dtype=np.float32)
     return data
 
 batch = make_data_dict(sub_df)
@@ -54,7 +54,8 @@ print("Fitting baseline GRM...")
 model_baseline = GRModel(
     item_keys=item_keys, num_people=SUBSAMPLE_N, dim=1,
     kappa_scale=0.1, response_cardinality=response_cardinality,
-    dtype=jnp.float64,
+    dtype=jnp.float32,
+        parameterization="log_scale",
 )
 
 NUM_EPOCHS = 200
@@ -65,6 +66,7 @@ res_baseline = model_baseline.fit(
     num_epochs=NUM_EPOCHS, steps_per_epoch=steps_per_epoch,
     learning_rate=2e-4, lr_decay_factor=0.975, patience=10,
     zero_nan_grads=True, snapshot_epoch=SNAPSHOT_EPOCH,
+    sample_size=32, seed=42,
 )
 losses_baseline = res_baseline[0]
 snapshot_params = res_baseline[2] if len(res_baseline) > 2 else None
@@ -115,7 +117,8 @@ print("Fitting imputed GRM...")
 model_imputed = GRModel(
     item_keys=item_keys, num_people=SUBSAMPLE_N, dim=1,
     kappa_scale=0.1, response_cardinality=response_cardinality,
-    dtype=jnp.float64, imputation_model=mixed_imputation,
+    dtype=jnp.float32,
+        parameterization="log_scale", imputation_model=mixed_imputation,
 )
 
 res_imputed = model_imputed.fit(
@@ -123,6 +126,7 @@ res_imputed = model_imputed.fit(
     num_epochs=NUM_EPOCHS, steps_per_epoch=steps_per_epoch,
     learning_rate=2e-4, patience=10, zero_nan_grads=True,
     initial_values=snapshot_params, lr_decay_factor=0.975,
+    sample_size=32, seed=43,
 )
 losses_imputed = res_imputed[0]
 print(f"Imputed done: {losses_imputed[-1]:.2f}")
