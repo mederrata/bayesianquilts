@@ -27,6 +27,7 @@ from tqdm import tqdm
 
 from bayesianquilts.jax.parameter import Interactions
 from bayesianquilts.util import training_loop
+from bayesianquilts.vi.advi import pathfinder_initialize
 from bayesianquilts.vi.minibatch import minibatch_fit_surrogate_posterior
 import bayesianquilts.tfp_patch
 
@@ -192,6 +193,8 @@ class BayesianModel(nnx.Module, ABC):
         verbose: bool = True,
         zero_nan_grads: bool = False,
         snapshot_epoch: int | None = None,
+        pathfinder_init: bool = False,
+        pathfinder_kwargs: dict | None = None,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -210,6 +213,17 @@ class BayesianModel(nnx.Module, ABC):
             set_expectations (bool, optional): [description]. Defaults to True.
             sample_size (int, optional): [description]. Defaults to 4.
         """
+
+        if pathfinder_init and initial_values is None:
+            first_batch = next(batched_data_factory)
+            initial_values = pathfinder_initialize(
+                log_prob_fn=unormalized_log_prob_fn or self.unormalized_log_prob,
+                surrogate_initializer=self.surrogate_parameter_initializer,
+                data=first_batch,
+                dataset_size=dataset_size,
+                batch_size=batch_size,
+                **(pathfinder_kwargs or {}),
+            )
 
         def run_approximation():
             losses = minibatch_fit_surrogate_posterior(

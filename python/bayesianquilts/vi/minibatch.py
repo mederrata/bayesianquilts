@@ -32,13 +32,16 @@ def minibatch_mc_variational_loss(
     stl=True,
     **kwargs,
 ):
-    """Minibatch variational loss (negative ELBO).
+    """Minibatch variational loss (per-datum negative ELBO).
 
-    Computes the standard minibatch ELBO:
+    Computes the standard minibatch ELBO normalized by dataset size:
 
-        loss = E_q[log q(theta) - log p(theta) - (N/B) * log p(y_batch | theta)]
+        loss = (1/N) * E_q[log q(theta) - log p(theta) - (N/B) * log p(y_batch | theta)]
 
     where N is the total dataset size and B is the minibatch size.
+
+    Dividing by N makes the loss and its gradients O(1) regardless of dataset
+    size, so a single learning rate works across datasets of different sizes.
 
     The Sticking-the-Landing (STL) estimator (Roeder et al., 2017) is used
     by default, which applies stop_gradient to log q(theta) to reduce
@@ -62,7 +65,7 @@ def minibatch_mc_variational_loss(
             divergence.
 
     Returns:
-        Scalar loss value (negative ELBO).
+        Scalar per-datum loss value (negative ELBO / N).
     """
     scale = dataset_size / batch_size
 
@@ -124,7 +127,7 @@ def minibatch_mc_variational_loss(
             batch_expectations += [sample_expected_elbo(q_samples, q_lp)]
             batch_expectations = jnp.atleast_1d(batch_expectations)
     batch_expectations = jnp.mean(batch_expectations, axis=0)
-    return batch_expectations
+    return batch_expectations / dataset_size
 
 
 def minibatch_fit_surrogate_posterior(

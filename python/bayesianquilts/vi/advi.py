@@ -455,6 +455,159 @@ def build_factored_surrogate_posterior_generator(
 
 
 # ---------------------------------------------------------------------------
+# Pathfinder initialization
+# ---------------------------------------------------------------------------
+
+def pathfinder_initialize(
+    log_prob_fn,
+    surrogate_initializer,
+    data,
+    dataset_size=None,
+    batch_size=None,
+    num_samples=200,
+    maxiter=100,
+    seed=0,
+):
+    """Initialize ADVI surrogate parameters using the Pathfinder algorithm.
+
+    Runs a few L-BFGS iterations on the log joint density to find a good
+    (loc, scale) starting point, dramatically reducing the number of ADVI
+    epochs needed for convergence.
+
+    Args:
+        log_prob_fn: Model's unnormalized log probability function.
+            Signature: log_prob_fn(data=..., prior_weight=..., **params) -> scalar.
+        surrogate_initializer: Callable returning default surrogate params dict
+            with labeled keys (from build_factored_surrogate_posterior_generator).
+        data: Representative data batch for evaluating the log density.
+        dataset_size: Total number of data points N. Used with batch_size to
+            set prior_weight and scale the density so Pathfinder sees
+            full-data curvature.
+        batch_size: Size B of the provided data batch.
+        num_samples: Number of samples to draw from the Pathfinder approximation.
+        maxiter: Maximum L-BFGS iterations for Pathfinder.
+        seed: Random seed.
+
+    Returns:
+        Dictionary of initialized surrogate parameters (same structure as
+        surrogate_initializer() output).
+    """
+    try:
+        from blackjax.vi import pathfinder
+    except ImportError:
+        raise ImportError(
+            "blackjax is required for pathfinder_initialize. "
+            "Install it with: pip install blackjax"
+        )
+
+    default_params = surrogate_initializer()
+
+    # Parse labels to build {var_name: {param_type: label}} mapping
+    var_param_map = {}  # var_name -> {param_type -> label}
+    for label in default_params:
+        parts = label.split("\\")
+        var_name = parts[-4] if len(parts) >= 4 else parts[0]
+        param_type = parts[-1]
+        if var_name not in var_param_map:
+            var_param_map[var_name] = {}
+        var_param_map[var_name][param_type] = label
+
+    # Extract initial position from loc params
+    var_names = list(var_param_map.keys())
+    initial_dict = {}
+    for var_name, pmap in var_param_map.items():
+        if "loc" in pmap:
+            initial_dict[var_name] = default_params[pmap["loc"]]
+        elif "eta1" in pmap:
+            # Natural params: recover loc from eta1 and neg_half_prec
+            eta1 = default_params[pmap["eta1"]]
+            neg_half_prec = default_params[pmap["neg_half_prec"]]
+            eta2 = -jax.nn.softplus(neg_half_prec)
+            variance = -0.5 / eta2
+            initial_dict[var_name] = eta1 * variance
+        else:
+            # Concentration/scale params (InverseGamma) — skip for Pathfinder
+            continue
+
+    flat_init, unflatten_fn = jax.flatten_util.ravel_pytree(initial_dict)
+
+    # Compute prior_weight and density scaling
+    if dataset_size is not None and batch_size is not None:
+        prior_weight = batch_size / dataset_size
+        density_scale = dataset_size / batch_size
+    else:
+        prior_weight = 1.0
+        density_scale = 1.0
+
+    def logdensity_fn(params_flat):
+        params_dict = unflatten_fn(params_flat)
+        lp = log_prob_fn(data=data, prior_weight=prior_weight, **params_dict)
+        return jnp.squeeze(density_scale * lp)
+
+    key = jax.random.PRNGKey(seed)
+
+    # Run Pathfinder
+    state, _ = pathfinder.approximate(
+        rng_key=jax.random.fold_in(key, 0),
+        logdensity_fn=logdensity_fn,
+        initial_position=flat_init,
+        num_samples=num_samples,
+        maxiter=maxiter,
+    )
+
+    # Sample from the Pathfinder approximation
+    sample_key = jax.random.fold_in(key, 1)
+    samples_flat = pathfinder.sample(sample_key, state, num_samples=num_samples)
+    if isinstance(samples_flat, tuple):
+        samples_flat = samples_flat[0]
+
+    # Unflatten and compute per-variable mean and std
+    samples_dicts = jax.vmap(unflatten_fn)(samples_flat)
+    var_mean = {}
+    var_std = {}
+    for var_name in initial_dict:
+        var_samples = samples_dicts[var_name]
+        var_mean[var_name] = jnp.mean(var_samples, axis=0)
+        var_std[var_name] = jnp.maximum(jnp.std(var_samples, axis=0), 1e-6)
+
+    # Map back to surrogate labels
+    init_params = dict(default_params)  # copy defaults
+    for var_name, pmap in var_param_map.items():
+        if var_name not in var_mean:
+            # InverseGamma or other non-loc params — keep defaults
+            continue
+
+        mean = var_mean[var_name]
+        std = var_std[var_name]
+
+        for param_type, label in pmap.items():
+            if param_type == "loc":
+                init_params[label] = mean
+            elif param_type == "scale":
+                init_params[label] = std
+            elif param_type == "log_scale":
+                init_params[label] = jnp.log(std)
+            elif param_type == "log_diag_scale":
+                init_params[label] = jnp.log(std.reshape(-1))
+            elif param_type == "eta1":
+                init_params[label] = mean / (std ** 2)
+            elif param_type == "neg_half_prec":
+                # softplus_inverse(1 / (2 * std^2))
+                target = 1.0 / (2.0 * std ** 2)
+                init_params[label] = jnp.where(
+                    target > 20.0,
+                    target,
+                    jnp.log(jnp.expm1(jnp.clip(target, a_max=20.0))),
+                )
+            elif param_type == "factor":
+                pass  # leave at default (small random)
+            elif param_type in ("concentration",):
+                pass  # leave at default
+
+    return init_params
+
+
+# ---------------------------------------------------------------------------
 # Concentration-only distribution builder (e.g. Dirichlet)
 # ---------------------------------------------------------------------------
 
