@@ -60,6 +60,7 @@ class BayesianModel(nnx.Module, ABC):
     data: Any = nnx.data(None)
     data_cardinality: Any = nnx.data(None)
     params: Any = nnx.data(None)
+    point_estimate_vars: Any = nnx.data(None)
     var_list: list = []
     bijectors: list = []
 
@@ -89,8 +90,12 @@ class BayesianModel(nnx.Module, ABC):
         self,
         batched_data_factory,
         initial_values: Dict[str, jax.typing.ArrayLike] = None,
+        point_estimate_vars: dict | None = None,
         **kwargs,
     ):
+        # Auto-detect from self, allow override
+        pe_vars = point_estimate_vars or getattr(self, 'point_estimate_vars', None)
+
         def infinite_data_iterator():
             while True:
                 # Re-instantiate the iterator from the factory
@@ -100,9 +105,10 @@ class BayesianModel(nnx.Module, ABC):
                 except TypeError:
                     # If it's not iterable?
                     yield iterator
-        
+
         res = self._calibrate_minibatch_advi(
-            infinite_data_iterator(), initial_values=initial_values, **kwargs
+            infinite_data_iterator(), initial_values=initial_values,
+            point_estimate_vars=pe_vars, **kwargs
         )
         self.params = res[1]
         return res
@@ -195,6 +201,7 @@ class BayesianModel(nnx.Module, ABC):
         snapshot_epoch: int | None = None,
         pathfinder_init: bool = False,
         pathfinder_kwargs: dict | None = None,
+        point_estimate_vars: dict | None = None,
         **kwargs,
     ):
         """Calibrate using ADVI
@@ -250,16 +257,31 @@ class BayesianModel(nnx.Module, ABC):
                 verbose=verbose,
                 zero_nan_grads=zero_nan_grads,
                 snapshot_epoch=snapshot_epoch,
+                point_estimate_vars=point_estimate_vars,
                 **kwargs,
             )
             return losses
 
         result = run_approximation()
         losses, params = result[0], result[1]
-        self.params = params
+
+        # Separate point-estimate params from surrogate params
+        from bayesianquilts.vi.minibatch import PE_PREFIX
+        surrogate_params = {}
+        point_params = {}
+        for k, v in params.items():
+            if k.startswith(PE_PREFIX):
+                point_params[k[len(PE_PREFIX):]] = v
+            else:
+                surrogate_params[k] = v
+
+        self.params = surrogate_params
+        if point_params:
+            self.point_estimate_vars = point_params
+
         if len(result) > 2:
-            return losses, params, result[2]
-        return losses, params
+            return losses, surrogate_params, result[2]
+        return losses, surrogate_params
 
     def set_calibration_expectations(self, samples: int = 24, variational: bool = True):
         if variational:
@@ -271,7 +293,7 @@ class BayesianModel(nnx.Module, ABC):
                     dist = self.surrogate_distribution
             except Exception:
                 dist = self.surrogate_distribution
-                
+
             mean, var = FactorizedDistributionMoments(
                 dist, samples=samples
             )
@@ -287,6 +309,12 @@ class BayesianModel(nnx.Module, ABC):
                 k: jnp.std(v, axis=0, keepdims=True)
                 for k, v in self.surrogate_sample.items()
             }
+
+        # Point-estimate vars have zero variance by definition
+        if self.point_estimate_vars:
+            for k, v in self.point_estimate_vars.items():
+                self.calibrated_expectations[k] = v
+                self.calibrated_sd[k] = jnp.zeros_like(v)
 
     @abstractmethod
     def predictive_distribution(self, data, **params):
@@ -753,10 +781,17 @@ class BayesianModel(nnx.Module, ABC):
             else:
                 params = self.prior_distribution.sample(batch_shape, seed=sample_key)
         elif batch_shape is None:
-            return surrogate.sample(seed=sample_key)
+            params = surrogate.sample(seed=sample_key)
         else:
             params = surrogate.sample(batch_shape, seed=sample_key)
         params = self.transform(params)
+        # Merge point-estimate values (no sampling, just broadcast)
+        if self.point_estimate_vars and not prior:
+            for k, v in self.point_estimate_vars.items():
+                if batch_shape is not None:
+                    params[k] = jnp.broadcast_to(v, batch_shape + v.shape)
+                else:
+                    params[k] = v
         return params
 
     # =========================================================================

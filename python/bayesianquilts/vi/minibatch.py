@@ -13,6 +13,22 @@ from tensorflow_probability.substrates.jax.vi import (GradientEstimators,
 
 from bayesianquilts.util import training_loop
 
+PE_PREFIX = "__point__\\"
+
+
+def _merge_point_params(q_samples, point_params, sample_size):
+    """Merge point-estimate params into surrogate samples dict.
+
+    Point-estimate values are broadcast to (sample_size, ...) to match
+    the leading sample dimension of surrogate samples.
+    """
+    if point_params is None:
+        return q_samples
+    all_params = dict(q_samples)
+    for k, v in point_params.items():
+        all_params[k] = jnp.broadcast_to(v, (sample_size,) + v.shape)
+    return all_params
+
 
 def _unwrap_dist(dist):
     """Unwrap a TransformedDistribution to get (base_dist, bijector).
@@ -45,6 +61,7 @@ def minibatch_mc_variational_loss(
     stl=True,
     kl_weight: float = 1.0,
     qmc_base: jnp.ndarray | None = None,
+    point_params: dict | None = None,
     **kwargs,
 ):
     """Minibatch variational loss (per-datum negative ELBO).
@@ -101,10 +118,12 @@ def minibatch_mc_variational_loss(
 
     def sample_elbo(key):
         if qmc_base is not None:
-            return _qmc_sample_elbo(key, surrogate_posterior, qmc_base, sample_size)
-        q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
-            sample_size, seed=key
-        )
+            q_samples, q_lp = _qmc_sample_elbo(key, surrogate_posterior, qmc_base, sample_size)
+        else:
+            q_samples, q_lp = surrogate_posterior.experimental_sample_and_log_prob(
+                sample_size, seed=key
+            )
+        q_samples = _merge_point_params(q_samples, point_params, sample_size)
         return q_samples, q_lp
 
     batch_expectations = []
@@ -260,10 +279,24 @@ def minibatch_fit_surrogate_posterior(
     stl: bool = True,
     kl_anneal_epochs: int = 0,
     qmc: bool = False,
+    point_estimate_vars: dict | None = None,
     **kwargs,
 ):
     if initial_values is None:
         initial_values = surrogate_initializer()
+
+    # Inject point-estimate vars into the flat optimization dict
+    if point_estimate_vars:
+        # Validate no name collisions
+        for k in point_estimate_vars:
+            if k in initial_values:
+                raise ValueError(
+                    f"Point-estimate variable {k!r} collides with a surrogate "
+                    f"parameter name. Use distinct names for point-estimate "
+                    f"and surrogate variables."
+                )
+        for k, v in point_estimate_vars.items():
+            initial_values[PE_PREFIX + k] = v
 
     # Set up PRNG key for reproducible sampling
     if seed is not None:
@@ -298,6 +331,15 @@ def minibatch_fit_surrogate_posterior(
         if params is None:
             params = initial_values
 
+        # Split surrogate params from point-estimate params
+        surrogate_params = {}
+        _point_params = {}
+        for k, v in params.items():
+            if k.startswith(PE_PREFIX):
+                _point_params[k[len(PE_PREFIX):]] = v
+            else:
+                surrogate_params[k] = v
+
         # Compute KL weight for annealing
         if total_anneal_steps > 0:
             kl_weight = jnp.minimum(1.0, step_counter[0] / total_anneal_steps)
@@ -307,7 +349,7 @@ def minibatch_fit_surrogate_posterior(
 
         return minibatch_mc_variational_loss(
             target_log_prob_fn,
-            surrogate_generator(params),
+            surrogate_generator(surrogate_params),
             sample_size=sample_size,
             sample_batches=sample_batches,
             data=data,
@@ -317,6 +359,7 @@ def minibatch_fit_surrogate_posterior(
             stl=stl,
             kl_weight=kl_weight,
             qmc_base=qmc_base,
+            point_params=_point_params or None,
             name=name,
             **kwargs,
         )
