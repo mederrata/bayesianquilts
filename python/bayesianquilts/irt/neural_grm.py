@@ -7,61 +7,74 @@ import numpy as np
 import yaml
 from typing import Any
 
-from flax import nnx
-from jax.scipy.special import xlogy
 from tensorflow_probability.substrates.jax import bijectors as tfb
 from tensorflow_probability.substrates.jax import distributions as tfd
-from tensorflow_probability.substrates.jax import tf2jax as tf
 
-from bayesianquilts.distributions import AbsHorseshoe, SqrtInverseGamma
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 from bayesianquilts.irt.irt import IRTModel
 
 
-@jax.custom_jvp
-def _safe_power(x, a):
-    """Compute x^a with gradient clipping to prevent NaN.
+def _mixture_of_logits(z, nn_scales, nn_shifts, nn_logit_weights):
+    """Per-item mixture of logistic sigmoids: z -> (0, 1).
 
-    Forward: standard power.
-    Backward: clips d/da = x^a * log(x) to avoid huge gradients
-    when log(x) is very negative (x near 0).
+    g_i(z) = sum_m w_{i,m} * sigmoid(s_{i,m} * z + c_{i,m})
+
+    where s_{i,m} > 0 (via softplus) and w_{i,m} = softmax(raw_weights).
+
+    Monotone by construction: sum of monotone functions with positive weights.
+    When M=1, s=1, c=0: g(z) = sigmoid(z) — exactly the standard GRM.
+
+    Args:
+        z: (..., N, D, I, K-1) — scaled offsets
+        nn_scales: (..., I, M) — unconstrained per-component scales (softplus -> positive)
+        nn_shifts: (..., I, M) — per-component shift parameters
+        nn_logit_weights: (..., I, M) — unconstrained mixture weights (softmax -> simplex)
+
+    Returns:
+        (..., N, D, I, K-1) values in (0, 1), monotone increasing in z.
     """
-    return jnp.power(x, a)
+    # Positive scales and normalized weights
+    scales = jax.nn.softplus(nn_scales)  # (..., I, M)
+    weights = jax.nn.softmax(nn_logit_weights, axis=-1)  # (..., I, M)
 
-@_safe_power.defjvp
-def _safe_power_jvp(primals, tangents):
-    x, a = primals
-    dx, da = tangents
-    val = jnp.power(x, a)
-    # d/dx [x^a] = a * x^(a-1), stable
-    dval_dx = a * jnp.power(x, jnp.maximum(a - 1.0, 0.0))
-    # d/da [x^a] = x^a * log(x), can be huge when x≈0
-    log_x = jnp.log(jnp.maximum(x, 1e-7))
-    # Clip the log factor to prevent gradient explosion
-    log_x_clipped = jnp.clip(log_x, -5.0, 0.0)
-    dval_da = val * log_x_clipped
-    return val, dval_dx * dx + dval_da * da
+    # Reshape for broadcasting: (..., I, M) -> (..., 1, 1, I, M)
+    n_batch_dims = nn_scales.ndim - 2  # everything before (I, M)
+    for _ in range(2):  # insert N, D dims
+        scales = jnp.expand_dims(scales, axis=n_batch_dims)
+        nn_shifts = jnp.expand_dims(nn_shifts, axis=n_batch_dims)
+        weights = jnp.expand_dims(weights, axis=n_batch_dims)
+
+    # z: (..., N, D, I, K-1) -> (..., N, D, I, K-1, 1)
+    z_exp = z[..., jnp.newaxis]
+
+    # (..., 1, 1, I, M) -> (..., 1, 1, I, 1, M) for K-1 broadcasting
+    scales = scales[..., jnp.newaxis, :]
+    shifts = nn_shifts[..., jnp.newaxis, :]
+    weights = weights[..., jnp.newaxis, :]
+
+    # Component sigmoids: (..., N, D, I, K-1, M)
+    logits = z_exp * scales + shifts
+    component_probs = jax.nn.sigmoid(logits)
+
+    # Weighted sum over M components: (..., N, D, I, K-1)
+    return jnp.sum(component_probs * weights, axis=-1)
 
 
 class NeuralGRModel(IRTModel):
-    """Graded Response Model with a per-item Kumaraswamy CDF response function.
+    """Graded Response Model with a per-item mixture-of-logits response function.
 
     Instead of the standard sigmoid link P(Y >= k) = sigma(a*(theta - b_k)),
     this model uses P(Y >= k) = g_i(a*(theta - b_k)) where g_i is a per-item
-    monotone function based on the Kumaraswamy CDF:
+    mixture of logistic sigmoids:
 
-        g_i(z) = 1 - (1 - sigma(z)^alpha_i)^beta_i
+        g_i(z) = sum_m w_{i,m} * sigma(s_{i,m} * z + c_{i,m})
 
-    where sigma(z) is the standard logistic sigmoid, and alpha_i, beta_i > 0
-    are per-item shape parameters.
+    where s_{i,m} > 0 (softplus), w_{i,m} > 0 and sum_m w_{i,m} = 1 (softmax),
+    and c_{i,m} are shift parameters. With M mixture components per item.
 
-    Monotonicity: sigma(z) is increasing -> x^a is increasing (a>0) ->
-    1-x^a is decreasing -> (1-x^a)^b is decreasing (b>0) ->
-    1-(1-x^a)^b is increasing. So g_i is monotone increasing.
-
-    When alpha=beta=1: g(z) = 1-(1-sigma(z))^1 = sigma(z), recovering the
-    standard logistic GRM. When alpha != beta, the ICC becomes asymmetric
-    with genuinely non-logistic shapes that no standard GRM can replicate.
+    Monotonicity: convex combination of monotone sigmoids is monotone.
+    When M=1, s=1, c=0: g(z) = sigma(z) — exactly the standard GRM.
+    With M > 1: flexible asymmetric ICC shapes that no single sigmoid can replicate.
     """
 
     response_type = "polytomous"
@@ -95,7 +108,12 @@ class NeuralGRModel(IRTModel):
         # Legacy params accepted but ignored for backward compat
         nn_hidden_sizes=None,
         per_item_nn=None,
+        nn_prior_scale=0.5,
     ):
+        # Monotone network hidden size per item
+        self.nn_hidden_size = nn_hidden_sizes if nn_hidden_sizes is not None else 4
+        self.nn_prior_scale = nn_prior_scale
+
         # Store noisy_dim settings before super().__init__ calls set_dimension
         self.noisy_dim = noisy_dim
         self.noisy_dim_eta_scale = noisy_dim_eta_scale
@@ -130,10 +148,17 @@ class NeuralGRModel(IRTModel):
         # Store the user-facing dim (before noisy augmentation)
         self._primary_dim = dim
 
+        # Discrimination prior scale: 1.0 for primary dims, weaker for noisy dim
+        disc_scale = jnp.ones(
+            (1, self.dimensions, self.num_items, 1), dtype=dtype
+        )
+        if noisy_dim:
+            # Noisy dimension gets smaller discrimination prior (weakly coupled)
+            disc_scale = disc_scale.at[:, -1, :, :].set(noisy_dim_eta_scale)
+        self._disc_prior_scale = disc_scale
+
         # Override kappa_scale for the noisy dimension to enforce strong shrinkage
         if noisy_dim:
-            # kappa_scale shape is (1, D, 1, 1) after set_dimension
-            # Replace the last dimension's scale with a much smaller value
             noisy_kappa = jnp.array(
                 noisy_dim_eta_scale, dtype=dtype
             ) * jnp.ones((1, 1, 1, 1), dtype=dtype)
@@ -144,64 +169,43 @@ class NeuralGRModel(IRTModel):
         self.create_distributions()
 
     def _monotone_forward(self, z, nn_params):
-        """Per-item Kumaraswamy CDF response function.
+        """Per-item mixture-of-logits response function.
 
-        g_i(z) = 1 - (1 - sigma(z)^a_i)^b_i
+        g_i(z) = sum_m w_{i,m} * sigmoid(s_{i,m} * z + c_{i,m})
 
-        Monotone by composition: sigma increasing, x^a increasing (a>0),
-        1-x^a decreasing, (.)^b decreasing (b>0), 1-(.) increasing.
-
-        When a=b=1: g(z) = sigma(z) — standard GRM.
-        When a != b: asymmetric ICC shapes.
-        When a > 1: steeper near 0 (sharper lower threshold).
-        When b > 1: steeper near 1 (sharper upper threshold).
-
-        Parameters:
-        - nn_log_a: (batch..., I) — unconstrained shape param (exp -> positive)
-        - nn_log_b: (batch..., I) — unconstrained shape param (exp -> positive)
+        Monotone by construction: convex combination of monotone sigmoids.
 
         Args:
             z: (..., N, D, I, K-1) — the scaled offsets.
-            nn_params: Dict with keys nn_log_a, nn_log_b.
+            nn_params: Dict with nn_scales, nn_shifts, nn_logit_weights.
 
         Returns:
             Array of same shape as z, with values in (0, 1).
         """
-        raw_a = nn_params['nn_log_a']  # (batch..., I)
-        raw_b = nn_params['nn_log_b']  # (batch..., I)
+        return _mixture_of_logits(
+            z, nn_params['nn_scales'], nn_params['nn_shifts'],
+            nn_params['nn_logit_weights'],
+        )
 
-        # Positive shape params via softplus (better gradients than exp near 0)
-        # softplus(0) = ln(2) ≈ 0.693, so initial a,b ≈ 0.7 (near 1)
-        # Shift so softplus(0) ≈ 1: a = softplus(raw + 0.5413)
-        a = jax.nn.softplus(raw_a + 0.5413)
-        b = jax.nn.softplus(raw_b + 0.5413)
+    def _log_monotone_forward(self, z, nn_params):
+        """Log-space mixture of logits for numerical stability.
 
-        # Determine batch dims: everything before the I dimension
-        n_batch_dims = raw_a.ndim - 1
-
-        # Reshape a, b: (batch..., I) -> (batch..., 1, 1, I, 1)
-        for _ in range(2):  # insert N, D dims
-            a = jnp.expand_dims(a, axis=n_batch_dims)
-            b = jnp.expand_dims(b, axis=n_batch_dims)
-        a = jnp.expand_dims(a, axis=-1)  # insert K-1 dim
-        b = jnp.expand_dims(b, axis=-1)
-
-        # Kumaraswamy CDF: g(z) = 1 - (1 - sigmoid(z)^a)^b
-        # Uses _safe_power which clips d/da gradients to prevent NaN
-        # when sigmoid(z) is near 0 (large negative z).
-        x = jax.nn.sigmoid(z)
-        x = jnp.clip(x, 1e-6, 1.0 - 1e-6)
-        x_a = _safe_power(x, a)
-        x_a = jnp.clip(x_a, 1e-7, 1.0 - 1e-7)
-        result = 1.0 - _safe_power(1.0 - x_a, b)
-        return result
+        Returns (log_cdf, log_sf) = (log(g(z)), log(1 - g(z))).
+        Since g(z) is a mixture of sigmoids, we compute it and take log
+        with clamping for safety.
+        """
+        g = self._monotone_forward(z, nn_params)
+        g = jnp.clip(g, 1e-12, 1.0 - 1e-12)
+        log_cdf = jnp.log(g)
+        log_sf = jnp.log1p(-g)
+        return log_cdf, log_sf
 
     def _get_nn_param_names(self):
-        """Return list of Kumaraswamy CDF parameter names."""
-        return ['nn_log_a', 'nn_log_b']
+        """Return list of mixture-of-logits parameter names."""
+        return ['nn_scales', 'nn_shifts', 'nn_logit_weights']
 
     def _extract_nn_params(self, params):
-        """Extract Kumaraswamy CDF parameters from a params dict."""
+        """Extract mixture-of-logits parameters from a params dict."""
         return {k: params[k] for k in self._get_nn_param_names() if k in params}
 
     def neural_grm_model_prob(self, abilities, discriminations, difficulties, nn_params):
@@ -225,7 +229,7 @@ class NeuralGRModel(IRTModel):
         offsets = difficulties - abilities  # (..., N, D, I, K-1)
         scaled = offsets * discriminations  # (..., N, D, I, K-1)
 
-        # Apply monotone Beta CDF to -scaled (matching GRM's sigmoid(-scaled) convention)
+        # Apply monotone network to -scaled (matching GRM's sigmoid(-scaled) convention)
         # so that P(Y >= k) increases with ability (theta) and decreases with threshold (b_k)
         cum_probs = self._monotone_forward(-scaled, nn_params)  # P(Y >= k)
 
@@ -243,6 +247,10 @@ class NeuralGRModel(IRTModel):
             constant_values=0,
         )
         probs = cum_probs[..., :-1] - cum_probs[..., 1:]
+        # Clip to avoid zero/negative probs from numerical non-monotonicity
+        probs = jnp.maximum(probs, 1e-8)
+        # Renormalize so probs sum to 1
+        probs = probs / jnp.sum(probs, axis=-1, keepdims=True)
 
         # Weight by discrimination and sum over dimensions axis
         weights = (
@@ -254,11 +262,81 @@ class NeuralGRModel(IRTModel):
         probs = jnp.sum(probs * weights, axis=-3)
         return probs
 
+    def neural_grm_log_prob(self, abilities, discriminations, difficulties, nn_params):
+        """Compute log P(Y=k) in log-space for numerical stability.
+
+        Instead of computing probs and then taking log, this method works
+        entirely in log-space using log_cdf and log_sf from the Kumaraswamy CDF.
+
+        log P(Y=k) = log(F_k - F_{k+1}) where F_k = P(Y >= k)
+                   = log(F_k) + log(1 - F_{k+1}/F_k)
+                   = log(F_k) + log1p(-exp(log(F_{k+1}) - log(F_k)))
+
+        Returns:
+            log_probs: (..., N, I, K) — log category probabilities
+            probs: (..., N, I, K) — category probabilities (for entropy etc.)
+        """
+        if self.include_independent:
+            abilities = jnp.pad(
+                abilities,
+                [(0, 0)] * (len(discriminations.shape) - 3) + [(1, 0)] + [(0, 0)] * 2,
+            )
+
+        offsets = difficulties - abilities
+        scaled = offsets * discriminations
+        log_cdf, log_sf = self._log_monotone_forward(-scaled, nn_params)
+
+        # log_cdf is log(P(Y >= k)) for k=1..K-1
+        # Need: log(P(Y >= 0)) = 0, log(P(Y >= K)) = -inf
+        neg_inf = jnp.full((*log_cdf.shape[:-1], 1), -1e10, dtype=log_cdf.dtype)
+        zero_pad = jnp.zeros((*log_cdf.shape[:-1], 1), dtype=log_cdf.dtype)
+
+        # log_F: log P(Y >= k) for k = 0, 1, ..., K
+        log_F = jnp.concatenate([zero_pad, log_cdf, neg_inf], axis=-1)
+
+        # log P(Y = k) = log(F_k - F_{k+1})
+        # = log_F[k] + log1p(-exp(log_F[k+1] - log_F[k]))
+        log_Fk = log_F[..., :-1]       # log F_k for k = 0..K-1
+        log_Fk1 = log_F[..., 1:]       # log F_{k+1} for k = 0..K-1
+        # log_ratio = log(F_{k+1}/F_k) = log_Fk1 - log_Fk, should be <= 0
+        log_ratio = jnp.minimum(log_Fk1 - log_Fk, -1e-7)
+        # log(1 - exp(log_ratio)) via stable log1mexp
+        log_probs_per_dim = log_Fk + jnp.where(
+            log_ratio < -0.6931,
+            jnp.log1p(-jnp.exp(log_ratio)),
+            jnp.log(-jnp.expm1(log_ratio)),
+        )
+
+        # Clamp for safety
+        log_probs_per_dim = jnp.maximum(log_probs_per_dim, -20.0)
+
+        # Also compute probs for simulation/entropy
+        probs_per_dim = jnp.exp(log_probs_per_dim)
+        probs_per_dim = jnp.maximum(probs_per_dim, 1e-8)
+        probs_per_dim = probs_per_dim / jnp.sum(probs_per_dim, axis=-1, keepdims=True)
+
+        # Weight by discrimination and sum over dimensions
+        weights = (
+            jnp.abs(discriminations) ** self.weight_exponent
+            / jnp.sum(jnp.abs(discriminations) ** self.weight_exponent, axis=-3)[
+                ..., jnp.newaxis, :, :
+            ]
+        )
+        # Weighted log-probs: log(sum_d w_d * p_d(k))
+        # Use logsumexp: log(sum_d exp(log(w_d) + log(p_d(k))))
+        log_weights = jnp.log(jnp.maximum(weights, 1e-30))
+        log_probs = jax.scipy.special.logsumexp(
+            log_weights[..., :, :] + log_probs_per_dim, axis=-3
+        )
+
+        probs = jnp.sum(probs_per_dim * weights, axis=-3)
+        return log_probs, probs
+
     def neural_grm_model_prob_d(
         self, abilities, discriminations, difficulties0, ddifficulties, nn_params
     ):
         """Convenience: construct cumulative difficulties then call neural_grm_model_prob."""
-        d0 = jnp.concat([difficulties0, ddifficulties], axis=-1)
+        d0 = jnp.concat([difficulties0, ddifficulties + 0.1], axis=-1)
         difficulties = jnp.cumsum(d0, axis=-1)
         return self.neural_grm_model_prob(
             abilities, discriminations, difficulties, nn_params
@@ -273,16 +351,16 @@ class NeuralGRModel(IRTModel):
         abilities,
         **kwargs
     ):
-        """Compute predictive distribution using the Kumaraswamy CDF GRM.
+        """Compute predictive distribution using the mixture-of-logits GRM.
 
-        Same interface as GRModel.predictive_distribution but extracts Beta CDF
+        Same interface as GRModel.predictive_distribution but extracts mixture
         params from kwargs and uses neural_grm_model_prob.
         """
         nn_params = self._extract_nn_params(kwargs)
 
-        ddifficulties = jnp.where(
-            ddifficulties < 1e-1, 1e-1 * jnp.ones_like(ddifficulties), ddifficulties
-        )
+        # Shift ddifficulties to enforce minimum gap of 0.1 between thresholds
+        # (ddifficulties are already positive from Softplus bijector)
+        ddifficulties = ddifficulties + 0.1
         difficulties = jnp.concat([difficulties0, ddifficulties], axis=-1)
         difficulties = jnp.cumsum(difficulties, axis=-1)
 
@@ -301,29 +379,21 @@ class NeuralGRModel(IRTModel):
 
         abilities = abilities[:, people, ...]
 
-        response_probs = self.neural_grm_model_prob(
+        # Use log-space computation to avoid NaN from near-zero probs
+        log_response_probs, response_probs = self.neural_grm_log_prob(
             abilities, discriminations, difficulties, nn_params
         )
-        imputed_lp = jnp.sum(xlogy(response_probs, response_probs), axis=-1)
 
-        rv_responses = tfd.Categorical(probs=response_probs)
-        log_probs = rv_responses.log_prob(choices)
+        # Log-likelihood: log P(Y=chosen_k) — index directly from log_probs
+        choices_oh = jax.nn.one_hot(choices.astype(jnp.int32), self.response_cardinality)
+        log_probs = jnp.sum(log_response_probs * choices_oh, axis=-1)
 
-        imputation_pmfs = data.get('_imputation_pmfs')
-        if imputation_pmfs is not None:
-            log_rp = jnp.log(jnp.maximum(response_probs, 1e-30))
-            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))
-            rb = jax.scipy.special.logsumexp(
-                log_rp + log_q[jnp.newaxis, ...], axis=-1
-            )
-            log_probs = jnp.where(bad_choices[jnp.newaxis, ...], rb, log_probs)
-        else:
-            log_probs = jnp.where(
-                bad_choices[jnp.newaxis, ...], imputed_lp, log_probs
-            )
+        # Ignorability: missing responses contribute 0 to log-likelihood
+        log_probs = jnp.where(bad_choices[jnp.newaxis, ...], 0.0, log_probs)
 
         log_probs = jnp.sum(log_probs, axis=-1)
 
+        rv_responses = tfd.Categorical(probs=response_probs)
         return {
             "log_likelihood": log_probs,
             "discriminations": discriminations,
@@ -365,17 +435,15 @@ class NeuralGRModel(IRTModel):
         self.bijectors = {
             k: tfb.Identity() for k in ["abilities", "mu", "difficulties0"]
         }
-        self.bijectors["eta"] = tfb.Softplus()
-        self.bijectors["kappa"] = tfb.Softplus()
         self.bijectors["discriminations"] = tfb.Softplus()
         self.bijectors["ddifficulties"] = tfb.Softplus()
-        self.bijectors["eta_a"] = tfb.Softplus()
-        self.bijectors["kappa_a"] = tfb.Softplus()
-        self.bijectors["xi"] = tfb.Softplus()
 
         K = self.response_cardinality
 
-        # --- Standard IRT priors (same as GRModel) ---
+        # --- Simplified priors for NeuralGRM (no Horseshoe hierarchy) ---
+        # The NeuralGRM is a data generator, not a sparse model.
+        # Use simple HalfNormal priors for discriminations instead of
+        # the Horseshoe (AbsHorseshoe + SqrtInverseGamma) which causes NaN.
         grm_joint_distribution_dict = dict(
             mu=tfd.Independent(
                 tfd.Normal(
@@ -397,25 +465,11 @@ class NeuralGRModel(IRTModel):
                 ),
                 reinterpreted_batch_ndims=4,
             ),
-            discriminations=(
-                (
-                    lambda eta, kappa: tfd.Independent(
-                        AbsHorseshoe(scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype)), reinterpreted_batch_ndims=4
-                    )
-                )
-                if self.positive_discriminations
-                else (
-                    lambda eta, xi, kappa: tfd.Independent(
-                        tfd.Horseshoe(
-                            loc=jnp.zeros(
-                                (1, self.dimensions, self.num_items, 1),
-                                dtype=self.dtype,
-                            ),
-                            scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype),
-                        ),
-                        reinterpreted_batch_ndims=4,
-                    )
-                )
+            discriminations=tfd.Independent(
+                tfd.HalfNormal(
+                    scale=self._disc_prior_scale,
+                ),
+                reinterpreted_batch_ndims=4,
             ),
             ddifficulties=tfd.Independent(
                 tfd.HalfNormal(
@@ -428,28 +482,6 @@ class NeuralGRModel(IRTModel):
                         ),
                         dtype=self.dtype,
                     )
-                ),
-                reinterpreted_batch_ndims=4,
-            ),
-            eta=tfd.Independent(
-                tfd.HalfNormal(
-                    scale=self.eta_scale
-                    * jnp.ones((1, 1, self.num_items, 1), dtype=self.dtype),
-                ),
-                reinterpreted_batch_ndims=4,
-            ),
-            kappa=lambda kappa_a: tfd.Independent(
-                SqrtInverseGamma(
-                    0.5 * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
-                    jnp.asarray(1.0, dtype=self.dtype) / jnp.asarray(kappa_a, dtype=self.dtype),
-                ),
-                reinterpreted_batch_ndims=4,
-            ),
-            kappa_a=tfd.Independent(
-                tfd.InverseGamma(
-                    0.5 * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
-                    jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype)
-                    / self.kappa_scale**2,
                 ),
                 reinterpreted_batch_ndims=4,
             ),
@@ -485,20 +517,40 @@ class NeuralGRModel(IRTModel):
             reinterpreted_batch_ndims=4,
         )
 
-        # --- Per-item Kumaraswamy CDF shape parameters ---
-        # Prior centered at log(a)=log(b)=0, i.e. a=b=1 (standard GRM).
-        # Scale 0.5 allows moderate deviations: 95% of prior mass gives
-        # a, b in [exp(-1), exp(1)] ≈ [0.37, 2.72].
+        # --- Per-item mixture-of-logits parameters ---
+        # nn_scales: (I, M) — unconstrained, softplus -> positive scale per component
+        #   Prior centered at 0.5413 so softplus(0.5413) ≈ 1.0 (unit scale = standard GRM)
+        # nn_shifts: (I, M) — shift per component
+        #   Prior centered at 0 (no shift = standard GRM)
+        # nn_logit_weights: (I, M) — unconstrained, softmax -> mixture weights
+        #   Prior centered at 0 (uniform weights)
         I = self.num_items
-        for param_name in ['nn_log_a', 'nn_log_b']:
-            grm_joint_distribution_dict[param_name] = tfd.Independent(
-                tfd.Normal(
-                    loc=jnp.zeros((I,), dtype=self.dtype),
-                    scale=0.5 * jnp.ones((I,), dtype=self.dtype),
-                ),
-                reinterpreted_batch_ndims=1,
-            )
-            self.bijectors[param_name] = tfb.Identity()
+        M = self.nn_hidden_size  # number of mixture components
+        nn_ps = self.nn_prior_scale
+        grm_joint_distribution_dict['nn_scales'] = tfd.Independent(
+            tfd.Normal(
+                loc=0.5413 * jnp.ones((I, M), dtype=self.dtype),
+                scale=nn_ps * jnp.ones((I, M), dtype=self.dtype),
+            ),
+            reinterpreted_batch_ndims=2,
+        )
+        self.bijectors['nn_scales'] = tfb.Identity()
+        grm_joint_distribution_dict['nn_shifts'] = tfd.Independent(
+            tfd.Normal(
+                loc=jnp.zeros((I, M), dtype=self.dtype),
+                scale=nn_ps * jnp.ones((I, M), dtype=self.dtype),
+            ),
+            reinterpreted_batch_ndims=2,
+        )
+        self.bijectors['nn_shifts'] = tfb.Identity()
+        grm_joint_distribution_dict['nn_logit_weights'] = tfd.Independent(
+            tfd.Normal(
+                loc=jnp.zeros((I, M), dtype=self.dtype),
+                scale=nn_ps * jnp.ones((I, M), dtype=self.dtype),
+            ),
+            reinterpreted_batch_ndims=2,
+        )
+        self.bijectors['nn_logit_weights'] = tfb.Identity()
 
         self.joint_prior_distribution = tfd.JointDistributionNamed(
             grm_joint_distribution_dict
@@ -568,6 +620,8 @@ class NeuralGRModel(IRTModel):
             'response_cardinality': int(self.response_cardinality),
             'include_independent': bool(self.include_independent),
             'vi_mode': str(self.vi_mode),
+            'nn_hidden_sizes': int(self.nn_hidden_size),
+            'nn_prior_scale': float(self.nn_prior_scale),
             'dtype': 'float64' if self.dtype == jnp.float64 else 'float32',
         }
         with open(path / 'config.yaml', 'w') as f:
@@ -597,7 +651,6 @@ class NeuralGRModel(IRTModel):
         dtype = jnp.float64 if dtype_str == 'float64' else jnp.float32
         config['dtype'] = dtype
         # Remove legacy fields that may exist in old saved models
-        config.pop('nn_hidden_sizes', None)
         config.pop('per_item_nn', None)
 
         instance = cls(**config)

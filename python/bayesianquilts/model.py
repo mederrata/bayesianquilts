@@ -61,6 +61,16 @@ class BayesianModel(nnx.Module, ABC):
     data_cardinality: Any = nnx.data(None)
     params: Any = nnx.data(None)
     point_estimate_vars: Any = nnx.data(None)
+    calibrated_expectations: Any = nnx.data(None)
+    calibrated_sd: Any = nnx.data(None)
+    calibrated_expectations_is: Any = nnx.data(None)
+    elpd_loo: Any = nnx.data(None)
+    elpd_loo_se: Any = nnx.data(None)
+    elpd_loo_per_obs: Any = nnx.data(None)
+    elpd_loo_se_per_obs: Any = nnx.data(None)
+    elpd_loo_pointwise: Any = nnx.data(None)
+    elpd_loo_khat: Any = nnx.data(None)
+    elpd_loo_n_obs: Any = nnx.data(None)
     var_list: list = []
     bijectors: list = []
 

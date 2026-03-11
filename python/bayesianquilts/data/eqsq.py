@@ -16,6 +16,12 @@ item_keys = [f"E{i}" for i in range(1, 61)] + [f"S{i}" for i in range(1, 61)]
 
 response_cardinality = 4
 
+# 0-indexed item positions to reverse-score (negative item-total correlations)
+# E11,E23,E26,E32,E51,E57 and their S counterparts
+_e_reverse = [10, 22, 25, 31, 50, 56]  # 0-indexed within E1-E60
+_s_reverse = [10, 22, 25, 31, 50, 56]  # 0-indexed within S1-S60
+to_reverse = _e_reverse + [i + 60 for i in _s_reverse]
+
 _DATA_URL = "https://openpsychometrics.org/_rawdata/EQSQ.zip"
 
 
@@ -31,7 +37,7 @@ class _ArrayDataSource(grain.sources.RandomAccessDataSource):
         return self.n
 
 
-def get_data(polars_out=False, cache_dir=None):
+def get_data(reorient=False, polars_out=False, cache_dir=None):
     """Load the EQSQ dataset.
 
     Responses are shifted from 1-4 to 0-3. Values of 0 (not answered)
@@ -63,6 +69,12 @@ def get_data(polars_out=False, cache_dir=None):
     ])
 
     num_people = len(data)
+
+    if reorient:
+        data = data.with_columns([
+            (3 - pl.col(item_keys[i])).alias(item_keys[i])
+            for i in to_reverse
+        ])
 
     # Mark invalid values as -1
     data = data.with_columns([

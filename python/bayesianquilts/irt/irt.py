@@ -36,6 +36,8 @@ class IRTModel(BayesianModel):
             vi_mode='advi',
             imputation_model=None,
             parameterization="softplus",
+            discrimination_prior="horseshoe",
+            discrimination_prior_scale=None,
             rank=0,
             dtype=tf.float64):
         super(IRTModel, self).__init__(dtype=dtype)
@@ -60,6 +62,8 @@ class IRTModel(BayesianModel):
 
         self.imputation_model = imputation_model
         self.parameterization = parameterization
+        self.discrimination_prior = discrimination_prior
+        self.discrimination_prior_scale = discrimination_prior_scale
         self.rank = rank
 
         self.set_dimension(dim, decay)
@@ -312,13 +316,14 @@ class IRTModel(BayesianModel):
         return imputing_factory
 
     def _compute_elpd_loo(self, data_factory, n_samples=100, seed=42,
-                          khat_threshold=0.7):
-        """Compute PSIS-LOO after fitting, with AIS fallback for high k-hat.
+                          khat_threshold=0.7, use_ais=True):
+        """Compute PSIS-LOO after fitting, with adaptive IS refinement.
 
         Iterates one epoch through the factory, computes per-person
         log-likelihoods under ``n_samples`` surrogate posterior draws,
-        and runs PSIS-LOO.  If any k-hat > khat_threshold, uses
-        AdaptiveImportanceSampler to improve those estimates.
+        and runs PSIS-LOO.  Then uses AdaptiveImportanceSampler to
+        improve estimates (always when ``use_ais=True``, or only for
+        high k-hat when ``use_ais=False``).
 
         Results are stored as attributes on ``self`` so they persist
         via ``save_to_disk``.
@@ -328,7 +333,10 @@ class IRTModel(BayesianModel):
                 (same as the training data factory).
             n_samples: Surrogate posterior draws for PSIS.
             seed: Random seed for sampling.
-            khat_threshold: Use AIS for points with k-hat above this.
+            khat_threshold: Diagnostic threshold for k-hat.
+            use_ais: If True, always run AIS for all observations.
+                If False, only run AIS for observations with k-hat
+                above ``khat_threshold``.
         """
         from bayesianquilts.metrics.nppsis import psisloo
 
@@ -344,7 +352,7 @@ class IRTModel(BayesianModel):
             (n_samples, self.num_people), np.nan, dtype=np.float64
         )
 
-        # Collect full data for potential AIS pass
+        # Collect full data for AIS pass
         all_batches = []
         for batch in data_factory():
             people = np.asarray(batch[self.person_key], dtype=np.int32)
@@ -360,17 +368,25 @@ class IRTModel(BayesianModel):
                   f"visited in ELPD-LOO pass")
             log_lik_matrix = log_lik_matrix[:, visited]
 
+        # Initial PSIS-LOO (used as baseline / when AIS fails)
         loo, loos, ks = psisloo(log_lik_matrix)
 
-        # AIS fallback if any k-hat > threshold
-        bad_k = np.sum(ks > khat_threshold)
-        if bad_k > 0:
+        bad_k_initial = int(np.sum(ks > khat_threshold))
+        print(f"  PSIS-LOO (initial): {float(loo):.2f}, "
+              f"k-hat > {khat_threshold}: {bad_k_initial}/{n_obs}")
+
+        # Run AIS to refine estimates
+        run_ais = use_ais or bad_k_initial > 0
+        if run_ais:
             try:
                 from bayesianquilts.irt.grm import GradedResponseLikelihood
                 from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
 
-                print(f"  {bad_k} observations with k-hat > {khat_threshold}, "
-                      f"running AIS...")
+                if use_ais:
+                    print(f"  Running adaptive IS for all {n_obs} observations...")
+                else:
+                    print(f"  Running adaptive IS for {bad_k_initial} high k-hat "
+                          f"observations...")
 
                 # Build full data dict from collected batches
                 full_data = {}
@@ -382,22 +398,24 @@ class IRTModel(BayesianModel):
                 likelihood_fn = GradedResponseLikelihood(dtype=self.dtype)
                 surrogate_dist = self.surrogate_distribution_generator(self.params)
                 surrogate_log_prob_fn = lambda p: surrogate_dist.log_prob(p)
-                prior_log_prob_fn = lambda p: self.prior_distribution.log_prob(p)
+                prior_log_prob_fn = lambda p: self.joint_prior_distribution.log_prob(p)
 
                 sampler = AdaptiveImportanceSampler(
                     likelihood_fn, prior_log_prob_fn, surrogate_log_prob_fn
                 )
+                ais_threshold = 1e10 if use_ais else khat_threshold
                 results = sampler.adaptive_is_loo(
                     full_data, samples,
                     variational=True,
-                    khat_threshold=khat_threshold,
+                    khat_threshold=ais_threshold,
                 )
                 best = results['best']
                 loos = np.array(best['ll_loo_psis'])
                 ks = np.array(best['khat'])
                 loo = float(np.sum(loos))
+                print(f"  AIS complete: ELPD-LOO = {loo:.2f}")
             except Exception as e:
-                print(f"  AIS fallback failed ({e}), using standard PSIS-LOO")
+                print(f"  AIS failed ({e}), using standard PSIS-LOO")
 
         self.elpd_loo = float(loo)
         self.elpd_loo_se = float(np.std(loos) * np.sqrt(n_obs))

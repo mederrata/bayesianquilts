@@ -18,7 +18,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats
 
-# Using float32 for training (with log_scale parameterization + STL for stability)
+# Enable float64 support (NeuralGRM uses float64 for stability, GRM stays float32)
+jax.config.update("jax_enable_x64", True)
 
 
 # -------------------------------------------------------------------------
@@ -58,6 +59,10 @@ def load_dataset(dataset_name: str, cache_dir=None):
     kwargs = {'polars_out': True}
     if cache_dir is not None:
         kwargs['cache_dir'] = cache_dir
+    # Pass reorient=True if the loader supports it (reverse-code items)
+    import inspect
+    if 'reorient' in inspect.signature(mod.get_data).parameters:
+        kwargs['reorient'] = True
     df, num_people = mod.get_data(**kwargs)
 
     # Convert to numpy data dict
@@ -170,38 +175,64 @@ def fit_neural_grm(
     pathfinder_init=False,
     qmc=False,
     kl_anneal_epochs=0,
+    nn_hidden_sizes=4,
+    nn_prior_scale=0.5,
 ):
-    """Fit a NeuralGRModel on the given data and save to disk.
+    """Fit a NeuralGRModel (or NeuralLogisticModel for binary items) on the
+    given data and save to disk.
 
     If ``reload=True`` and a saved model exists at ``save_dir``, it is loaded
     from disk instead of re-training (saves hours of compute).
 
     Returns:
-        Fitted NeuralGRModel instance.
+        Fitted model instance.
     """
-    from bayesianquilts.irt.neural_grm import NeuralGRModel
-
     save_dir = Path(save_dir)
 
+    use_logistic = (response_cardinality == 2)
+
     if reload and (save_dir / 'params.h5').exists():
-        print(f"  Reloading NeuralGRM from {save_dir}")
-        model = NeuralGRModel.load_from_disk(save_dir)
+        if use_logistic:
+            from bayesianquilts.irt.neural_logistic import NeuralLogisticModel
+            print(f"  Reloading NeuralLogistic from {save_dir}")
+            model = NeuralLogisticModel.load_from_disk(save_dir)
+        else:
+            from bayesianquilts.irt.neural_grm import NeuralGRModel
+            print(f"  Reloading NeuralGRM from {save_dir}")
+            model = NeuralGRModel.load_from_disk(save_dir)
         calibrate_model(model)
         return model
 
-    model = NeuralGRModel(
-        item_keys=item_keys,
-        num_people=num_people,
-        dim=dim,
-        kappa_scale=kappa_scale,
-        eta_scale=eta_scale,
-        response_cardinality=response_cardinality,
-        dtype=jnp.float32,
-        noisy_dim=noisy_dim,
-        noisy_dim_eta_scale=noisy_dim_eta_scale,
-        noisy_dim_ability_scale=noisy_dim_ability_scale,
-        parameterization=parameterization,
-    )
+    if use_logistic:
+        from bayesianquilts.irt.neural_logistic import NeuralLogisticModel
+        print(f"  Using NeuralLogisticModel for binary items (K=2)")
+        model = NeuralLogisticModel(
+            item_keys=item_keys,
+            num_people=num_people,
+            dim=dim,
+            response_cardinality=response_cardinality,
+            dtype=jnp.float64,
+            parameterization=parameterization,
+            nn_hidden_sizes=nn_hidden_sizes,
+            nn_prior_scale=nn_prior_scale,
+        )
+    else:
+        from bayesianquilts.irt.neural_grm import NeuralGRModel
+        model = NeuralGRModel(
+            item_keys=item_keys,
+            num_people=num_people,
+            dim=dim,
+            kappa_scale=kappa_scale,
+            eta_scale=eta_scale,
+            response_cardinality=response_cardinality,
+            dtype=jnp.float64,
+            noisy_dim=noisy_dim,
+            noisy_dim_eta_scale=noisy_dim_eta_scale,
+            noisy_dim_ability_scale=noisy_dim_ability_scale,
+            parameterization=parameterization,
+            nn_hidden_sizes=nn_hidden_sizes,
+            nn_prior_scale=nn_prior_scale,
+        )
 
     steps_per_epoch = int(np.ceil(num_people / batch_size))
     factory = make_data_factory(data_dict, batch_size, num_people)
@@ -244,6 +275,9 @@ def fit_grm_baseline(
     pathfinder_init=False,
     qmc=False,
     kl_anneal_epochs=0,
+    compute_elpd_loo=False,
+    discrimination_prior="horseshoe",
+    discrimination_prior_scale=None,
 ):
     """Fit a standard GRM (no imputation) and save to disk.
 
@@ -259,8 +293,10 @@ def fit_grm_baseline(
         dim=dim,
         kappa_scale=kappa_scale,
         response_cardinality=response_cardinality,
-        dtype=jnp.float32,
+        dtype=jnp.float64,
         parameterization=parameterization,
+        discrimination_prior=discrimination_prior,
+        discrimination_prior_scale=discrimination_prior_scale,
     )
 
     steps_per_epoch = int(np.ceil(num_people / batch_size))
@@ -283,11 +319,17 @@ def fit_grm_baseline(
         pathfinder_init=pathfinder_init,
         qmc=qmc,
         kl_anneal_epochs=kl_anneal_epochs,
+        max_nan_recoveries=50,
     )
     losses = res[0]
     snapshot_params = res[2] if len(res) > 2 else None
 
     calibrate_model(model)
+
+    if compute_elpd_loo:
+        print("  Computing ELPD-LOO for baseline GRM...")
+        loo_factory = make_data_factory(data_dict, batch_size, num_people)
+        model._compute_elpd_loo(loo_factory, n_samples=100, seed=seed + 100, use_ais=True)
 
     save_dir = Path(save_dir)
     model.save_to_disk(save_dir)
@@ -307,6 +349,9 @@ def fit_grm_imputed(
     pathfinder_init=False,
     qmc=False,
     kl_anneal_epochs=0,
+    compute_elpd_loo=False,
+    discrimination_prior="horseshoe",
+    discrimination_prior_scale=None,
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
 
@@ -325,9 +370,11 @@ def fit_grm_imputed(
         dim=dim,
         kappa_scale=kappa_scale,
         response_cardinality=response_cardinality,
-        dtype=jnp.float32,
+        dtype=jnp.float64,
         imputation_model=imputation_model,
         parameterization=parameterization,
+        discrimination_prior=discrimination_prior,
+        discrimination_prior_scale=discrimination_prior_scale,
     )
     steps_per_epoch = int(np.ceil(num_people / batch_size))
     factory = make_data_factory(data_dict, batch_size, num_people)
@@ -349,10 +396,16 @@ def fit_grm_imputed(
         pathfinder_init=pathfinder_init,
         qmc=qmc,
         kl_anneal_epochs=kl_anneal_epochs,
+        max_nan_recoveries=50,
     )
     losses = res[0]
 
     calibrate_model(model)
+
+    if compute_elpd_loo:
+        print("  Computing ELPD-LOO for imputed GRM...")
+        loo_factory = make_data_factory(data_dict, batch_size, num_people)
+        model._compute_elpd_loo(loo_factory, n_samples=100, seed=seed + 100, use_ais=True)
 
     save_dir = Path(save_dir)
     model.save_to_disk(save_dir)

@@ -16,6 +16,12 @@ item_keys = [f"Q{i}" for i in range(1, 117)]
 
 response_cardinality = 2
 
+# 0-indexed item positions to reverse-score (negative item-total correlations)
+to_reverse = [
+    0, 1, 10, 29, 30, 33, 37, 38, 39, 42, 44, 45,  # Q1,Q2,Q11,Q30,Q31,Q34,Q38,Q39,Q40,Q43,Q45,Q46
+    66, 70, 72, 75, 89, 90, 112, 114, 115,           # Q67,Q71,Q73,Q76,Q90,Q91,Q113,Q115,Q116
+]
+
 _DATA_URL = "https://openpsychometrics.org/_rawdata/WPI.zip"
 
 
@@ -31,7 +37,7 @@ class _ArrayDataSource(grain.sources.RandomAccessDataSource):
         return self.n
 
 
-def get_data(polars_out=False, cache_dir=None):
+def get_data(reorient=False, polars_out=False, cache_dir=None):
     """Load the WPI dataset.
 
     Responses are shifted from 1-2 to 0-1. Values of -1 (missed)
@@ -63,6 +69,12 @@ def get_data(polars_out=False, cache_dir=None):
     ])
 
     num_people = len(data)
+
+    if reorient:
+        data = data.with_columns([
+            (1 - pl.col(item_keys[i])).alias(item_keys[i])
+            for i in to_reverse
+        ])
 
     # Mark invalid values as -1
     data = data.with_columns([

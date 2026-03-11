@@ -12,14 +12,19 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['JAX_ENABLE_X64'] = '1'
 
 import numpy as np
 import pandas as pd
 
 
 def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
+                 neural_lr=None, neural_batch_size=None,
                  batch_size=256, missingness_rate=0.25,
                  missing_respondent_frac=0.4,
                  dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
@@ -33,7 +38,12 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
                  parameterization="log_scale",
                  pathfinder_init=False,
                  qmc=False,
-                 kl_anneal_epochs=0):
+                 kl_anneal_epochs=0,
+                 compute_elpd_loo=False,
+                 nn_hidden_sizes=4,
+                 nn_prior_scale=0.5,
+                 discrimination_prior="horseshoe",
+                 discrimination_prior_scale=None):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -71,6 +81,11 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     # Default GRM learning rate to the same as NeuralGRM if not specified
     if grm_lr is None:
         grm_lr = lr
+    # NeuralGRM defaults: smaller LR and larger batches for stability
+    if neural_lr is None:
+        neural_lr = lr * 0.5  # half the base LR
+    if neural_batch_size is None:
+        neural_batch_size = max(batch_size, 512)
 
     # 1. Load real data
     print(f"\n{'='*60}")
@@ -85,9 +100,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         data_dict, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "neural_grm",
         dim=dim,
-        batch_size=batch_size,
+        batch_size=neural_batch_size,
         num_epochs=epochs,
-        learning_rate=lr,
+        learning_rate=neural_lr,
         patience=patience,
         kappa_scale=kappa_scale,
         eta_scale=eta_scale,
@@ -103,13 +118,25 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         pathfinder_init=pathfinder_init,
         qmc=qmc,
         kl_anneal_epochs=kl_anneal_epochs,
+        nn_hidden_sizes=nn_hidden_sizes,
+        nn_prior_scale=nn_prior_scale,
     )
 
-    # 3. Sample fresh abilities from N(0,1) as ground truth
-    print(f"\n--- Sampling ground-truth abilities ---")
-    true_abilities = sample_abilities(num_people, dim=dim, seed=42)
+    # 3. Use the neural model's posterior abilities as ground truth.
+    #    The ICCs are calibrated to this ability range; using N(0,1) would
+    #    produce floor/ceiling effects outside the model's operating range.
+    print(f"\n--- Extracting ground-truth abilities from neural model posterior ---")
+    cal_abilities = np.array(neural_model.calibrated_expectations['abilities'])
+    # Extract only the primary dimension(s) for ground truth; simulate_data
+    # will re-append a noisy dimension if noisy_dim=True.
+    if noisy_dim and cal_abilities.shape[1] > dim:
+        true_abilities = cal_abilities[:, :dim, :, :]
+        print(f"  Extracted primary dim(s) from {cal_abilities.shape} -> {true_abilities.shape}")
+    else:
+        true_abilities = cal_abilities
     print(f"  True abilities shape: {true_abilities.shape}")
     print(f"  Range: [{true_abilities.min():.3f}, {true_abilities.max():.3f}]")
+    print(f"  Std: {true_abilities.std():.4f}")
 
     # 4. Generate synthetic data from NeuralGRM item params + sampled abilities
     print(f"\n--- Generating synthetic data (missingness={missingness_rate:.0%} "
@@ -176,6 +203,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         seed=seed, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
         qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
+        compute_elpd_loo=compute_elpd_loo,
+        discrimination_prior=discrimination_prior,
+        discrimination_prior_scale=discrimination_prior_scale,
     )
     if snapshot_params is not None:
         print(f"  Using baseline epoch-{snapshot_epoch} snapshot to warm-start imputed model")
@@ -195,6 +225,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         seed=seed + 1, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
         qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
+        compute_elpd_loo=compute_elpd_loo,
+        discrimination_prior=discrimination_prior,
+        discrimination_prior_scale=discrimination_prior_scale,
     )
 
     # 9. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
@@ -229,10 +262,13 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         seed=seed + 2, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
         qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
+        compute_elpd_loo=compute_elpd_loo,
+        discrimination_prior=discrimination_prior,
+        discrimination_prior_scale=discrimination_prior_scale,
     )
 
-    # 11. Compare ability ordering preservation
-    print(f"\n--- Comparing ability orderings ---")
+    # 11. Compare ability ordering preservation (only on fully observed respondents)
+    print(f"\n--- Comparing ability orderings (fully observed respondents only) ---")
     baseline_abilities = np.array(baseline_model.calibrated_expectations['abilities'])
     mice_only_abilities = np.array(mice_only_model.calibrated_expectations['abilities'])
     imputed_abilities = np.array(imputed_model.calibrated_expectations['abilities'])
@@ -240,6 +276,11 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     # true_abilities shape: (N, 1, 1, 1) — single ground-truth dimension
     # estimated shape: (N, D, 1, 1) where D=2 if noisy_dim
     true_flat = true_abilities[:, 0, 0, 0]  # (N,)
+
+    # Only evaluate on fully observed respondents for fair comparison
+    obs_mask = ~has_missing  # (N,) boolean — True for fully observed
+    true_obs = true_flat[obs_mask]
+    print(f"  Evaluating on {int(obs_mask.sum())}/{num_people} fully observed respondents")
 
     def _extract_dim(abil, d):
         """Extract dimension d from (N, D, 1, 1) abilities."""
@@ -258,10 +299,13 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
             return np.sqrt(np.sum(a[:, :, 0, 0] ** 2, axis=1))
         return np.abs(a.flatten())
 
-    # Primary dimension (dim 0) comparisons
-    baseline_metrics = compare_ability_ordering(true_flat, _extract_dim(baseline_abilities, 0))
-    mice_only_metrics = compare_ability_ordering(true_flat, _extract_dim(mice_only_abilities, 0))
-    imputed_metrics = compare_ability_ordering(true_flat, _extract_dim(imputed_abilities, 0))
+    # Primary dimension (dim 0) comparisons — fully observed only
+    baseline_metrics = compare_ability_ordering(
+        true_obs, _extract_dim(baseline_abilities, 0)[obs_mask])
+    mice_only_metrics = compare_ability_ordering(
+        true_obs, _extract_dim(mice_only_abilities, 0)[obs_mask])
+    imputed_metrics = compare_ability_ordering(
+        true_obs, _extract_dim(imputed_abilities, 0)[obs_mask])
 
     results = {
         'dataset': dataset_name,
@@ -288,8 +332,26 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
             'noisy_dim': noisy_dim,
             'noisy_dim_eta_scale': noisy_dim_eta_scale,
             'noisy_dim_ability_scale': noisy_dim_ability_scale,
+            'nn_hidden_sizes': nn_hidden_sizes,
+            'nn_prior_scale': nn_prior_scale,
         },
     }
+
+    # ELPD-LOO comparison (if computed)
+    if compute_elpd_loo:
+        results['elpd_loo'] = {}
+        for label, model in [('baseline', baseline_model),
+                              ('mice_only', mice_only_model),
+                              ('imputed', imputed_model)]:
+            if hasattr(model, 'elpd_loo') and model.elpd_loo is not None:
+                results['elpd_loo'][label] = {
+                    'elpd_loo': model.elpd_loo,
+                    'elpd_loo_se': model.elpd_loo_se,
+                    'elpd_loo_per_obs': model.elpd_loo_per_obs,
+                    'n_obs': getattr(model, 'elpd_loo_n_obs', None),
+                    'max_khat': float(np.max(model.elpd_loo_khat)),
+                    'mean_khat': float(np.mean(model.elpd_loo_khat)),
+                }
 
     # Noisy dimension and norm comparisons (when noisy_dim is used)
     if noisy_dim:
@@ -299,8 +361,10 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
             dim1 = _extract_dim(abil, 1)
             norm_abil = _extract_norm(abil)
             if dim1 is not None:
-                results[f'{label}_dim1'] = compare_ability_ordering(true_flat, dim1)
-            results[f'{label}_norm'] = compare_ability_ordering(true_flat, norm_abil)
+                results[f'{label}_dim1'] = compare_ability_ordering(
+                    true_obs, dim1[obs_mask])
+            results[f'{label}_norm'] = compare_ability_ordering(
+                true_obs, norm_abil[obs_mask])
 
     def _fmt_ci(m, key):
         """Format metric with 95% CI."""
@@ -332,6 +396,17 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
             if m:
                 print(f"  {label:<12} ρ = {_fmt_ci(m, 'spearman_r')}, "
                       f"τ = {_fmt_ci(m, 'kendall_tau')}")
+
+    # ELPD-LOO summary
+    if compute_elpd_loo and 'elpd_loo' in results:
+        print(f"\n  ELPD-LOO comparison:")
+        for label in ['baseline', 'mice_only', 'imputed']:
+            loo = results['elpd_loo'].get(label)
+            if loo:
+                print(f"  {label:<12} ELPD-LOO = {loo['elpd_loo']:.2f} "
+                      f"(SE: {loo['elpd_loo_se']:.2f}), "
+                      f"per obs = {loo['elpd_loo_per_obs']:.4f}, "
+                      f"max k-hat = {loo['max_khat']:.3f}")
 
     # 12. Generate plots
     print(f"\n--- Generating plots ---")
@@ -375,6 +450,10 @@ def main():
                         help="Learning rate (per-datum ELBO, default 1e-3)")
     parser.add_argument("--grm-lr", type=float, default=None,
                         help="GRM learning rate (defaults to --lr if not set)")
+    parser.add_argument("--neural-lr", type=float, default=None,
+                        help="NeuralGRM learning rate (defaults to lr*0.5)")
+    parser.add_argument("--neural-batch-size", type=int, default=None,
+                        help="NeuralGRM batch size (defaults to max(batch_size, 512))")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--missingness", type=float, default=0.25,
                         help="MCAR missingness rate for selected respondents")
@@ -413,6 +492,17 @@ def main():
                         help="Use quasi-Monte Carlo (Sobol) sampling for ~2x variance reduction")
     parser.add_argument("--kl-anneal-epochs", type=int, default=0,
                         help="Number of epochs to linearly ramp KL weight from 0 to 1 (default 0)")
+    parser.add_argument("--elpd-loo", action="store_true",
+                        help="Compute PSIS-LOO ELPD for each fitted GRM model")
+    parser.add_argument("--nn-hidden-sizes", type=int, default=4,
+                        help="Number of mixture-of-logits components in NeuralGRM (default 4)")
+    parser.add_argument("--nn-prior-scale", type=float, default=0.5,
+                        help="Prior scale for NN params (smaller = more regularization, default 0.5)")
+    parser.add_argument("--discrimination-prior", default="horseshoe",
+                        choices=["horseshoe", "half_normal", "half_cauchy"],
+                        help="Discrimination prior type (default horseshoe)")
+    parser.add_argument("--discrimination-prior-scale", type=float, default=None,
+                        help="Scale for half_normal/half_cauchy discrimination prior")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -429,6 +519,8 @@ def main():
             epochs=args.epochs,
             lr=args.lr,
             grm_lr=args.grm_lr,
+            neural_lr=args.neural_lr,
+            neural_batch_size=args.neural_batch_size,
             batch_size=args.batch_size,
             missingness_rate=args.missingness,
             missing_respondent_frac=args.missing_respondent_frac,
@@ -448,6 +540,11 @@ def main():
             pathfinder_init=args.pathfinder_init,
             qmc=args.qmc,
             kl_anneal_epochs=args.kl_anneal_epochs,
+            compute_elpd_loo=args.elpd_loo,
+            nn_hidden_sizes=args.nn_hidden_sizes,
+            nn_prior_scale=args.nn_prior_scale,
+            discrimination_prior=args.discrimination_prior,
+            discrimination_prior_scale=args.discrimination_prior_scale,
         )
         all_results[ds] = results
 
@@ -468,6 +565,33 @@ def main():
                     f"{r['mice_only']['rmse']:>10.4f} "
                     f"{r['imputed']['rmse']:>10.4f}")
             print(line)
+
+        # ELPD-LOO summary table (if computed)
+        has_elpd = any('elpd_loo' in r for r in all_results.values())
+        if has_elpd:
+            print(f"\n{'='*100}")
+            print("ELPD-LOO COMPARISON")
+            print(f"{'='*100}")
+            header = (f"{'Dataset':<10} {'Base ELPD':>14} {'MICE ELPD':>14} "
+                      f"{'Mixed ELPD':>14} {'Base k-hat':>10} "
+                      f"{'MICE k-hat':>10} {'Mixed k-hat':>10}")
+            print(header)
+            print("-" * 100)
+            for ds, r in all_results.items():
+                loo = r.get('elpd_loo', {})
+                def _elpd_str(label):
+                    e = loo.get(label)
+                    if e:
+                        return f"{e['elpd_loo_per_obs']:>14.4f}"
+                    return f"{'N/A':>14}"
+                def _khat_str(label):
+                    e = loo.get(label)
+                    if e:
+                        return f"{e['max_khat']:>10.3f}"
+                    return f"{'N/A':>10}"
+                print(f"{ds:<10} {_elpd_str('baseline')} {_elpd_str('mice_only')} "
+                      f"{_elpd_str('imputed')} {_khat_str('baseline')} "
+                      f"{_khat_str('mice_only')} {_khat_str('imputed')}")
 
         # Save combined results
         output_dir = Path(args.output_dir)

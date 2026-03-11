@@ -16,6 +16,10 @@ item_keys = [f"Q{i}" for i in range(1, 51)]
 
 response_cardinality = 2
 
+# 0-indexed item positions to reverse-score (negative item-total correlations)
+# These items are keyed opposite to the dominant factor direction.
+to_reverse = [0, 2, 3, 8, 11, 17, 19, 28, 31, 37, 49]  # Q1,Q3,Q4,Q9,Q12,Q18,Q20,Q29,Q32,Q38,Q50
+
 _DATA_URL = "https://openpsychometrics.org/_rawdata/TMA.zip"
 
 
@@ -31,7 +35,7 @@ class _ArrayDataSource(grain.sources.RandomAccessDataSource):
         return self.n
 
 
-def get_data(polars_out=False, cache_dir=None):
+def get_data(reorient=False, polars_out=False, cache_dir=None):
     """Load the TMA dataset.
 
     Responses are shifted from 1-2 to 0-1. Values of 0 (not answered)
@@ -63,6 +67,12 @@ def get_data(polars_out=False, cache_dir=None):
     ])
 
     num_people = len(data)
+
+    if reorient:
+        data = data.with_columns([
+            (1 - pl.col(item_keys[i])).alias(item_keys[i])
+            for i in to_reverse
+        ])
 
     # Mark invalid values as -1
     data = data.with_columns([

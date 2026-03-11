@@ -16,6 +16,9 @@ item_keys = [f"Q{i}" for i in range(1, 41)]
 
 response_cardinality = 2
 
+# 0-indexed item positions to reverse-score (negative item-total correlations)
+to_reverse = [3, 4, 6, 8, 9, 17, 19, 22, 27, 31, 34, 39]  # Q4,Q5,Q7,Q9,Q10,Q18,Q20,Q23,Q28,Q32,Q35,Q40
+
 _DATA_URL = "https://openpsychometrics.org/_rawdata/NPI.zip"
 
 
@@ -31,7 +34,7 @@ class _ArrayDataSource(grain.sources.RandomAccessDataSource):
         return self.n
 
 
-def get_data(polars_out=False, cache_dir=None):
+def get_data(reorient=False, polars_out=False, cache_dir=None):
     """Load the NPI dataset.
 
     Responses are shifted from 1-2 to 0-1. Values of 0 (not answered)
@@ -63,6 +66,12 @@ def get_data(polars_out=False, cache_dir=None):
     ])
 
     num_people = len(data)
+
+    if reorient:
+        data = data.with_columns([
+            (1 - pl.col(item_keys[i])).alias(item_keys[i])
+            for i in to_reverse
+        ])
 
     # Mark invalid values as -1
     data = data.with_columns([

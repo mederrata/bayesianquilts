@@ -515,18 +515,24 @@ class GRModel(IRTModel):
 
     def create_distributions(self, grouping_params=None):
         """Create prior and surrogate distributions."""
+        prior_scale = getattr(self, 'discrimination_prior_scale', None)
+        prior_type = getattr(self, 'discrimination_prior', 'horseshoe')
+        use_horseshoe = (prior_scale is None and prior_type == 'horseshoe')
+
         self.bijectors = {
             k: tfb.Identity() for k in ["abilities", "mu", "difficulties0"]
         }
 
-        self.bijectors["eta"] = tfb.Softplus()
-        self.bijectors["kappa"] = tfb.Softplus()
         self.bijectors["discriminations"] = tfb.Softplus()
         if self.response_cardinality > 2:
             self.bijectors["ddifficulties"] = tfb.Softplus()
-        self.bijectors["eta_a"] = tfb.Softplus()
-        self.bijectors["kappa_a"] = tfb.Softplus()
-        self.bijectors["xi"] = tfb.Softplus()
+
+        if use_horseshoe:
+            self.bijectors["eta"] = tfb.Softplus()
+            self.bijectors["kappa"] = tfb.Softplus()
+            self.bijectors["eta_a"] = tfb.Softplus()
+            self.bijectors["kappa_a"] = tfb.Softplus()
+            self.bijectors["xi"] = tfb.Softplus()
 
         K = self.response_cardinality
 
@@ -551,7 +557,10 @@ class GRModel(IRTModel):
                 ),
                 reinterpreted_batch_ndims=4,
             ),
-            discriminations=(
+        )
+
+        if use_horseshoe:
+            grm_joint_distribution_dict["discriminations"] = (
                 (
                     lambda eta, kappa: tfd.Independent(
                         AbsHorseshoe(scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype)), reinterpreted_batch_ndims=4
@@ -570,30 +579,50 @@ class GRModel(IRTModel):
                         reinterpreted_batch_ndims=4,
                     )
                 )
-            ),
-            eta=tfd.Independent(
+            )
+            grm_joint_distribution_dict["eta"] = tfd.Independent(
                 tfd.HalfNormal(
                     scale=self.eta_scale
                     * jnp.ones((1, 1, self.num_items, 1), dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=4,
-            ),
-            kappa=lambda kappa_a: tfd.Independent(
+            )
+            grm_joint_distribution_dict["kappa"] = lambda kappa_a: tfd.Independent(
                 SqrtInverseGamma(
                     0.5 * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
                     jnp.asarray(1.0, dtype=self.dtype) / jnp.asarray(kappa_a, dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=4,
-            ),
-            kappa_a=tfd.Independent(
+            )
+            grm_joint_distribution_dict["kappa_a"] = tfd.Independent(
                 tfd.InverseGamma(
                     0.5 * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
                     jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype)
                     / self.kappa_scale**2,
                 ),
                 reinterpreted_batch_ndims=4,
-            ),
-        )
+            )
+        else:
+            # Simple prior on discriminations — no hyperpriors
+            _scale = float(prior_scale) if prior_scale is not None else 1.0
+            disc_scale = jnp.asarray(
+                _scale * jnp.ones(
+                    (1, self.dimensions, self.num_items, 1), dtype=self.dtype),
+                dtype=self.dtype,
+            )
+            if prior_type == 'half_cauchy':
+                grm_joint_distribution_dict["discriminations"] = tfd.Independent(
+                    tfd.HalfCauchy(
+                        loc=jnp.zeros_like(disc_scale),
+                        scale=disc_scale,
+                    ),
+                    reinterpreted_batch_ndims=4,
+                )
+            else:
+                grm_joint_distribution_dict["discriminations"] = tfd.Independent(
+                    tfd.HalfNormal(scale=disc_scale),
+                    reinterpreted_batch_ndims=4,
+                )
         if self.response_cardinality > 2:
             grm_joint_distribution_dict["ddifficulties"] = tfd.Independent(
                 tfd.HalfNormal(
@@ -840,8 +869,11 @@ class GRModel(IRTModel):
         log_likelihood = prediction["log_likelihood"]
         weights = prediction["discriminations"]
         weights = weights / jnp.sum(weights, axis=-3, keepdims=True)
-        entropy = -xlogy(weights, weights) / params["eta"]
-        entropy = jnp.sum(entropy, axis=[-1, -2, -3, -4])
+        if "eta" in params:
+            entropy = -xlogy(weights, weights) / params["eta"]
+            entropy = jnp.sum(entropy, axis=[-1, -2, -3, -4])
+        else:
+            entropy = jnp.zeros_like(log_prior)
 
         finite_portion = jnp.where(
             jnp.isfinite(log_likelihood),
