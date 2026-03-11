@@ -38,6 +38,9 @@ class IRTModel(BayesianModel):
             parameterization="softplus",
             discrimination_prior="horseshoe",
             discrimination_prior_scale=None,
+            expected_sparsity=None,
+            slab_scale=2.0,
+            slab_df=4,
             rank=0,
             dtype=tf.float64):
         super(IRTModel, self).__init__(dtype=dtype)
@@ -64,6 +67,9 @@ class IRTModel(BayesianModel):
         self.parameterization = parameterization
         self.discrimination_prior = discrimination_prior
         self.discrimination_prior_scale = discrimination_prior_scale
+        self.expected_sparsity = expected_sparsity
+        self.slab_scale = slab_scale
+        self.slab_df = slab_df
         self.rank = rank
 
         self.set_dimension(dim, decay)
@@ -375,47 +381,31 @@ class IRTModel(BayesianModel):
         print(f"  PSIS-LOO (initial): {float(loo):.2f}, "
               f"k-hat > {khat_threshold}: {bad_k_initial}/{n_obs}")
 
-        # Run AIS to refine estimates
-        run_ais = use_ais or bad_k_initial > 0
-        if run_ais:
-            try:
-                from bayesianquilts.irt.grm import GradedResponseLikelihood
-                from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
+        # Use more posterior samples for better PSIS when many k-hat are bad
+        if bad_k_initial > n_obs * 0.1 and n_samples < 200:
+            print(f"  Many high k-hat ({bad_k_initial}/{n_obs}), "
+                  f"resampling with {max(200, n_samples * 2)} draws...")
+            n_samples_2 = max(200, n_samples * 2)
+            key2 = jax.random.PRNGKey(seed + 999)
+            samples2 = surrogate.sample(n_samples_2, seed=key2)
+            if hasattr(self, 'transform'):
+                samples2 = self.transform(samples2)
 
-                if use_ais:
-                    print(f"  Running adaptive IS for all {n_obs} observations...")
-                else:
-                    print(f"  Running adaptive IS for {bad_k_initial} high k-hat "
-                          f"observations...")
+            log_lik_matrix2 = np.full(
+                (n_samples_2, self.num_people), np.nan, dtype=np.float64
+            )
+            for batch in data_factory():
+                people2 = np.asarray(batch[self.person_key], dtype=np.int32)
+                pred2 = self.predictive_distribution(batch, **samples2)
+                log_lik_matrix2[:, people2] = np.array(pred2['log_likelihood'])
 
-                # Build full data dict from collected batches
-                full_data = {}
-                for k in all_batches[0]:
-                    vals = [np.asarray(b[k]) for b in all_batches]
-                    full_data[k] = np.concatenate(vals, axis=0)
-                full_data['n_people'] = self.num_people
-
-                likelihood_fn = GradedResponseLikelihood(dtype=self.dtype)
-                surrogate_dist = self.surrogate_distribution_generator(self.params)
-                surrogate_log_prob_fn = lambda p: surrogate_dist.log_prob(p)
-                prior_log_prob_fn = lambda p: self.joint_prior_distribution.log_prob(p)
-
-                sampler = AdaptiveImportanceSampler(
-                    likelihood_fn, prior_log_prob_fn, surrogate_log_prob_fn
-                )
-                ais_threshold = 1e10 if use_ais else khat_threshold
-                results = sampler.adaptive_is_loo(
-                    full_data, samples,
-                    variational=True,
-                    khat_threshold=ais_threshold,
-                )
-                best = results['best']
-                loos = np.array(best['ll_loo_psis'])
-                ks = np.array(best['khat'])
-                loo = float(np.sum(loos))
-                print(f"  AIS complete: ELPD-LOO = {loo:.2f}")
-            except Exception as e:
-                print(f"  AIS failed ({e}), using standard PSIS-LOO")
+            log_lik_matrix2 = log_lik_matrix2[:, visited] if n_obs < self.num_people else log_lik_matrix2
+            loo2, loos2, ks2 = psisloo(log_lik_matrix2)
+            bad_k2 = int(np.sum(ks2 > khat_threshold))
+            print(f"  PSIS-LOO (resampled): {float(loo2):.2f}, "
+                  f"k-hat > {khat_threshold}: {bad_k2}/{n_obs}")
+            if not np.isnan(loo2) and (np.isnan(loo) or bad_k2 < bad_k_initial):
+                loo, loos, ks = loo2, loos2, ks2
 
         self.elpd_loo = float(loo)
         self.elpd_loo_se = float(np.std(loos) * np.sqrt(n_obs))

@@ -517,7 +517,11 @@ class GRModel(IRTModel):
         """Create prior and surrogate distributions."""
         prior_scale = getattr(self, 'discrimination_prior_scale', None)
         prior_type = getattr(self, 'discrimination_prior', 'horseshoe')
-        use_horseshoe = (prior_scale is None and prior_type == 'horseshoe')
+        expected_sparsity = getattr(self, 'expected_sparsity', None)
+        use_reg_horseshoe = (prior_type == 'regularized_horseshoe'
+                             or (prior_type == 'horseshoe' and expected_sparsity is not None))
+        use_horseshoe = (not use_reg_horseshoe
+                         and prior_scale is None and prior_type == 'horseshoe')
 
         self.bijectors = {
             k: tfb.Identity() for k in ["abilities", "mu", "difficulties0"]
@@ -533,6 +537,11 @@ class GRModel(IRTModel):
             self.bijectors["eta_a"] = tfb.Softplus()
             self.bijectors["kappa_a"] = tfb.Softplus()
             self.bijectors["xi"] = tfb.Softplus()
+
+        if use_reg_horseshoe:
+            self.bijectors["local_scales"] = tfb.Softplus()
+            self.bijectors["global_scale"] = tfb.Softplus()
+            self.bijectors["slab_scale2"] = tfb.Softplus()
 
         K = self.response_cardinality
 
@@ -559,7 +568,63 @@ class GRModel(IRTModel):
             ),
         )
 
-        if use_horseshoe:
+        if use_reg_horseshoe:
+            # Regularized horseshoe (Piironen & Vehtari, 2017)
+            # τ₀ = (p₀ / (p - p₀)) / √n
+            p = self.num_items
+            if expected_sparsity is not None:
+                p0 = expected_sparsity * p
+            else:
+                p0 = p / 10.0  # default: 1/10 of items are relevant
+            tau0 = (p0 / (p - p0)) / jnp.sqrt(float(self.num_people))
+
+            slab_scale = getattr(self, 'slab_scale', 2.0)
+            slab_df = getattr(self, 'slab_df', 4)
+
+            # Local scales: λ_i ~ C+(0, 1) per item
+            grm_joint_distribution_dict["local_scales"] = tfd.Independent(
+                tfd.HalfCauchy(
+                    loc=jnp.zeros((1, self.dimensions, self.num_items, 1), dtype=self.dtype),
+                    scale=jnp.ones((1, self.dimensions, self.num_items, 1), dtype=self.dtype),
+                ),
+                reinterpreted_batch_ndims=4,
+            )
+            # Global scale: τ ~ C+(0, τ₀)
+            grm_joint_distribution_dict["global_scale"] = tfd.Independent(
+                tfd.HalfCauchy(
+                    loc=jnp.zeros((1, self.dimensions, 1, 1), dtype=self.dtype),
+                    scale=jnp.asarray(tau0, dtype=self.dtype)
+                    * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
+                ),
+                reinterpreted_batch_ndims=4,
+            )
+            # Slab: c² ~ InverseGamma(ν/2, ν·s²/2)
+            grm_joint_distribution_dict["slab_scale2"] = tfd.Independent(
+                tfd.InverseGamma(
+                    jnp.asarray(slab_df / 2.0, dtype=self.dtype)
+                    * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
+                    jnp.asarray(slab_df * slab_scale**2 / 2.0, dtype=self.dtype)
+                    * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
+                ),
+                reinterpreted_batch_ndims=4,
+            )
+            # Discriminations: α ~ HalfNormal(τ·λ̃)
+            # where λ̃ = c·λ / √(c² + τ²·λ²)
+            def _reg_horseshoe_disc(local_scales, global_scale, slab_scale2):
+                ls = jnp.asarray(local_scales, dtype=self.dtype)
+                gs = jnp.asarray(global_scale, dtype=self.dtype)
+                c2 = jnp.asarray(slab_scale2, dtype=self.dtype)
+                c = jnp.sqrt(c2)
+                tau2_lambda2 = gs**2 * ls**2
+                lambda_tilde = c * ls / jnp.sqrt(c2 + tau2_lambda2)
+                eff_scale = jnp.maximum(gs * lambda_tilde, jnp.asarray(1e-10, dtype=self.dtype))
+                return tfd.Independent(
+                    tfd.HalfNormal(scale=eff_scale),
+                    reinterpreted_batch_ndims=4,
+                )
+            grm_joint_distribution_dict["discriminations"] = _reg_horseshoe_disc
+
+        elif use_horseshoe:
             grm_joint_distribution_dict["discriminations"] = (
                 (
                     lambda eta, kappa: tfd.Independent(

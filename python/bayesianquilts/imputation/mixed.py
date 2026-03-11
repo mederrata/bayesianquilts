@@ -61,6 +61,7 @@ class IrtMixedImputationModel:
         self.irt_model = irt_model
         self.mice_model = mice_model
         self.uncertainty_penalty = uncertainty_penalty
+        self._data_factory = data_factory
 
         # Mirror the attributes that IRTModel.validate_imputation_model checks
         self.variable_names: List[str] = list(mice_model.variable_names)
@@ -206,39 +207,82 @@ class IrtMixedImputationModel:
                 self._irt_khat_per_item[item_key] = np.inf
 
     def _compute_mice_elpd(self):
-        """Compute per-item ELPD from the MICE model.
+        """Compute per-item pointwise ELPD from the MICE model.
 
-        For each item, we use the best available ELPD: the maximum
-        univariate-model ELPD across all predictors for that item,
-        since that is what ``predict_pmf`` will stack over.
+        For each person n and item i, computes:
+            log p_MICE(y_ni | y_{n,-i})
+        by calling the MICE model's ``predict_pmf`` to get the conditional
+        PMF and evaluating at the observed response.
+
+        This makes the MICE ELPD directly comparable to the IRT ELPD,
+        since both measure the same conditional predictive density.
         """
         mice = self.mice_model
-        item_keys = self.irt_model.item_keys
+        model = self.irt_model
+        item_keys = model.item_keys
+        K = model.response_cardinality
 
-        for item_key in item_keys:
+        # Build the full response matrix from the data_factory
+        # (use a single pass to avoid duplication issues)
+        all_responses = {k: [] for k in item_keys}
+        seen_people = set()
+        for batch in self._data_factory():
+            person_ids = batch.get(model.person_key)
+            for row_idx in range(len(batch[item_keys[0]])):
+                pid = int(person_ids[row_idx]) if person_ids is not None else row_idx
+                if pid in seen_people:
+                    continue
+                seen_people.add(pid)
+                for k in item_keys:
+                    all_responses[k].append(float(batch[k][row_idx]))
+
+        N = len(seen_people)
+        responses = {k: np.array(all_responses[k]) for k in item_keys}
+
+        self._mice_elpd_loo_per_obs: Dict[str, np.ndarray] = {}
+
+        for i_idx, item_key in enumerate(item_keys):
             if item_key not in mice.variable_names:
                 self._mice_elpd_per_item[item_key] = -np.inf
                 continue
 
-            target_idx = mice.variable_names.index(item_key)
-            elpds = []
-
-            # Zero-predictor
-            if target_idx in mice.zero_predictor_results:
-                zr = mice.zero_predictor_results[target_idx]
-                if zr.converged and np.isfinite(zr.elpd_loo_per_obs):
-                    elpds.append(zr.elpd_loo_per_obs)
-
-            # Best univariate model for this target
-            for (t_idx, p_idx), ur in mice.univariate_results.items():
-                if t_idx == target_idx and ur.converged:
-                    if np.isfinite(ur.elpd_loo_per_obs):
-                        elpds.append(ur.elpd_loo_per_obs)
-
-            if elpds:
-                self._mice_elpd_per_item[item_key] = float(np.max(elpds))
-            else:
+            obs_mask = (~np.isnan(responses[item_key])
+                        & (responses[item_key] >= 0)
+                        & (responses[item_key] < K))
+            n_obs = int(np.sum(obs_mask))
+            if n_obs == 0:
                 self._mice_elpd_per_item[item_key] = -np.inf
+                continue
+
+            log_scores = np.full(N, np.nan)
+            for n in range(N):
+                if not obs_mask[n]:
+                    continue
+                y_true = int(responses[item_key][n])
+
+                # Build observed items dict (excluding target item)
+                observed_items = {}
+                for k in item_keys:
+                    if k == item_key:
+                        continue
+                    val = responses[k][n]
+                    if not np.isnan(val) and val >= 0 and val < K:
+                        observed_items[k] = float(val)
+
+                try:
+                    pmf = mice.predict_pmf(
+                        observed_items, target=item_key, n_categories=K,
+                    )
+                    p = float(pmf[y_true])
+                    log_scores[n] = np.log(max(p, 1e-30))
+                except (ValueError, KeyError, AttributeError, TypeError):
+                    log_scores[n] = np.log(1.0 / K)  # fallback to uniform
+
+            valid_scores = log_scores[~np.isnan(log_scores)]
+            self._mice_elpd_per_item[item_key] = float(np.mean(valid_scores))
+            self._mice_elpd_loo_per_obs[item_key] = valid_scores
+
+        print(f"MICE pointwise ELPD computed for {len(item_keys)} items, {N} people")
 
     def _precompute_irt_pmfs(self):
         """Precompute IRT baseline PMFs for all people and items.
@@ -317,25 +361,33 @@ class IrtMixedImputationModel:
                 self._weights[item_key] = 1.0
                 continue
 
-            # Try pointwise stacking if we have IRT LOO scores
+            # Pointwise stacking using both IRT and MICE LOO scores
             irt_loos = self._irt_elpd_loo_per_obs.get(item_key)
-            if irt_loos is not None and len(irt_loos) > 0:
-                w = self._solve_stacking_weight(item_key, irt_loos, elpd_mice)
+            mice_loos = getattr(self, '_mice_elpd_loo_per_obs', {}).get(item_key)
+
+            if (irt_loos is not None and len(irt_loos) > 0
+                    and mice_loos is not None and len(mice_loos) > 0):
+                # Both have pointwise scores — proper stacking
+                n = min(len(irt_loos), len(mice_loos))
+                w = self._solve_stacking_weight(
+                    item_key, irt_loos[:n], mice_loos[:n])
+                self._weights[item_key] = w
+            elif irt_loos is not None and len(irt_loos) > 0:
+                # Only IRT has pointwise; use MICE scalar as fallback
+                w = self._solve_stacking_weight(
+                    item_key, irt_loos,
+                    np.full(len(irt_loos), elpd_mice))
                 self._weights[item_key] = w
             else:
-                # Fallback: conservative — only give MICE weight if clearly better
+                # No pointwise scores — conservative default to IRT
                 self._weights[item_key] = 0.0
 
     @staticmethod
-    def _solve_stacking_weight(item_key, irt_loos, mice_elpd_per_obs):
+    def _solve_stacking_weight(item_key, irt_loos, mice_loos):
         """Solve the per-item stacking optimization (vectorized).
 
-        Given pointwise IRT LOO log predictive densities and MICE's
-        per-observation ELPD, find the optimal stacking weight.
-
-        For MICE we don't have pointwise LOO scores (only the summary
-        per-obs ELPD), so we approximate by assuming uniform pointwise
-        scores: lpd_mice_i ≈ mice_elpd_per_obs for all i.
+        Given pointwise LOO log predictive densities from both models,
+        find the optimal stacking weight for MICE.
 
         The stacking objective is:
             max_{w ∈ [0,1]} Σ_i log[ w · exp(lpd_mice_i) + (1-w) · exp(lpd_irt_i) ]
@@ -346,8 +398,8 @@ class IrtMixedImputationModel:
             Item name (for diagnostics).
         irt_loos : np.ndarray
             Pointwise LOO log predictive densities from IRT, shape (N_i,).
-        mice_elpd_per_obs : float
-            Per-observation ELPD from MICE (uniform approximation).
+        mice_loos : np.ndarray
+            Pointwise LOO log predictive densities from MICE, shape (N_i,).
 
         Returns
         -------
@@ -355,13 +407,14 @@ class IrtMixedImputationModel:
             Optimal MICE weight w* ∈ [0, 1].
         """
         lpd_irt = np.asarray(irt_loos, dtype=np.float64)  # (N,)
+        lpd_mice = np.asarray(mice_loos, dtype=np.float64)  # (N,)
 
         def neg_stacking_objective(w):
             """Negative stacking log score (vectorized, numerically stable)."""
             log_w = np.log(max(w, 1e-15))
             log_1mw = np.log(max(1 - w, 1e-15))
-            a = mice_elpd_per_obs + log_w   # scalar broadcast
-            b = lpd_irt + log_1mw            # (N,)
+            a = lpd_mice + log_w      # (N,)
+            b = lpd_irt + log_1mw     # (N,)
             m = np.maximum(a, b)
             log_mix = m + np.log(np.exp(a - m) + np.exp(b - m))
             return -np.sum(log_mix)

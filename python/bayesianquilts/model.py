@@ -708,6 +708,19 @@ class BayesianModel(nnx.Module, ABC):
         init_kwargs = {k: v for k, v in config.items() if k in init_keys}
         extra_yaml = {k: v for k, v in config.items() if k not in init_keys}
 
+        # Convert nested lists back to numpy arrays (YAML serializes arrays
+        # as nested lists).  If the nested list holds a single scalar, unwrap
+        # it so that __init__ receives the original scalar type.
+        def _maybe_unwrap(v):
+            if isinstance(v, list):
+                arr = np.asarray(v)
+                if arr.ndim == 0 or arr.size == 1:
+                    return arr.item()
+                return arr
+            return v
+
+        init_kwargs = {k: _maybe_unwrap(v) for k, v in init_kwargs.items()}
+
         instance = cls(**init_kwargs)
 
         # Restore non-init-arg scalars from YAML
