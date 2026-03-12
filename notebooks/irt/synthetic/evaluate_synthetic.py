@@ -64,6 +64,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         load_dataset,
         fit_neural_grm,
         generate_synthetic_data,
+        compute_missingness_stats,
         sample_abilities,
         fit_grm_baseline,
         fit_grm_imputed,
@@ -136,14 +137,22 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     print(f"  Range: [{true_abilities.min():.3f}, {true_abilities.max():.3f}]")
     print(f"  Std: {true_abilities.std():.4f}")
 
-    # 4. Generate synthetic data from NeuralGRM item params + sampled abilities
-    print(f"\n--- Generating synthetic data (missingness={missingness_rate:.0%} "
-          f"for {missing_respondent_frac:.0%} of respondents) ---")
+    # 4. Compute missingness statistics from real data
+    print(f"\n--- Computing missingness statistics from real data ---")
+    miss_stats = compute_missingness_stats(data_dict, item_keys, response_cardinality)
+    print(f"  Incomplete respondents: {miss_stats['incomplete_frac']:.1%} "
+          f"({int(miss_stats['incomplete_frac'] * num_people)}/{num_people})")
+    print(f"  Avg items missing (incomplete): {miss_stats['avg_items_missing']:.1f}/{len(item_keys)}")
+    per_rates = np.array(list(miss_stats['per_item_rates'].values()))
+    print(f"  Item missingness: mean={per_rates.mean():.4f}, "
+          f"range=[{per_rates.min():.4f}, {per_rates.max():.4f}]")
+
+    # 5. Generate synthetic data replicating real missingness pattern
+    print(f"\n--- Generating synthetic data (replicating real missingness pattern) ---")
     synth_data = generate_synthetic_data(
         neural_model, item_keys, response_cardinality,
         abilities=true_abilities,
-        missingness_rate=missingness_rate,
-        missing_respondent_frac=missing_respondent_frac,
+        missingness_stats=miss_stats,
         seed=42,
     )
     n_bad = sum(
@@ -152,7 +161,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     )
     print(f"  Synthetic data: {num_people} people, {n_bad} missing values")
 
-    # 5. Count missingness stats
+    # 6. Count missingness stats on synthetic
     has_missing = np.zeros(num_people, dtype=bool)
     for key in item_keys:
         has_missing |= (synth_data[key] < 0)
@@ -311,8 +320,8 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         'num_fully_observed': n_fully_observed,
         'num_items': len(item_keys),
         'response_cardinality': response_cardinality,
-        'missingness_rate': missingness_rate,
-        'missing_respondent_frac': missing_respondent_frac,
+        'missingness_incomplete_frac': miss_stats['incomplete_frac'],
+        'missingness_avg_items_missing': miss_stats['avg_items_missing'],
         'baseline': baseline_metrics,
         'mice_only': mice_only_metrics,
         'imputed': imputed_metrics,
@@ -469,10 +478,8 @@ def main():
                         help="Gradient clipping norm (default 1.0)")
     parser.add_argument("--reload-neural-grm", action="store_true",
                         help="Reload saved NeuralGRM instead of re-training")
-    parser.add_argument("--noisy-dim", action="store_true", default=True,
-                        help="Add a loosely-coupled noisy second latent dimension")
-    parser.add_argument("--no-noisy-dim", action="store_false", dest="noisy_dim",
-                        help="Disable the noisy second latent dimension")
+    parser.add_argument("--noisy-dim", type=int, default=2,
+                        help="Number of noisy latent dimensions (0 to disable, default 2)")
     parser.add_argument("--noisy-dim-eta-scale", type=float, default=0.1,
                         help="Discrimination scale for noisy dimension (default 0.1)")
     parser.add_argument("--noisy-dim-ability-scale", type=float, default=1.0,

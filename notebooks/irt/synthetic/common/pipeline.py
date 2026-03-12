@@ -212,6 +212,9 @@ def fit_neural_grm(
             dim=dim,
             response_cardinality=response_cardinality,
             dtype=jnp.float64,
+            noisy_dim=noisy_dim,
+            noisy_dim_eta_scale=noisy_dim_eta_scale,
+            noisy_dim_ability_scale=noisy_dim_ability_scale,
             parameterization=parameterization,
             nn_hidden_sizes=nn_hidden_sizes,
             nn_prior_scale=nn_prior_scale,
@@ -500,31 +503,71 @@ def sample_abilities(num_people, dim=1, seed=42):
     return abilities
 
 
+def compute_missingness_stats(data_dict, item_keys, response_cardinality):
+    """Compute per-item missingness rates and respondent-level statistics.
+
+    Returns:
+        dict with keys:
+            incomplete_frac: fraction of respondents with any missing data
+            per_item_rates: dict mapping item_key -> missingness rate
+            avg_items_missing: average number of items missing (for incomplete respondents)
+    """
+    N = len(data_dict[item_keys[0]])
+    I = len(item_keys)
+
+    missing_per_person = np.zeros(N)
+    per_item_rates = {}
+    for key in item_keys:
+        vals = np.asarray(data_dict[key], dtype=np.float64)
+        is_missing = (vals < 0) | (vals >= response_cardinality) | np.isnan(vals)
+        per_item_rates[key] = float(is_missing.mean())
+        missing_per_person += is_missing
+
+    incomplete_mask = missing_per_person > 0
+    incomplete_frac = float(incomplete_mask.mean())
+    avg_items_missing = float(
+        missing_per_person[incomplete_mask].mean()
+    ) if incomplete_frac > 0 else 0.0
+
+    return {
+        'incomplete_frac': incomplete_frac,
+        'per_item_rates': per_item_rates,
+        'avg_items_missing': avg_items_missing,
+    }
+
+
 def generate_synthetic_data(model, item_keys, response_cardinality,
-                            abilities=None, missingness_rate=0.0,
+                            abilities=None,
+                            missingness_rate=0.0,
                             missing_respondent_frac=0.4,
+                            missingness_stats=None,
                             seed=0):
     """Generate synthetic responses from a fitted NeuralGRModel or GRModel.
 
-    Missingness is applied only to a fraction of respondents. The remaining
-    respondents are fully observed.
+    If ``missingness_stats`` is provided (from ``compute_missingness_stats``),
+    the missingness pattern replicates the real data: the same fraction of
+    respondents are incomplete, and per-item missingness rates match. Otherwise,
+    falls back to uniform MCAR with the given ``missingness_rate`` and
+    ``missing_respondent_frac``.
 
     Args:
         model: A fitted IRT model with calibrated_expectations set.
         item_keys: List of item column names.
         response_cardinality: Number of response categories.
         abilities: Optional ability array to use. If None, uses model's calibrated.
-        missingness_rate: Fraction of responses to set missing (MCAR) for
-            respondents selected to have missing data. Default 0.
-        missing_respondent_frac: Fraction of respondents who have any missing
-            data. The rest are fully observed. Default 0.4.
+        missingness_rate: MCAR rate (used only when missingness_stats is None).
+        missing_respondent_frac: MCAR respondent fraction (used only when
+            missingness_stats is None).
+        missingness_stats: Output of ``compute_missingness_stats`` on the real
+            data. When provided, overrides missingness_rate/missing_respondent_frac.
         seed: Random seed for response sampling and missingness.
 
     Returns:
         data_dict with keys: person, item_key1, ..., item_keyN
     """
     responses = np.array(model.simulate_data(abilities=abilities, seed=seed))
-    # responses shape: (N, I) or (N, D, I) — flatten to (N, I)
+    # responses should be (N, I); squeeze any leading singleton dims
+    responses = np.squeeze(responses)
     if responses.ndim > 2:
         responses = responses.reshape(responses.shape[0], -1)
 
@@ -537,13 +580,44 @@ def generate_synthetic_data(model, item_keys, response_cardinality,
     for i, key in enumerate(item_keys):
         data_dict[key] = responses[:, i].astype(np.float32)
 
-    # Introduce MCAR missingness for a subset of respondents
-    if missingness_rate > 0:
-        rng = np.random.default_rng(seed + 1000)
+    rng = np.random.default_rng(seed + 1000)
+
+    if missingness_stats is not None:
+        # Replicate real data missingness pattern
+        incomplete_frac = missingness_stats['incomplete_frac']
+        per_item_rates = missingness_stats['per_item_rates']
+        avg_items_missing = missingness_stats['avg_items_missing']
+
         # Select which respondents have missing data
+        n_incomplete = max(1, int(N * incomplete_frac))
+        incomplete_people = rng.choice(N, size=n_incomplete, replace=False)
+
+        # For each incomplete respondent, pick which items are missing.
+        # Scale per-item rates so the expected number of missing items per
+        # incomplete respondent matches avg_items_missing.
+        item_rates = np.array([per_item_rates.get(k, 0.0) for k in item_keys])
+        total_rate = item_rates.sum()
+        if total_rate > 0:
+            # Normalize so that sum of scaled rates = avg_items_missing
+            scaled_rates = item_rates * (avg_items_missing / total_rate)
+            scaled_rates = np.clip(scaled_rates, 0.0, 1.0)
+        else:
+            scaled_rates = np.zeros(I)
+
+        for idx in incomplete_people:
+            # Each item is missing with probability scaled_rates[i]
+            missing_mask = rng.random(I) < scaled_rates
+            # Ensure at least 1 item is missing for incomplete respondents
+            if not missing_mask.any():
+                missing_mask[rng.integers(I)] = True
+            for i in range(I):
+                if missing_mask[i]:
+                    data_dict[item_keys[i]][idx] = -1.0
+
+    elif missingness_rate > 0:
+        # Uniform MCAR fallback
         n_missing_people = int(N * missing_respondent_frac)
         missing_people = rng.choice(N, size=n_missing_people, replace=False)
-        # For selected respondents, each response is missing with prob missingness_rate
         item_mask = rng.random((n_missing_people, I)) < missingness_rate
         for i, key in enumerate(item_keys):
             vals = data_dict[key].copy()
