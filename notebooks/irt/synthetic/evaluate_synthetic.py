@@ -122,18 +122,16 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         nn_prior_scale=nn_prior_scale,
     )
 
-    # 3. Use the neural model's posterior abilities as ground truth.
-    #    The ICCs are calibrated to this ability range; using N(0,1) would
-    #    produce floor/ceiling effects outside the model's operating range.
-    print(f"\n--- Extracting ground-truth abilities from neural model posterior ---")
+    # 3. Use the neural model's posterior abilities as ground truth
+    #    to reproduce the real dataset's ability distribution.
+    num_people = neural_model.num_people
     cal_abilities = np.array(neural_model.calibrated_expectations['abilities'])
-    # Extract only the primary dimension(s) for ground truth; simulate_data
-    # will re-append a noisy dimension if noisy_dim=True.
     if noisy_dim and cal_abilities.shape[1] > dim:
         true_abilities = cal_abilities[:, :dim, :, :]
-        print(f"  Extracted primary dim(s) from {cal_abilities.shape} -> {true_abilities.shape}")
+        print(f"\n--- Extracted primary dim(s) from {cal_abilities.shape} -> {true_abilities.shape} ---")
     else:
         true_abilities = cal_abilities
+    print(f"--- Ground-truth abilities from neural model posterior ---")
     print(f"  True abilities shape: {true_abilities.shape}")
     print(f"  Range: [{true_abilities.min():.3f}, {true_abilities.max():.3f}]")
     print(f"  Std: {true_abilities.std():.4f}")

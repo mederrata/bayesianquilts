@@ -15,6 +15,7 @@ import os
 import sys
 
 os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['JAX_ENABLE_X64'] = '1'
 
 import numpy as np
 import jax
@@ -84,10 +85,95 @@ def calibrate_manually(model, n_samples=32, seed=42):
         model.calibrated_expectations = point_estimates
 
 
+def predictive_rmse(model, data_dict, item_keys, response_cardinality, loo=False, n_samples=100, seed=42):
+    """Compute RMSE of E[Y] vs observed responses.
+
+    If loo=True, computes LOO-RMSE using PSIS-weighted posterior samples:
+    for each person, the prediction uses all other persons' data (via PSIS).
+    """
+    K = response_cardinality
+    categories = jnp.arange(K, dtype=jnp.float64)
+
+    if loo:
+        # LOO-RMSE via PSIS reweighting
+        from bayesianquilts.metrics.nppsis import psisloo
+        surrogate = model.surrogate_distribution_generator(model.params)
+        key = jax.random.PRNGKey(seed)
+        samples = surrogate.sample(n_samples, seed=key)
+        S = n_samples
+        N = model.num_people
+        I = len(item_keys)
+
+        # Compute per-person log-likelihoods and response probs per sample
+        # Use full dataset as one batch
+        people = np.arange(N, dtype=np.int32)
+        data_dict_full = dict(data_dict)
+        data_dict_full['person'] = people.astype(np.float32)
+
+        pred = model.predictive_distribution(data_dict_full, **samples)
+        log_lik = np.array(pred['log_likelihood'])  # (S, N)
+
+        # PSIS weights per person
+        _, loos_pw, ks = psisloo(log_lik)
+
+        # Compute expected responses per sample: need probs per sample
+        # Use grm_model_prob_d with each sample's params
+        disc = samples['discriminations']
+        diff0 = samples['difficulties0']
+        ddiff = samples.get('ddifficulties')
+        abilities = samples['abilities']
+        probs_all = model.grm_model_prob_d(abilities, disc, diff0, ddiff)
+        # probs_all: (S, N, I, K)
+        expected_per_sample = jnp.sum(probs_all * categories[None, None, None, :], axis=-1)  # (S, N, I)
+
+        # PSIS LOO weights: for person n, downweight sample s proportional
+        # to exp(-log_lik[s,n])
+        log_ratios = -log_lik  # (S, N) — negative because we leave out person n
+        # Normalize per person
+        log_ratios = log_ratios - jnp.max(log_ratios, axis=0, keepdims=True)
+        weights = jnp.exp(log_ratios)
+        weights = weights / jnp.sum(weights, axis=0, keepdims=True)  # (S, N)
+
+        # LOO expected response: weighted average over samples
+        loo_expected = jnp.sum(weights[:, :, None] * expected_per_sample, axis=0)  # (N, I)
+
+        se_sum = 0.0
+        count = 0
+        for i, key_name in enumerate(item_keys):
+            obs = np.array(data_dict[key_name], dtype=np.float64)
+            pred_i = np.array(loo_expected[:, i])
+            valid = ~np.isnan(obs) & (obs >= 0) & (obs < K)
+            se_sum += np.sum((obs[valid] - pred_i[valid]) ** 2)
+            count += int(np.sum(valid))
+        return float(np.sqrt(se_sum / count))
+    else:
+        # In-sample RMSE using calibrated expectations
+        ce = model.calibrated_expectations
+        probs = model.grm_model_prob_d(
+            ce['abilities'], ce['discriminations'],
+            ce['difficulties0'], ce.get('ddifficulties'))
+        expected = jnp.sum(probs * categories[None, :], axis=-1)  # (N, I)
+
+        se_sum = 0.0
+        count = 0
+        for i, key_name in enumerate(item_keys):
+            obs = np.array(data_dict[key_name], dtype=np.float64)
+            pred_i = np.array(expected[:, i])
+            valid = ~np.isnan(obs) & (obs >= 0) & (obs < K)
+            se_sum += np.sum((obs[valid] - pred_i[valid]) ** 2)
+            count += int(np.sum(valid))
+        return float(np.sqrt(se_sum / count))
+
+
 def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
                 num_epochs=200, batch_size=256, learning_rate=1e-3,
                 lr_decay_factor=0.975, sample_size=32, seed=42,
-                parameterization="log_scale"):
+                parameterization="log_scale",
+                discrimination_prior="horseshoe",
+                discrimination_prior_scale=None,
+                expected_sparsity=None,
+                slab_scale=2.0,
+                slab_df=4):
     import importlib
     from pathlib import Path
 
@@ -104,8 +190,12 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     print(f"Working dir: {work_dir}")
     print(f"{'='*60}")
 
-    # Load data
-    df, num_people = mod.get_data(polars_out=True)
+    # Load data (with reorientation if supported)
+    import inspect
+    get_data_kwargs = {'polars_out': True}
+    if 'reorient' in inspect.signature(mod.get_data).parameters:
+        get_data_kwargs['reorient'] = True
+    df, num_people = mod.get_data(**get_data_kwargs)
     print(f"People: {num_people}, Items: {len(item_keys)}, K: {response_cardinality}")
 
     batch = make_data_dict(df)
@@ -149,8 +239,13 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
             dim=1,
             kappa_scale=0.1,
             response_cardinality=response_cardinality,
-            dtype=jnp.float32,
+            dtype=jnp.float64,
             parameterization=parameterization,
+            discrimination_prior=discrimination_prior,
+            discrimination_prior_scale=discrimination_prior_scale,
+            expected_sparsity=expected_sparsity,
+            slab_scale=slab_scale,
+            slab_df=slab_df,
         )
         res_baseline = model_baseline.fit(
             data_factory,
@@ -165,12 +260,39 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
             snapshot_epoch=SNAPSHOT_EPOCH,
             sample_size=sample_size,
             seed=seed,
+            max_nan_recoveries=50,
         )
         losses_baseline = res_baseline[0]
         snapshot_params = res_baseline[2] if len(res_baseline) > 2 else None
-        print(f"Baseline final loss: {losses_baseline[-1]:.2f}")
+        if losses_baseline:
+            print(f"Baseline final loss: {losses_baseline[-1]:.2f} ({len(losses_baseline)} epochs)")
+        else:
+            print("WARNING: Baseline training returned no epochs")
         model_baseline.save_to_disk('grm_baseline')
         calibrate_manually(model_baseline, n_samples=32, seed=101)
+
+    # Compute ELPD-LOO for baseline
+    # Count observed responses per person for per-response ELPD
+    n_items = len(item_keys)
+    n_observed_responses = sum(
+        np.sum((batch[k] >= 0) & (batch[k] < response_cardinality) & ~np.isnan(batch[k]))
+        for k in item_keys
+    )
+    print(f"  Total observed responses: {n_observed_responses} "
+          f"({n_observed_responses / SUBSAMPLE_N:.1f} per person, {n_items} items)")
+
+    print("\n--- Computing ELPD-LOO for baseline ---")
+    try:
+        model_baseline._compute_elpd_loo(data_factory, n_samples=100, seed=101, use_ais=True)
+        elpd_val = model_baseline.elpd_loo
+        elpd_se = model_baseline.elpd_loo_se
+        elpd_per_response = elpd_val / n_observed_responses
+        se_per_response = elpd_se / n_observed_responses
+        n_obs = getattr(model_baseline, 'elpd_loo_n_obs', SUBSAMPLE_N)
+        print(f"    ELPD/person: {elpd_val/n_obs:.4f} ± {elpd_se/n_obs:.4f}")
+        print(f"    ELPD/response: {elpd_per_response:.4f} ± {se_per_response:.4f}")
+    except Exception as e:
+        print(f"  ELPD-LOO failed: {e}")
 
     gc.collect()
 
@@ -208,7 +330,60 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
 
     gc.collect()
 
-    # ---- Stage 3: Mixed imputation model ----
+    # ---- Stage 3: MICE-only GRM ----
+    print("\n--- Fitting MICE-only GRM ---")
+    model_mice_only = GRModel(
+        item_keys=item_keys,
+        num_people=SUBSAMPLE_N,
+        dim=1,
+        kappa_scale=0.1,
+        response_cardinality=response_cardinality,
+        dtype=jnp.float64,
+        imputation_model=mice_loo,
+        parameterization=parameterization,
+        discrimination_prior=discrimination_prior,
+        discrimination_prior_scale=discrimination_prior_scale,
+        expected_sparsity=expected_sparsity,
+        slab_scale=slab_scale,
+        slab_df=slab_df,
+    )
+    res_mice = model_mice_only.fit(
+        data_factory,
+        batch_size=batch_size,
+        dataset_size=SUBSAMPLE_N,
+        num_epochs=num_epochs,
+        steps_per_epoch=steps_per_epoch,
+        learning_rate=learning_rate,
+        lr_decay_factor=lr_decay_factor,
+        patience=20,
+        zero_nan_grads=True,
+        sample_size=sample_size,
+        seed=seed + 1,
+        max_nan_recoveries=50,
+    )
+    losses_mice = res_mice[0]
+    if losses_mice:
+        print(f"MICE-only final loss: {losses_mice[-1]:.2f} ({len(losses_mice)} epochs)")
+    else:
+        print("WARNING: MICE-only training returned no epochs")
+    model_mice_only.save_to_disk('grm_mice_only')
+    calibrate_manually(model_mice_only, n_samples=32, seed=103)
+
+    # Compute ELPD-LOO for MICE-only
+    print("\n--- Computing ELPD-LOO for MICE-only ---")
+    try:
+        model_mice_only._compute_elpd_loo(data_factory, n_samples=100, seed=103, use_ais=True)
+        elpd_val_mice = model_mice_only.elpd_loo
+        elpd_se_mice = model_mice_only.elpd_loo_se
+        n_obs_mice = getattr(model_mice_only, 'elpd_loo_n_obs', SUBSAMPLE_N)
+        print(f"    ELPD/person: {elpd_val_mice/n_obs_mice:.4f} ± {elpd_se_mice/n_obs_mice:.4f}")
+        print(f"    ELPD/response: {elpd_val_mice/n_observed_responses:.4f} ± {elpd_se_mice/n_observed_responses:.4f}")
+    except Exception as e:
+        print(f"  ELPD-LOO failed: {e}")
+
+    gc.collect()
+
+    # ---- Stage 4a: Mixed imputation model ----
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
 
     print("\n--- Building mixed imputation model ---")
@@ -229,22 +404,26 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
 
     gc.collect()
 
-    # ---- Stage 4: Imputed GRM ----
-    print("\n--- Fitting imputed GRM ---")
+    # ---- Stage 4b: Mixed-imputed GRM ----
+    print("\n--- Fitting mixed-imputed GRM ---")
     model_imputed = GRModel(
         item_keys=item_keys,
         num_people=SUBSAMPLE_N,
         dim=1,
         kappa_scale=0.1,
         response_cardinality=response_cardinality,
-        dtype=jnp.float32,
+        dtype=jnp.float64,
         imputation_model=mixed_imputation,
         parameterization=parameterization,
+        discrimination_prior=discrimination_prior,
+        discrimination_prior_scale=discrimination_prior_scale,
+        expected_sparsity=expected_sparsity,
+        slab_scale=slab_scale,
+        slab_df=slab_df,
     )
 
-    if snapshot_params is not None:
-        print(f"Warm-starting from baseline epoch-{SNAPSHOT_EPOCH} snapshot")
-
+    # Train imputed model from scratch — snapshot warm-start often
+    # destabilizes because the imputation objective differs significantly
     res_imputed = model_imputed.fit(
         data_factory,
         batch_size=batch_size,
@@ -253,21 +432,67 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         steps_per_epoch=steps_per_epoch,
         learning_rate=learning_rate,
         lr_decay_factor=lr_decay_factor,
-        patience=10,
+        patience=20,
         zero_nan_grads=True,
-        initial_values=snapshot_params,
         sample_size=sample_size,
         seed=seed + 1,
+        max_nan_recoveries=50,
     )
     losses_imputed = res_imputed[0]
-    print(f"Imputed final loss: {losses_imputed[-1]:.2f}")
+    if losses_imputed:
+        print(f"Imputed final loss: {losses_imputed[-1]:.2f} ({len(losses_imputed)} epochs)")
+    else:
+        print("WARNING: Imputed training returned no epochs")
     model_imputed.save_to_disk('grm_imputed')
     calibrate_manually(model_imputed, n_samples=32, seed=102)
 
-    print(f"\n{'='*60}")
-    print(f"DONE: {dataset_name.upper()}")
-    print(f"Artifacts: grm_baseline/, mice_loo_model.yaml, grm_imputed/")
-    print(f"{'='*60}")
+    # Compute ELPD-LOO for imputed
+    print("\n--- Computing ELPD-LOO for imputed ---")
+    try:
+        model_imputed._compute_elpd_loo(data_factory, n_samples=100, seed=102, use_ais=True)
+        elpd_val_imp = model_imputed.elpd_loo
+        elpd_se_imp = model_imputed.elpd_loo_se
+        elpd_per_response_imp = elpd_val_imp / n_observed_responses
+        se_per_response_imp = elpd_se_imp / n_observed_responses
+        n_obs_imp = getattr(model_imputed, 'elpd_loo_n_obs', SUBSAMPLE_N)
+        print(f"    ELPD/person: {elpd_val_imp/n_obs_imp:.4f} ± {elpd_se_imp/n_obs_imp:.4f}")
+        print(f"    ELPD/response: {elpd_per_response_imp:.4f} ± {se_per_response_imp:.4f}")
+    except Exception as e:
+        print(f"  ELPD-LOO failed: {e}")
+
+    # ---- Summary ----
+    print(f"\n{'='*100}")
+    print(f"SUMMARY: {dataset_name.upper()}")
+    print(f"{'='*100}")
+    print(f"{'Model':<15} {'Pred RMSE':>10} {'LOO-RMSE':>10} {'ELPD/person':>20} {'ELPD/response':>20}")
+    print(f"{'-'*100}")
+    for label, mdl in [('Baseline', model_baseline),
+                        ('MICE-only', model_mice_only),
+                        ('Mixed', model_imputed)]:
+        elpd = getattr(mdl, 'elpd_loo', None)
+        se = getattr(mdl, 'elpd_loo_se', None)
+        n = getattr(mdl, 'elpd_loo_n_obs', SUBSAMPLE_N)
+        if elpd is not None and not np.isnan(elpd):
+            pp = f"{elpd/n:.4f} ± {se/n:.4f}"
+            pr = f"{elpd/n_observed_responses:.4f} ± {se/n_observed_responses:.4f}"
+        else:
+            pp = "nan"
+            pr = "nan"
+        try:
+            rmse = predictive_rmse(mdl, batch, item_keys, response_cardinality)
+            rmse_str = f"{rmse:.4f}"
+        except Exception:
+            rmse_str = "nan"
+        try:
+            loo_rmse = predictive_rmse(mdl, batch, item_keys, response_cardinality, loo=True, n_samples=100)
+            loo_rmse_str = f"{loo_rmse:.4f}"
+        except Exception as e:
+            print(f"  LOO-RMSE failed for {label}: {e}")
+            loo_rmse_str = "nan"
+        print(f"{label:<15} {rmse_str:>10} {loo_rmse_str:>10} {pp:>20} {pr:>20}")
+    print(f"{'='*100}")
+    print(f"Artifacts: grm_baseline/, grm_mice_only/, grm_imputed/")
+    print(f"{'='*100}")
 
 
 def main():
@@ -288,6 +513,17 @@ def main():
     parser.add_argument('--parameterization', default='log_scale',
                         choices=['softplus', 'log_scale', 'natural'],
                         help='ADVI scale parameterization (default log_scale)')
+    parser.add_argument('--discrimination-prior', default='half_cauchy',
+                        choices=['horseshoe', 'half_normal', 'half_cauchy', 'regularized_horseshoe'],
+                        help='Discrimination prior type (default half_cauchy)')
+    parser.add_argument('--discrimination-prior-scale', type=float, default=1.0,
+                        help='Scale for half_normal/half_cauchy discrimination prior (default 1.0)')
+    parser.add_argument('--expected-sparsity', type=float, default=None,
+                        help='Expected fraction of relevant items (e.g. 0.1 = 1/10)')
+    parser.add_argument('--slab-scale', type=float, default=2.0,
+                        help='Slab scale for regularized horseshoe (default 2.0)')
+    parser.add_argument('--slab-df', type=int, default=4,
+                        help='Slab degrees of freedom for regularized horseshoe (default 4)')
     args = parser.parse_args()
 
     work_dir = os.path.join(
@@ -307,6 +543,11 @@ def main():
         sample_size=args.sample_size,
         seed=args.seed,
         parameterization=args.parameterization,
+        discrimination_prior=args.discrimination_prior,
+        discrimination_prior_scale=args.discrimination_prior_scale,
+        expected_sparsity=args.expected_sparsity,
+        slab_scale=args.slab_scale,
+        slab_df=args.slab_df,
     )
 
 

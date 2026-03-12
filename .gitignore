@@ -142,7 +142,12 @@ ovarian_data.json
 # Fitted models and checkpoints
 grm_baseline/
 grm_imputed/
+grm_mice_only/
+neural_grm/
 mice_loo_model.yaml
+mixed_diagnostics.h5
+*.npz
+*.npy
 
 # Downloaded datasets (auto-fetched from openpsychometrics.org)
 notebooks/irt/*/RWAS/
@@ -173,4 +178,7 @@ TMA/
 duckworth-grit-scale-data/
 *gitignore.swp
 duckworth-grit-scale-data.zip
-notebooks/irt/synthetic/results*
+notebooks/irt/synthetic/results/
+
+# Notebooks (large output cells)
+*.ipynb
