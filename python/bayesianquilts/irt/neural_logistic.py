@@ -36,7 +36,7 @@ def _mixture_of_logits_binary(theta, nn_scales, nn_shifts, nn_logit_weights):
     """Compute P(Y=1|θ) for each item via mixture of logistic sigmoids.
 
     Args:
-        theta: (S, N, 1, 1) or (N, 1, 1) — abilities (dim=1, no item/cat axes)
+        theta: (..., N, 1, 1) scalar ability OR (..., N, I, 1) per-item ability
         nn_scales: (S, I, M) or (I, M) — unconstrained scales
         nn_shifts: (S, I, M) or (I, M) — shift parameters
         nn_logit_weights: (S, I, M) or (I, M) — unconstrained mixture weights
@@ -47,12 +47,12 @@ def _mixture_of_logits_binary(theta, nn_scales, nn_shifts, nn_logit_weights):
     scales = jax.nn.softplus(nn_scales)       # positive
     weights = jax.nn.softmax(nn_logit_weights, axis=-1)  # simplex over M
 
-    # theta: (..., N, 1, 1) -> (..., N, 1) drop last dim
-    theta = theta[..., 0]  # (..., N, 1)
+    # theta: (..., N, {1 or I}, 1) -> (..., N, {1 or I})
+    theta = theta[..., 0]  # (..., N, {1 or I})
 
     # We need (..., N, I, M)
-    # theta: (..., N, 1) -> (..., N, 1, 1)  for broadcasting over I, M
-    theta_exp = theta[..., jnp.newaxis]  # (..., N, 1, 1)
+    # theta: (..., N, {1 or I}) -> (..., N, {1 or I}, 1)  for broadcasting over M
+    theta_exp = theta[..., jnp.newaxis]  # (..., N, {1 or I}, 1)
 
     # scales, shifts, weights: (..., I, M) -> (..., 1, I, M) for broadcasting over N
     n_batch = scales.ndim - 2  # number of sample dims
@@ -121,13 +121,24 @@ class NeuralLogisticModel(IRTModel):
         self.nn_hidden_size = nn_hidden_sizes if nn_hidden_sizes is not None else 4
         self.nn_prior_scale = nn_prior_scale
 
+        # noisy_dim support: bool (legacy) or int
+        if isinstance(noisy_dim, bool):
+            self.n_noisy_dims = 1 if noisy_dim else 0
+        else:
+            self.n_noisy_dims = int(noisy_dim)
+        self.noisy_dim = self.n_noisy_dims > 0
+        self.noisy_dim_eta_scale = noisy_dim_eta_scale
+        self.noisy_dim_ability_scale = noisy_dim_ability_scale
+        self._primary_dim = dim
+        effective_dim = dim + self.n_noisy_dims
+
         super().__init__(
             item_keys=item_keys,
             num_people=num_people,
             num_groups=num_groups,
             data=data,
             person_key=person_key,
-            dim=dim,
+            dim=effective_dim,
             decay=decay,
             positive_discriminations=positive_discriminations,
             missing_val=missing_val,
@@ -146,8 +157,34 @@ class NeuralLogisticModel(IRTModel):
         )
         self.create_distributions()
 
+    def _project_abilities(self, abilities, discriminations=None):
+        """Project D-dim abilities to scalar per item via discriminations.
+
+        Args:
+            abilities: (..., N, D, 1, 1)
+            discriminations: (S, 1, D, I, 1) or (1, D, I, 1) or None
+
+        Returns:
+            (..., N, 1, 1) if D==1, else (..., N, I, 1) scalar per item
+        """
+        if self.dimensions == 1 or discriminations is None:
+            return abilities[..., 0]  # (..., N, 1, 1)
+
+        # abilities: (..., N, D, 1, 1) -> (..., N, D, 1)
+        a = abilities[..., 0]  # (..., N, D, 1)
+        # discriminations: (..., 1, D, I, 1) -> (..., 1, D, I)
+        d = discriminations[..., 0]  # (..., 1, D, I)
+        # z_i = sum_d alpha_{d,i} * theta_{n,d}
+        # a: (..., N, D, 1), d: (..., 1, D, I)
+        z = jnp.sum(a * d, axis=-2)  # (..., N, I)
+        # Reshape to (..., N, I, 1) to match what _mixture_of_logits_binary expects
+        # Actually _mixture_of_logits_binary expects (..., N, 1, 1) for theta
+        # but with discriminations we have per-item z already
+        # We need to return shape compatible with the function
+        return z[..., jnp.newaxis]  # (..., N, I, 1)
+
     def predictive_distribution(self, data, abilities, nn_scales, nn_shifts,
-                                nn_logit_weights, **kwargs):
+                                nn_logit_weights, discriminations=None, **kwargs):
         """Compute log-likelihood for binary responses."""
         people = data[self.person_key].astype(jnp.int32)
         choices = jnp.concat(
@@ -157,12 +194,15 @@ class NeuralLogisticModel(IRTModel):
         bad = (choices < 0) | (choices > 1) | jnp.isnan(choices)
         choices = jnp.where(bad, jnp.zeros_like(choices), choices)
 
-        # abilities: (S, N_all, 1, 1, 1) -> index by people
-        abilities = abilities[:, people, ...]  # (S, N_batch, 1, 1, 1)
+        # abilities: (S, N_all, D, 1, 1) -> index by people
+        abilities = abilities[:, people, ...]  # (S, N_batch, D, 1, 1)
+
+        # Project to scalar per item
+        theta = self._project_abilities(abilities, discriminations)
 
         # P(Y=1|θ): (S, N_batch, I)
         p = _mixture_of_logits_binary(
-            abilities[..., 0],  # drop last dummy dim -> (S, N, 1, 1)
+            theta,
             nn_scales, nn_shifts, nn_logit_weights,
         )
         p = jnp.clip(p, 1e-7, 1.0 - 1e-7)
@@ -223,16 +263,39 @@ class NeuralLogisticModel(IRTModel):
         nn_ps = self.nn_prior_scale
 
         dist_dict = {}
+        D = self.dimensions  # primary + noisy
 
-        # Abilities: N(0, 1)
+        # Abilities: N(0, scale) where noisy dims get wider prior
+        ability_scale = jnp.ones(
+            (self.num_people, D, 1, 1), dtype=self.dtype
+        )
+        if self.n_noisy_dims > 0:
+            noisy_scale = jnp.array(self.noisy_dim_ability_scale, dtype=self.dtype)
+            for nd in range(self.n_noisy_dims):
+                ability_scale = ability_scale.at[:, self._primary_dim + nd, :, :].set(noisy_scale)
+
         dist_dict["abilities"] = tfd.Independent(
             tfd.Normal(
-                loc=jnp.zeros((self.num_people, 1, 1, 1), dtype=self.dtype),
-                scale=jnp.ones((self.num_people, 1, 1, 1), dtype=self.dtype),
+                loc=jnp.zeros((self.num_people, D, 1, 1), dtype=self.dtype),
+                scale=ability_scale,
             ),
             reinterpreted_batch_ndims=4,
         )
         self.bijectors["abilities"] = tfb.Identity()
+
+        # Discriminations: (1, D, I, 1) — project D-dim abilities to scalar per item
+        if D > 1:
+            disc_scale = jnp.ones((1, D, I, 1), dtype=self.dtype)
+            if self.n_noisy_dims > 0:
+                for nd in range(self.n_noisy_dims):
+                    disc_scale = disc_scale.at[:, self._primary_dim + nd, :, :].set(
+                        self.noisy_dim_eta_scale
+                    )
+            dist_dict["discriminations"] = tfd.Independent(
+                tfd.HalfNormal(scale=disc_scale),
+                reinterpreted_batch_ndims=4,
+            )
+            self.bijectors["discriminations"] = tfb.Softplus()
 
         # NN scales: centered at softplus^{-1}(1) ≈ 0.5413 so default scale ≈ 1
         dist_dict["nn_scales"] = tfd.Independent(
@@ -283,7 +346,9 @@ class NeuralLogisticModel(IRTModel):
         """Generate binary responses from the fitted model.
 
         Args:
-            abilities: (N, 1, 1, 1) ability array. If None, uses calibrated.
+            abilities: (N, dim, 1, 1) ability array (primary dims only).
+                If noisy dims are configured, random noisy abilities are appended.
+                If None, uses calibrated abilities.
             seed: Random seed.
 
         Returns:
@@ -291,14 +356,28 @@ class NeuralLogisticModel(IRTModel):
         """
         if abilities is None:
             abilities = self.calibrated_expectations['abilities']
+        elif self.n_noisy_dims > 0:
+            N = abilities.shape[0]
+            rng = np.random.default_rng(seed + 7777)
+            noisy_abilities = rng.normal(
+                0, self.noisy_dim_ability_scale,
+                size=(N, self.n_noisy_dims, 1, 1)
+            )
+            abilities = np.concatenate(
+                [np.array(abilities), noisy_abilities], axis=1
+            )
 
         nn_scales = self.calibrated_expectations['nn_scales']
         nn_shifts = self.calibrated_expectations['nn_shifts']
         nn_logit_weights = self.calibrated_expectations['nn_logit_weights']
 
+        # Project abilities through discriminations if multi-dim
+        discriminations = self.calibrated_expectations.get('discriminations')
+        theta = self._project_abilities(abilities, discriminations)
+
         # P(Y=1|θ): (N, I)
         p = _mixture_of_logits_binary(
-            abilities[..., 0],  # (N, 1, 1)
+            theta,
             nn_scales, nn_shifts, nn_logit_weights,
         )
         p = jnp.clip(p, 1e-10, 1.0 - 1e-10)
@@ -317,7 +396,10 @@ class NeuralLogisticModel(IRTModel):
             '_class_name': 'NeuralLogisticModel',
             'item_keys': list(self.item_keys),
             'num_people': int(self.num_people),
-            'dim': int(self.dimensions),
+            'dim': int(self._primary_dim),
+            'noisy_dim': int(self.n_noisy_dims),
+            'noisy_dim_eta_scale': float(self.noisy_dim_eta_scale),
+            'noisy_dim_ability_scale': float(self.noisy_dim_ability_scale),
             'nn_hidden_sizes': int(self.nn_hidden_size),
             'nn_prior_scale': float(self.nn_prior_scale),
             'response_cardinality': 2,

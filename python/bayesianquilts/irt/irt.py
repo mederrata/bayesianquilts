@@ -407,6 +407,43 @@ class IRTModel(BayesianModel):
             if not np.isnan(loo2) and (np.isnan(loo) or bad_k2 < bad_k_initial):
                 loo, loos, ks = loo2, loos2, ks2
 
+        # AIS refinement for high k-hat observations
+        bad_k_count = int(np.sum(ks > khat_threshold))
+        if use_ais and bad_k_count > 0 and hasattr(self, '_prepare_ais_inputs'):
+            print(f"  Running AIS for {bad_k_count} high k-hat observations...")
+            try:
+                from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
+                likelihood_fn, ais_data, ais_params = self._prepare_ais_inputs(
+                    all_batches, samples
+                )
+                sampler = AdaptiveImportanceSampler(likelihood_fn)
+                ais_result = sampler.adaptive_is_loo(
+                    data=ais_data,
+                    params=ais_params,
+                    transformations=['identity', 'mm1', 'mm2', 'pmm1', 'pmm2', 'll'],
+                    khat_threshold=khat_threshold,
+                    verbose=False,
+                )
+                ais_loos = np.array(ais_result['ll_loo_psis'])  # (N,)
+                ais_khats = np.array(ais_result['khat'])  # (N,)
+
+                # Replace PSIS estimates with AIS where AIS achieved lower k-hat
+                improved = 0
+                for i in range(n_obs):
+                    if ks[i] > khat_threshold and ais_khats[i] < ks[i]:
+                        loos[i] = ais_loos[i]
+                        ks[i] = ais_khats[i]
+                        improved += 1
+
+                loo = float(np.sum(loos))
+                bad_k_after = int(np.sum(ks > khat_threshold))
+                print(f"  AIS improved {improved}/{bad_k_count} observations, "
+                      f"k-hat > {khat_threshold}: {bad_k_after}/{n_obs}")
+            except Exception as e:
+                print(f"  AIS failed: {e}")
+                import traceback
+                traceback.print_exc()
+
         self.elpd_loo = float(loo)
         self.elpd_loo_se = float(np.std(loos) * np.sqrt(n_obs))
         self.elpd_loo_per_obs = self.elpd_loo / n_obs

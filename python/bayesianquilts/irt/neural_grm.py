@@ -115,12 +115,17 @@ class NeuralGRModel(IRTModel):
         self.nn_prior_scale = nn_prior_scale
 
         # Store noisy_dim settings before super().__init__ calls set_dimension
-        self.noisy_dim = noisy_dim
+        # noisy_dim can be bool (legacy) or int (number of noisy dims)
+        if isinstance(noisy_dim, bool):
+            self.n_noisy_dims = 1 if noisy_dim else 0
+        else:
+            self.n_noisy_dims = int(noisy_dim)
+        self.noisy_dim = self.n_noisy_dims > 0  # backward compat
         self.noisy_dim_eta_scale = noisy_dim_eta_scale
         self.noisy_dim_ability_scale = noisy_dim_ability_scale
 
-        # If noisy_dim, the actual model dimension is dim+1
-        effective_dim = dim + 1 if noisy_dim else dim
+        # actual model dimension = primary + noisy
+        effective_dim = dim + self.n_noisy_dims
 
         super(NeuralGRModel, self).__init__(
             item_keys=item_keys,
@@ -148,20 +153,21 @@ class NeuralGRModel(IRTModel):
         # Store the user-facing dim (before noisy augmentation)
         self._primary_dim = dim
 
-        # Discrimination prior scale: 1.0 for primary dims, weaker for noisy dim
+        # Discrimination prior scale: 1.0 for primary dims, weaker for noisy dims
         disc_scale = jnp.ones(
             (1, self.dimensions, self.num_items, 1), dtype=dtype
         )
-        if noisy_dim:
-            # Noisy dimension gets smaller discrimination prior (weakly coupled)
-            disc_scale = disc_scale.at[:, -1, :, :].set(noisy_dim_eta_scale)
+        if self.n_noisy_dims > 0:
+            # All noisy dimensions get smaller discrimination prior
+            for nd in range(self.n_noisy_dims):
+                disc_scale = disc_scale.at[:, dim + nd, :, :].set(noisy_dim_eta_scale)
         self._disc_prior_scale = disc_scale
 
-        # Override kappa_scale for the noisy dimension to enforce strong shrinkage
-        if noisy_dim:
+        # Override kappa_scale for noisy dimensions to enforce strong shrinkage
+        if self.n_noisy_dims > 0:
             noisy_kappa = jnp.array(
                 noisy_dim_eta_scale, dtype=dtype
-            ) * jnp.ones((1, 1, 1, 1), dtype=dtype)
+            ) * jnp.ones((1, self.n_noisy_dims, 1, 1), dtype=dtype)
             self.kappa_scale = jnp.concatenate(
                 [self.kappa_scale[:, :dim, :, :], noisy_kappa], axis=1
             )
@@ -502,10 +508,11 @@ class NeuralGRModel(IRTModel):
         ability_scale = jnp.ones(
             (self.num_people, ability_dims, 1, 1), dtype=self.dtype
         )
-        if self.noisy_dim:
-            # Last dimension is the noisy one — wider prior
+        if self.n_noisy_dims > 0:
+            # Noisy dimensions get wider prior
             noisy_scale = jnp.array(self.noisy_dim_ability_scale, dtype=self.dtype)
-            ability_scale = ability_scale.at[:, -1, :, :].set(noisy_scale)
+            for nd in range(self.n_noisy_dims):
+                ability_scale = ability_scale.at[:, self._primary_dim + nd, :, :].set(noisy_scale)
 
         grm_joint_distribution_dict["abilities"] = tfd.Independent(
             tfd.Normal(
@@ -608,7 +615,7 @@ class NeuralGRModel(IRTModel):
             'num_people': int(self.num_people),
             'dim': int(self._primary_dim),
             'decay': float(self.dimensional_decay),
-            'noisy_dim': bool(self.noisy_dim),
+            'noisy_dim': int(self.n_noisy_dims),
             'noisy_dim_eta_scale': float(self.noisy_dim_eta_scale),
             'noisy_dim_ability_scale': float(self.noisy_dim_ability_scale),
             'positive_discriminations': bool(self.positive_discriminations),
@@ -682,13 +689,14 @@ class NeuralGRModel(IRTModel):
         discrimination = self.calibrated_expectations['discriminations']
         if abilities is None:
             abilities = self.calibrated_expectations['abilities']
-        elif self.noisy_dim:
+        elif self.n_noisy_dims > 0:
             # abilities provided are for the primary dimensions only;
             # append random noisy-dimension abilities
             N = abilities.shape[0]
             rng = np.random.default_rng(seed + 7777)
             noisy_abilities = rng.normal(
-                0, self.noisy_dim_ability_scale, size=(N, 1, 1, 1)
+                0, self.noisy_dim_ability_scale,
+                size=(N, self.n_noisy_dims, 1, 1)
             )
             abilities = np.concatenate(
                 [np.array(abilities), noisy_abilities], axis=1

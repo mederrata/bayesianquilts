@@ -513,6 +513,62 @@ class GRModel(IRTModel):
         )
         return prediction["log_likelihood"]
 
+    def _prepare_ais_inputs(self, all_batches, samples):
+        """Convert GRM batch data and surrogate samples to AIS format.
+
+        Returns:
+            (likelihood_fn, ais_data, ais_params) suitable for
+            AdaptiveImportanceSampler.adaptive_is_loo.
+        """
+        # Build long-format data: (person_idx, item_idx, y)
+        person_idxs = []
+        item_idxs = []
+        ys = []
+        for batch in all_batches:
+            people = np.asarray(batch[self.person_key], dtype=np.int32)
+            for i, key in enumerate(self.item_keys):
+                vals = np.asarray(batch[key])
+                valid = (vals >= 0) & (vals < self.response_cardinality) & ~np.isnan(vals)
+                person_idxs.append(people[valid])
+                item_idxs.append(np.full(int(valid.sum()), i, dtype=np.int32))
+                ys.append(vals[valid].astype(np.int32))
+
+        ais_data = {
+            'person_idx': np.concatenate(person_idxs),
+            'item_idx': np.concatenate(item_idxs),
+            'y': np.concatenate(ys),
+            'n_people': self.num_people,
+        }
+
+        # Extract theta, alpha, tau from surrogate samples
+        # abilities: (S, N, D, 1, 1) -> theta: (S, N)
+        abilities = np.array(samples['abilities'])
+        theta = abilities[:, :, 0, 0, 0]  # (S, N) assuming dim=1
+
+        # discriminations: (S, 1, D, I, 1) -> alpha: (S, I)
+        disc = np.array(samples['discriminations'])
+        alpha = disc[:, 0, 0, :, 0]  # (S, I) assuming dim=1
+
+        # difficulties: cumsum(concat(difficulties0, ddifficulties))
+        diff0 = np.array(samples['difficulties0'])  # (S, 1, 1, I, 1)
+        diff0 = diff0[:, 0, 0, :, 0]  # (S, I)
+        if 'ddifficulties' in samples and samples['ddifficulties'].shape[-1] > 0:
+            ddiff = np.array(samples['ddifficulties'])  # (S, 1, 1, I, K-2)
+            ddiff = ddiff[:, 0, 0, :, :]  # (S, I, K-2)
+            tau_raw = np.concatenate([diff0[:, :, np.newaxis], ddiff], axis=-1)
+        else:
+            tau_raw = diff0[:, :, np.newaxis]  # (S, I, 1)
+        tau = np.cumsum(tau_raw, axis=-1)  # (S, I, K-1)
+
+        ais_params = {
+            'theta': jnp.array(theta),
+            'alpha': jnp.array(alpha),
+            'tau': jnp.array(tau),
+        }
+
+        likelihood_fn = GradedResponseLikelihood(dtype=jnp.float64)
+        return likelihood_fn, ais_data, ais_params
+
     def create_distributions(self, grouping_params=None):
         """Create prior and surrogate distributions."""
         prior_scale = getattr(self, 'discrimination_prior_scale', None)
