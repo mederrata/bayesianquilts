@@ -3,9 +3,8 @@
 
 # In[1]:
 
-
-# get_ipython().run_line_magic('load_ext', 'autoreload')
-# get_ipython().run_line_magic('autoreload', '2')
+# %load_ext autoreload
+# %autoreload 2
 
 import jax
 import jax.numpy as jnp
@@ -27,9 +26,7 @@ from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
 from bayesianquilts.predictors.regression.negbin import NegativeBinomialRegression
 from bayesianquilts.predictors.regression.negbin import NegativeBinomialRegressionLikelihood
 
-
 # In[2]:
-
 
 # Load the dataset
 try:
@@ -48,6 +45,8 @@ print(df.head())
 if 'Unnamed: 0' in df.columns:
     df = df.drop(columns=['Unnamed: 0'])
 
+df['roach1'] = 0.01 * df['roach1']
+
 # Target
 y_data = df['y'].values
 
@@ -57,17 +56,15 @@ X_df = df.drop(columns=['y'])
 X_data = X_df.values.astype(np.float32)
 
 # Normalize features
-# mean = X_data.mean(axis=0)
-# std = X_data.std(axis=0)
-# X_data = (X_data - mean) / std
-print('Features NOT normalized')
+    # mean = X_data.mean(axis=0)
+    # std = X_data.std(axis=0)
+    # X_data = (X_data - mean) / std
+    #print('Features NOT normalized')
 y_data = y_data.astype(np.float32)
 
 print(f'X shape: {X_data.shape}, y shape: {y_data.shape}')
 
-
 # In[3]:
-
 
 # Instantiate GLM Negative Binomial Regression
 # This is a standard GLM: log(mean) = X * beta + intercept
@@ -101,7 +98,7 @@ model = NegativeBinomialRegression(
     zero_inflated=use_zero_inflated,
     prior_scale_beta=10.0,
     prior_scale_intercept=10.0,
-    dtype=jnp.float32
+    dtype=jnp.float64
 )
 
 print(f'\nModel: NegativeBinomialRegression (GLM)')
@@ -132,7 +129,6 @@ except Exception as e:
 
 # In[4]:
 
-
 # Fit using MCMC with Pathfinder initialization
 
 print('='*70)
@@ -146,19 +142,6 @@ def pathfinder_initialization(model, data, num_chains=4, num_samples=200, maxite
                               ftol=1e-6, gtol=1e-9, verbose=True):
     """
     Use Pathfinder variational inference to initialize MCMC chains.
-
-    Args:
-        model: BayesianModel instance
-        data: Data dictionary
-        num_chains: Number of MCMC chains to initialize
-        num_samples: Importance samples (default 200)
-        maxiter: Max L-BFGS iterations (default 100)
-        ftol: Function tolerance for L-BFGS (default 1e-6)
-        gtol: Gradient tolerance for L-BFGS (default 1e-9)
-        verbose: Print progress
-
-    Returns:
-        initial_states: Dict[str, Array] with shape (num_chains, ...)
     """
     if verbose:
         print('\nStep 1: Running Pathfinder variational inference...')
@@ -218,8 +201,6 @@ def pathfinder_initialization(model, data, num_chains=4, num_samples=200, maxite
     # Stack into (num_chains, ...) format
     for var_name in model.var_list:
         chain_inits[var_name] = jnp.stack(chain_inits[var_name], axis=0)
-        if verbose:
-            print(f'  {var_name}: shape {chain_inits[var_name].shape}')
 
     if verbose:
         print('  ✓ Initial states ready for MCMC')
@@ -279,7 +260,7 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
     except Exception as e:
         print(f"✗ Failed to load model: {e}")
         print("  Will refit with Pathfinder...")
-
+        
         chain_inits = pathfinder_initialization(
             model, data_dict, 
             num_chains=4, 
@@ -288,13 +269,13 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
             ftol=1e-6,
             gtol=1e-9
         )
-
+        
         print('\nStep 3: Running MCMC with Pathfinder initialization...')
         try:
             model.fit_mcmc(
                 data=data_dict,
                 num_samples=2000,
-                num_warmup=12000,
+                num_warmup=15000,
                 num_chains=4,
                 target_accept_prob=0.95,
                 step_size=1e-3,
@@ -304,11 +285,9 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
             check_rhat_and_save(model, cache_dir, threshold=1.05)
         except Exception as e:
             print(f"✗ MCMC failed: {e}")
-            import traceback
-            traceback.print_exc()
 else:
     print('\nNo cached model found. Starting fresh fit with Pathfinder...')
-
+    
     chain_inits = pathfinder_initialization(
         model, data_dict,
         num_chains=4,
@@ -317,7 +296,7 @@ else:
         ftol=1e-6,
         gtol=1e-9
     )
-
+    
     print('\nStep 3: Running MCMC with Pathfinder-initialized chains...')
     try:
         model.fit_mcmc(
@@ -330,9 +309,9 @@ else:
             initial_states=chain_inits
         )
         print("✓ MCMC Complete.")
-
+        
         converged = check_rhat_and_save(model, cache_dir, threshold=1.05)
-
+        
         if not converged:
             print("\n" + "!"*70)
             print("WARNING: Chains did not fully converge!")
@@ -341,11 +320,9 @@ else:
             print("  2. Run more chains (6-8) for better mixing")
             print("  3. Try higher target_accept_prob (0.90-0.95)")
             print("!"*70)
-
+        
     except Exception as e:
         print(f"✗ MCMC failed: {e}")
-        import traceback
-        traceback.print_exc()
 
 print('\n' + '='*70)
 print('FITTING COMPLETE')
@@ -360,7 +337,7 @@ if use_zero_inflated:
 else:
     print()
 print('  - Pathfinder L-BFGS: ftol=1e-6, gtol=1e-9 (conservative)')
-print('  - MCMC: 4 chains × 2000 samples with 10000 warmup')
+print('  - MCMC: 4 chains × 2000 samples with 15000 warmup')
 print('  - MCMC step size: 1e-4 (conservative, will adapt during warmup)')
 print('='*70)
 
@@ -368,7 +345,6 @@ check_rhat(model)
 
 
 # In[5]:
-
 
 # Examine posterior estimates
 
@@ -419,9 +395,7 @@ if model.zero_inflated:
 
 print('\n' + '='*70)
 
-
 # In[6]:
-
 
 # Predictive checks
 
@@ -450,7 +424,7 @@ for idx in sample_idx:
     if model.zero_inflated:
         flat_zero_logit = model.mcmc_samples['zero_logit'].reshape(-1, 1)
         params['zero_logit'] = flat_zero_logit[idx]
-
+    
     pred_dist = model.predictive_distribution(data_dict, **params)
     pred_means.append(pred_dist['mean'])
 
@@ -468,7 +442,7 @@ print(f'  Observed std: {y_data.std():.2f}')
 print(f'  Predicted std: {pred_means.std():.2f}')
 
 # Plot
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
 # Observed vs Predicted
 axes[0].scatter(y_data, pred_mean, alpha=0.5)
@@ -486,14 +460,24 @@ axes[1].set_xlabel('Predicted Mean')
 axes[1].set_ylabel('Residual')
 axes[1].set_title('Residual Plot')
 
+
+# Observed vs Predicted Rank
+obs_rank = pd.Series(y_data.flatten()).rank(method='average')
+pred_rank = pd.Series(pred_mean).rank(method='average')
+axes[2].scatter(obs_rank, pred_rank, alpha=0.5)
+axes[2].plot([min(obs_rank.min(), pred_rank.min()), max(obs_rank.max(), pred_rank.max())], 
+                [min(obs_rank.min(), pred_rank.min()), max(obs_rank.max(), pred_rank.max())], 'r--', label='y=x')
+axes[2].set_xlabel('Observed Rank')
+axes[2].set_ylabel('Predicted Rank')
+axes[2].set_title('Observed vs Predicted Rank')
+axes[2].legend()
+
 plt.tight_layout()
 plt.show()
 
 print('\n' + '='*70)
 
-
 # In[7]:
-
 
 # AIS LOO-CV Simulation
 import pandas as pd
@@ -507,7 +491,7 @@ ais_sampler = AdaptiveImportanceSampler(likelihood_fn=likelihood_fn)
 
 n_simulations = 100
 n_samples = 1000
-rhos = [ 3**-r for r in range(-1, 7) ]
+rhos = [ 3**-r for r in range(1, 8) ]
 
 # Split transformations
 base_transform = ['identity']
@@ -553,7 +537,7 @@ for i in tqdm(range(n_simulations), desc="Simulations"):
 
     # 3. Process problematic points
     if len(idx_bad) > 0:
-        batch_size = 2
+        batch_size = 4
         num_batches = int(np.ceil(len(idx_bad) / batch_size))
 
         for b in range(num_batches):
@@ -628,6 +612,7 @@ for col in df_sims.columns:
     s = stats.loc['std', col]
     print(f"{col}: {m:.1f} ± {s:.1f}")
 
+# In[8]:
 
 # Plot khat values for identity transformation
 plt.figure(figsize=(10, 6))
@@ -640,3 +625,4 @@ plt.title('Pareto k values for Identity Transformation (Standard IS LOO)')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.show()
+

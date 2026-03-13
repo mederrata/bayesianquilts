@@ -188,27 +188,44 @@ class Transformation(ABC):
     ) -> Tuple[jnp.ndarray, ...]:
         """Compute importance weights for transformed parameters.
 
+        The correct importance weight for targeting p(θ|D_{-i}) using
+        transformed samples T_i(θ) where θ ~ p(θ|D) is:
+
+            log w_i(θ) = -log p(d_i|T_i(θ))           [LOO term, O(1)]
+                       + log p(T_i(θ)|D) - log p(θ|D)  [proposal ratio, O(h)]
+                       + log|J_{T_i}(θ)|                [Jacobian, O(h)]
+
+        The LOO term is dominant. The proposal ratio is O(h) for small
+        transformations and is included when a surrogate/posterior density
+        is available (variational case), otherwise approximated as zero.
+
         Returns:
             Tuple of (eta_weights, psis_weights, khat, log_ell_new).
         """
         log_ell_new = likelihood_fn.log_likelihood(data, params_transformed)
 
+        # LOO term: -log p(d_i | T_i(θ)) — the standard LOO weight at
+        # transformed params. This is the dominant O(1) contribution.
+        log_loo = -log_ell_new
+
         if variational and surrogate_log_prob_fn is not None:
+            # Variational case: include surrogate density ratio
+            # log q(T(θ)) - log q(θ) corrects for the proposal change
             log_pi_trans = surrogate_log_prob_fn(params_transformed)
 
             # Broadcast if log_pi_trans is (S,)
             if log_pi_trans.ndim == 1:
                 log_pi_trans = log_pi_trans[:, jnp.newaxis]
 
-            delta_log_pi = log_pi_trans - log_pi_original[:, jnp.newaxis]
+            delta_log_proposal = log_pi_trans - log_pi_original[:, jnp.newaxis]
         else:
-            if log_ell_original is not None:
-                delta_log_pi = log_ell_original - log_ell_new
-            else:
-                delta_log_pi = jnp.zeros_like(log_ell_new)
+            # MCMC case: the posterior ratio p(T(θ)|D)/p(θ|D) is O(h)
+            # for small transformations and is omitted in this leading-order
+            # approximation. When h→0, this recovers standard PSIS-LOO.
+            delta_log_proposal = jnp.zeros_like(log_ell_new)
 
-        # Combine all log terms first, then apply max-subtract for numerical stability
-        log_eta_weights = delta_log_pi + log_jacobian
+        # Full weight: LOO term + proposal correction + Jacobian
+        log_eta_weights = log_loo + delta_log_proposal + log_jacobian
         log_eta_weights = log_eta_weights.astype(jnp.float64)
 
         # Use JIT-compiled normalization
@@ -580,7 +597,7 @@ class LikelihoodDescent(SmallStepTransformation):
         else:
             grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
 
-        return -grad_ll
+        return jax.tree_util.tree_map(lambda x: -x, grad_ll)
 
 
 class KLDivergence(SmallStepTransformation):

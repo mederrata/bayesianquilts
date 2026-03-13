@@ -3,9 +3,8 @@
 
 # In[1]:
 
-
-get_ipython().run_line_magic('load_ext', 'autoreload')
-get_ipython().run_line_magic('autoreload', '2')
+# %load_ext autoreload
+# %autoreload 2
 
 import jax
 import jax.numpy as jnp
@@ -28,9 +27,7 @@ from bayesianquilts.predictors.nn.negbin import NeuralNegativeBinomialRegression
 from bayesianquilts.predictors.nn.negbin import NeuralNegativeBinomialLikelihood
 from bayesianquilts.predictors.nn.poisson import NeuralPoissonLikelihood
 
-
 # In[2]:
-
 
 # Load the dataset
 try:
@@ -68,7 +65,6 @@ print(f'X shape: {X_data.shape}, y shape: {y_data.shape}')
 
 
 # In[3]:
-
 
 # Instantiate Neural Model with ZERO-INFLATED NEGATIVE BINOMIAL Likelihood
 # 2 hidden layers of size 4
@@ -132,12 +128,12 @@ def pathfinder_initialization(model, data, num_chains=4, num_samples=200, maxite
                               ftol=1e-6, gtol=1e-9, verbose=True):
     """
     Use Pathfinder variational inference to initialize MCMC chains.
-
+    
     Pathfinder (Zhang et al. 2022) is state-of-the-art for MCMC initialization:
     - Finds posterior mode using L-BFGS (quasi-Newton method with line search)
     - Builds multivariate normal approximation using inverse Hessian
     - Importance samples to get diverse, high-quality initial states
-
+    
     Args:
         model: BayesianModel instance
         data: Data dictionary
@@ -147,32 +143,32 @@ def pathfinder_initialization(model, data, num_chains=4, num_samples=200, maxite
         ftol: Function tolerance for L-BFGS (smaller = more conservative, default 1e-6)
         gtol: Gradient tolerance for L-BFGS (smaller = more conservative, default 1e-9)
         verbose: Print progress
-
+    
     Returns:
         initial_states: Dict[str, Array] with shape (num_chains, ...)
     """
     if verbose:
         print('\nStep 1: Running Pathfinder variational inference...')
         print(f'  L-BFGS settings: ftol={ftol}, gtol={gtol} (conservative)')
-
+    
     # Setup parameter flattening
     key = jax.random.PRNGKey(0)
     prior_sample = model.prior_distribution.sample(1, seed=key)
     template = {var: prior_sample[var][0] for var in model.var_list}
     flat_template, unflatten_fn = jax.flatten_util.ravel_pytree(template)
     param_dim = flat_template.shape[0]
-
+    
     if verbose:
         print(f'  Parameter space dimension: {param_dim}')
-
+    
     # Define log probability for Pathfinder
     def logprob_fn_flat(params_flat):
         params_dict = unflatten_fn(params_flat)
         return model.unormalized_log_prob(data=data, **params_dict)
-
+    
     # Run Pathfinder with conservative tolerances
     initial_position = jax.random.normal(jax.random.PRNGKey(42), (param_dim,)) * 0.1
-
+    
     state, info = pathfinder.approximate(
         rng_key=jax.random.PRNGKey(123),
         logdensity_fn=logprob_fn_flat,
@@ -182,38 +178,38 @@ def pathfinder_initialization(model, data, num_chains=4, num_samples=200, maxite
         ftol=ftol,  # Conservative function tolerance
         gtol=gtol,  # Conservative gradient tolerance
     )
-
+    
     if verbose:
         print(f'  ✓ Pathfinder converged! ELBO: {float(state.elbo):.3f}')
-
+    
     # Sample diverse initial states
     if verbose:
         print(f'\nStep 2: Sampling {num_chains} diverse initial states...')
-
+    
     sample_key = jax.random.PRNGKey(456)
     samples_result = pathfinder.sample(sample_key, state, num_samples=num_chains)
     samples_flat = samples_result[0] if isinstance(samples_result, tuple) else samples_result
-
+    
     if verbose:
         print(f'  ✓ Sampled from approximate posterior')
-
+    
     # Unflatten and organize by parameter
     chain_inits = {var: [] for var in model.var_list}
-
+    
     for i in range(num_chains):
         sample_dict = unflatten_fn(samples_flat[i])
         for var_name in model.var_list:
             chain_inits[var_name].append(sample_dict[var_name])
-
+    
     # Stack into (num_chains, ...) format
     for var_name in model.var_list:
         chain_inits[var_name] = jnp.stack(chain_inits[var_name], axis=0)
         if verbose:
             print(f'  {var_name}: shape {chain_inits[var_name].shape}')
-
+    
     if verbose:
         print('  ✓ Initial states ready for MCMC')
-
+    
     return chain_inits
 
 def check_rhat_and_save(model, cache_dir, threshold=1.05):
@@ -222,7 +218,7 @@ def check_rhat_and_save(model, cache_dir, threshold=1.05):
     print("\nChecking R-hat convergence...")
     all_good = True
     max_rhat_overall = 0.0
-
+    
     for var, samples in model.mcmc_samples.items():
         samples_transposed = jnp.swapaxes(samples, 0, 1)
         rhat = tfmcmc.potential_scale_reduction(samples_transposed)
@@ -230,15 +226,15 @@ def check_rhat_and_save(model, cache_dir, threshold=1.05):
         max_r = float(jnp.max(rhat))
         mean_r = float(jnp.mean(rhat))
         max_rhat_overall = max(max_rhat_overall, max_r)
-
+        
         if max_r > threshold:
             all_good = False
             print(f"  ✗ {var:10s}: max R-hat {max_r:.3f} (mean {mean_r:.3f}) > {threshold}")
         else:
             print(f"  ✓ {var:10s}: max R-hat {max_r:.3f} (mean {mean_r:.3f})")
-
+    
     print(f"\nOverall max R-hat: {max_rhat_overall:.3f}")
-
+    
     if all_good:
         print(f"✓ EXCELLENT: All R-hat < {threshold}! Saving model to {cache_dir}...")
         model.save_to_disk(cache_dir)
@@ -259,7 +255,7 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
     except Exception as e:
         print(f"✗ Failed to load model: {e}")
         print("  Will refit with Pathfinder...")
-
+        
         # Run Pathfinder with conservative settings
         chain_inits = pathfinder_initialization(
             model, data_dict, 
@@ -269,7 +265,7 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
             ftol=1e-6,  # Conservative L-BFGS tolerance
             gtol=1e-9   # Conservative gradient tolerance
         )
-
+        
         # Run MCMC with conservative settings
         print('\nStep 3: Running MCMC with Pathfinder initialization...')
         try:
@@ -290,7 +286,7 @@ if os.path.exists(os.path.join(cache_dir, 'config.yaml')):
             traceback.print_exc()
 else:
     print('\nNo cached model found. Starting fresh fit with Pathfinder...')
-
+    
     # Run Pathfinder initialization with conservative settings
     chain_inits = pathfinder_initialization(
         model, data_dict,
@@ -300,7 +296,7 @@ else:
         ftol=1e-6,          # Conservative function tolerance for L-BFGS
         gtol=1e-9           # Conservative gradient tolerance for L-BFGS
     )
-
+    
     # Run MCMC with Pathfinder initialization and conservative settings
     print('\nStep 3: Running MCMC with Pathfinder-initialized chains...')
     try:
@@ -314,10 +310,10 @@ else:
             initial_states=chain_inits  # Pathfinder initialization!
         )
         print("✓ MCMC Complete.")
-
+        
         # Check convergence
         converged = check_rhat_and_save(model, cache_dir, threshold=1.05)
-
+        
         if not converged:
             print("\n" + "!"*70)
             print("WARNING: Chains did not fully converge!")
@@ -327,7 +323,7 @@ else:
             print("  3. Try higher target_accept_prob (0.90-0.95)")
             print("  4. Current settings are already very conservative")
             print("!"*70)
-
+        
     except Exception as e:
         print(f"✗ MCMC failed: {e}")
         import traceback
@@ -347,9 +343,7 @@ print('  - MCMC step size: 1e-4 (conservative, will adapt during warmup)')
 print('  - Total time: ~30-60 minutes first run, <1s cached')
 print('='*70)
 
-
 # In[4]:
-
 
 # Full Simulation for Table Metrics (Optimized for Memory)
 import pandas as pd
@@ -506,6 +500,8 @@ for col in df_sims.columns:
     s = stats.loc['std', col]
     print(f"{col}: {m:.1f} ± {s:.1f}")
 
+# In[5]:
+
 # Plot khat values for identity transformation
 plt.figure(figsize=(10, 6))
 plt.scatter(range(len(method_khats['identity'])), method_khats['identity'], c='red', alpha=0.6, label='Identity Khat')
@@ -519,8 +515,7 @@ plt.grid(True, alpha=0.3)
 plt.show()
 
 
-# In[ ]:
-
+# In[6]:
 
 # Full Simulation for Table Metrics (Optimized for Memory)
 import pandas as pd
@@ -673,10 +668,4 @@ for col in df_sims.columns:
     m = stats.loc['mean', col]
     s = stats.loc['std', col]
     print(f"{col}: {m:.1f} \u005cpm {s:.1f}")
-
-
-# In[ ]:
-
-
-
 
