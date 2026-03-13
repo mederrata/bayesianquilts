@@ -92,6 +92,50 @@ class LikelihoodFunction(ABC):
         """
         pass
 
+    def total_log_likelihood(
+        self, data: Any, params: Dict[str, Any]
+    ) -> jnp.ndarray:
+        """Compute total log-likelihood across ALL observations for per-obs params.
+
+        For per-observation transformed parameters with shape (S, N_params, K),
+        computes for each (s, i):
+            result[s, i] = Σ_j log ℓ(d_j | params[s, i, :])
+
+        This is needed for the MCMC importance weight (Eq. 10) to compute the
+        posterior ratio π(ϕ|D)/π(θ|D) without a variational surrogate.
+
+        Default implementation uses jax.vmap over the N_params dimension.
+        Override in subclasses for optimized implementations.
+
+        Args:
+            data: Input data
+            params: Per-observation transformed parameters
+
+        Returns:
+            Array of shape (S, N_params) with total log-likelihoods
+        """
+        leaves = jax.tree_util.tree_leaves(params)
+        if not leaves:
+            return jnp.zeros(())
+
+        first = leaves[0]
+        if first.ndim <= 2:
+            # Global params (S, K): just sum the standard log_likelihood
+            return jnp.sum(self.log_likelihood(data, params), axis=-1, keepdims=True)
+
+        # Per-observation params (S, N, K...) - vmap over N dimension
+        # Move N to leading axis for vmap
+        params_transposed = jax.tree_util.tree_map(
+            lambda p: jnp.moveaxis(p, 1, 0), params
+        )
+
+        def eval_one(params_i):
+            ll = self.log_likelihood(data, params_i)  # (S, N_data)
+            return jnp.sum(ll, axis=-1)  # (S,)
+
+        total_lls = jax.vmap(eval_one)(params_transposed)  # (N, S)
+        return total_lls.T  # (S, N)
+
 
 class Transformation(ABC):
     """Abstract base class for AIS transformations."""
@@ -185,44 +229,111 @@ class Transformation(ABC):
         log_pi_original: jnp.ndarray,
         log_ell_original: jnp.ndarray = None,
         surrogate_log_prob_fn=None,
+        n_loo_samples: Optional[int] = None,
+        rng_key: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, ...]:
         """Compute importance weights for transformed parameters.
 
-        The correct importance weight for targeting p(θ|D_{-i}) using
-        transformed samples T_i(θ) where θ ~ p(θ|D) is:
+        From the manuscript Eq. 10, the importance weight for targeting
+        p(θ|D_{-i}) using transformed samples ϕ = T_i(θ) where θ ~ p(θ|D):
 
-            log w_i(θ) = -log p(d_i|T_i(θ))           [LOO term, O(1)]
-                       + log p(T_i(θ)|D) - log p(θ|D)  [proposal ratio, O(h)]
-                       + log|J_{T_i}(θ)|                [Jacobian, O(h)]
+            η_i(θ) = |J_{T_i}(θ)| / ℓ(ϕ|d_i) · π(ϕ|D) / π(θ|D)
 
-        The LOO term is dominant. The proposal ratio is O(h) for small
-        transformations and is included when a surrogate/posterior density
-        is available (variational case), otherwise approximated as zero.
+        Expanding the posterior ratio via Bayes rule:
+
+            log η = -log ℓ(ϕ|d_i) + log|J| + log[π(ϕ|D)/π(θ|D)]
+
+        where the posterior ratio splits as:
+
+            log[π(ϕ|D)/π(θ|D)] = log π(ϕ)/π(θ)                [prior ratio]
+                                + Σ_j [log ℓ(ϕ|d_j)/ℓ(θ|d_j)]  [full LL ratio]
+
+        Substituting and noting that the j=i term cancels:
+
+            log η = -log ℓ(θ|d_i) + log|J| + [prior]
+                  + Σ_{j≠i} [log ℓ(ϕ|d_j) - log ℓ(θ|d_j)]
+
+        For the MCMC case, we compute the posterior LL ratio. Two modes:
+        - Exact: uses total_log_likelihood() over all N observations. O(S·N²·F).
+        - Sampled: randomly selects m observations to estimate the ratio.
+          O(S·N·m·F) where m = n_loo_samples << N.
+
+        For the variational case (Eq. 15), the surrogate density ratio
+        log q(ϕ) - log q(θ) approximates the posterior ratio since
+        q ≈ p(·|D).
+
+        Args:
+            n_loo_samples: If set, sample this many observations to estimate
+                the posterior LL ratio instead of using all N. Reduces cost
+                from O(SN²F) to O(SNmF). Only used for MCMC case.
+            rng_key: JAX PRNG key for sampling. Required if n_loo_samples is set.
 
         Returns:
             Tuple of (eta_weights, psis_weights, khat, log_ell_new).
         """
         log_ell_new = likelihood_fn.log_likelihood(data, params_transformed)
 
-        # LOO term: -log p(d_i | T_i(θ)) — the standard LOO weight at
-        # transformed params. This is the dominant O(1) contribution.
-        log_loo = -log_ell_new
-
         if variational and surrogate_log_prob_fn is not None:
-            # Variational case: include surrogate density ratio
-            # log q(T(θ)) - log q(θ) corrects for the proposal change
-            log_pi_trans = surrogate_log_prob_fn(params_transformed)
+            # Variational case (Eq. 15): use surrogate density ratio as
+            # approximation to the posterior ratio.
+            # log η ≈ -log ℓ(ϕ|d_i) + log q(ϕ) - log q(θ) + log|J|
+            log_loo = -log_ell_new
 
-            # Broadcast if log_pi_trans is (S,)
+            log_pi_trans = surrogate_log_prob_fn(params_transformed)
             if log_pi_trans.ndim == 1:
                 log_pi_trans = log_pi_trans[:, jnp.newaxis]
-
             delta_log_proposal = log_pi_trans - log_pi_original[:, jnp.newaxis]
         else:
-            # MCMC case: the posterior ratio p(T(θ)|D)/p(θ|D) is O(h)
-            # for small transformations and is omitted in this leading-order
-            # approximation. When h→0, this recovers standard PSIS-LOO.
-            delta_log_proposal = jnp.zeros_like(log_ell_new)
+            # MCMC case (Eq. 10): compute posterior LL ratio.
+            log_loo = -log_ell_new
+
+            if log_ell_original is not None:
+                N_data = log_ell_original.shape[-1]
+
+                if n_loo_samples is not None and n_loo_samples < N_data:
+                    # Sampled variant: estimate Σ_j δ_j using m random obs
+                    if rng_key is None:
+                        rng_key = jax.random.PRNGKey(0)
+                    m = n_loo_samples
+                    idx = jax.random.choice(
+                        rng_key, N_data, shape=(m,), replace=False
+                    )
+
+                    # Subsample data
+                    data_sub = jax.tree_util.tree_map(
+                        lambda x: x[idx] if x.ndim >= 1 and x.shape[0] == N_data else x,
+                        data
+                    )
+
+                    # Evaluate subset LL at transformed params
+                    # total_ll_sub[s, i] = Σ_{j∈S_m} log ℓ(d_j | ϕ_i)
+                    total_ll_sub = likelihood_fn.total_log_likelihood(
+                        data_sub, params_transformed
+                    )  # (S, N)
+
+                    # Subset LL at original params
+                    # log_ell_original_sub[s, j_idx] for sampled j
+                    log_ell_original_sub = log_ell_original[:, idx]  # (S, m)
+                    total_ll_original_sub = jnp.sum(
+                        log_ell_original_sub, axis=-1, keepdims=True
+                    )  # (S, 1)
+
+                    # Scale up: (N/m) * Σ_{j∈S_m} δ_j
+                    scale = N_data / m
+                    delta_log_proposal = scale * (
+                        total_ll_sub - total_ll_original_sub
+                    )
+                else:
+                    # Exact: evaluate all N observations
+                    total_ll_original = jnp.sum(
+                        log_ell_original, axis=-1, keepdims=True
+                    )  # (S, 1)
+                    total_ll_transformed = likelihood_fn.total_log_likelihood(
+                        data, params_transformed
+                    )  # (S, N)
+                    delta_log_proposal = total_ll_transformed - total_ll_original
+            else:
+                delta_log_proposal = jnp.zeros_like(log_ell_new)
 
         # Full weight: LOO term + proposal correction + Jacobian
         log_eta_weights = log_loo + delta_log_proposal + log_jacobian
@@ -453,6 +564,8 @@ class SmallStepTransformation(Transformation):
         log_pi: jnp.ndarray = None,
         log_ell_original: jnp.ndarray = None,
         surrogate_log_prob_fn=None,
+        n_loo_samples: Optional[int] = None,
+        rng_key: Optional[jnp.ndarray] = None,
         **kwargs,
     ):
 
@@ -544,7 +657,9 @@ class SmallStepTransformation(Transformation):
                 variational,
                 log_pi,
                 log_ell_original,
-                surrogate_log_prob_fn
+                surrogate_log_prob_fn,
+                n_loo_samples=n_loo_samples,
+                rng_key=rng_key,
             )
         )
 
@@ -640,33 +755,31 @@ class KLDivergence(SmallStepTransformation):
             grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
 
         # Expand terms for broadcasting
-        # log_pi: (S,) -> (S, 1, 1)
+        # log_pi: (S,) -> (S, 1, 1...)
         # current_log_ell: (S, N) -> (S, N, 1)
-        # grad_ll: (S, N, K)
+        # grad_ll: PyTree with leaves of shape (S, N, K) or (S, N)
+
+        # Get max ndim from grad_ll PyTree leaves
+        grad_leaves = jax.tree_util.tree_leaves(grad_ll)
+        max_ndim = max(leaf.ndim for leaf in grad_leaves) if grad_leaves else 3
 
         log_pi_expanded = log_pi[:, jnp.newaxis, jnp.newaxis]
-        while log_pi_expanded.ndim < grad_ll.ndim:
+        while log_pi_expanded.ndim < max_ndim:
             log_pi_expanded = log_pi_expanded[..., jnp.newaxis]
 
         log_ell_expanded = current_log_ell[..., jnp.newaxis]
-        
+
         # scaling factor: - exp(log_pi - log_ell)
         # (S, N, 1)
         scaling = -jnp.exp(log_pi_expanded - log_ell_expanded)
-        
-        # Apply scaling to gradient tree
-        # grad_ll leaves are (S, N, ...)
-        # scaling (S, N, 1) should broadcast against (S, N, K) or (S, N, 1)
-        
+
+        # Apply scaling to gradient PyTree
         def apply_scale(g):
-            # Safe broadcast check
-            # if g is (S, N), we want (S, N) scaling.
-            # scaling is (S, N, 1). 
             if g.ndim == 2:
                 return scaling[..., 0] * g
             else:
                 return scaling * g
-                
+
         return jax.tree_util.tree_map(apply_scale, grad_ll)
 
 
@@ -721,13 +834,27 @@ class Variance(SmallStepTransformation):
             log_f = jnp.log(self.f_fn(data, **params))
 
         if grad_log_f is None:
-            # Compute gradient of log_f w.r.t. params using autodiff
-            def log_f_sum(p):
-                return jnp.sum(jnp.log(self.f_fn(data, **p)))
+            # Compute per-observation gradient of log_f w.r.t. params.
+            # f_fn returns (S, N), so we need d/d(params) log f[s, n] for each n.
+            # Use vmap over one-hot observation selectors to extract per-obs grads.
+            N = current_log_ell.shape[1]
 
-            grad_log_f = jax.grad(log_f_sum)(params)
-            # grad_log_f is PyTree with leaves of shape (...) matching params
-            # We need to expand it to (S, N, ...) for broadcasting
+            def log_f_for_obs_n(p, n):
+                """Sum over samples of log f for observation n."""
+                f_vals = self.f_fn(data, **p)  # (S, N)
+                return jnp.sum(jnp.log(f_vals[:, n]))
+
+            def grad_for_obs(n):
+                return jax.grad(lambda p: log_f_for_obs_n(p, n))(params)
+
+            # Compute gradients for all observations using lax.map (sequential vmap)
+            grad_log_f = jax.lax.map(grad_for_obs, jnp.arange(N))
+            # grad_log_f: PyTree with leaves (N, S, ...) from the grad
+            # Transpose to (S, N, ...) to match grad_log_ell
+            grad_log_f = jax.tree_util.tree_map(
+                lambda x: jnp.moveaxis(x, 0, 1), grad_log_f
+            )
+            # Each leaf was (S, ...) per obs, now (N, S, ...) -> (S, N, ...)
 
         # 3. Compute weights
         log_pi_expanded = log_pi[:, jnp.newaxis] if log_pi.ndim == 1 else log_pi
@@ -1209,6 +1336,8 @@ class AdaptiveImportanceSampler:
         transformations: List[str] = None,
         try_all_transformations: bool = False,
         khat_threshold: float = 0.7,
+        n_loo_samples: Optional[int] = None,
+        rng_key: Optional[jnp.ndarray] = None,
     ):
         """Perform Adaptive Importance Sampling for Leave-One-Out CV.
 
@@ -1237,6 +1366,12 @@ class AdaptiveImportanceSampler:
             khat_threshold: Threshold for considering a point "adapted" (default 0.7).
                            Points with khat below this threshold won't be processed
                            by subsequent transformations unless try_all_transformations=True.
+            n_loo_samples: If set, estimate the posterior LL ratio using a random
+                           subset of this many observations instead of all N. Reduces
+                           MCMC weight computation from O(SN²F) to O(SNmF).
+                           Only used when variational=False.
+            rng_key: JAX PRNG key for sampling. If n_loo_samples is set and rng_key
+                     is None, uses PRNGKey(0).
 
         Returns:
             Dictionary of best results
@@ -1482,6 +1617,8 @@ class AdaptiveImportanceSampler:
             "theta_std": theta_std,
             "variational": variational,
             "surrogate_log_prob_fn": self.surrogate_log_prob_fn,
+            "n_loo_samples": n_loo_samples,
+            "rng_key": rng_key if rng_key is not None else jax.random.PRNGKey(0),
         }
 
         # Run sweeps in order of computational complexity
@@ -1609,6 +1746,43 @@ class LogisticRegressionLikelihood(LikelihoodFunction):
         ) * jnp.log(1 - sigma + 1e-10)
 
         return log_lik
+
+    def total_log_likelihood(
+        self, data: Dict[str, Any], params: Dict[str, Any]
+    ) -> jnp.ndarray:
+        """Compute total log-likelihood across ALL observations for per-obs params.
+
+        For beta shape (S, N, F), computes for each (s, i):
+            result[s, i] = Σ_j log ℓ(d_j | beta[s, i, :], intercept[s, i])
+
+        Uses einsum 'jf,snf->snj' for O(S*N*N_data*F) vectorized computation.
+        """
+        X = jnp.asarray(data["X"], dtype=self.dtype)  # (N_data, F)
+        y = jnp.asarray(data["y"], dtype=self.dtype)  # (N_data,)
+
+        beta = params["beta"]
+        intercept = params["intercept"]
+
+        if intercept.ndim > 1 and intercept.shape[-1] == 1:
+            intercept = jnp.squeeze(intercept, axis=-1)
+
+        if beta.ndim == 3:
+            # beta: (S, N, F) -> logits: (S, N, N_data)
+            mu = jnp.einsum("jf,snf->snj", X, beta) + intercept[:, :, jnp.newaxis]
+        else:
+            # beta: (S, F) -> same params for all obs
+            mu = jnp.einsum("jf,sf->sj", X, beta) + intercept[:, jnp.newaxis]
+            sigma = jax.nn.sigmoid(mu)
+            ll = y[jnp.newaxis, :] * jnp.log(sigma + 1e-10) + (
+                1 - y[jnp.newaxis, :]
+            ) * jnp.log(1 - sigma + 1e-10)
+            return jnp.sum(ll, axis=-1, keepdims=True)  # (S, 1)
+
+        sigma = jax.nn.sigmoid(mu)  # (S, N, N_data)
+        ll = y[jnp.newaxis, jnp.newaxis, :] * jnp.log(sigma + 1e-10) + (
+            1 - y[jnp.newaxis, jnp.newaxis, :]
+        ) * jnp.log(1 - sigma + 1e-10)
+        return jnp.sum(ll, axis=-1)  # (S, N)
 
     def log_likelihood_gradient(
         self, data: Dict[str, Any], params: Dict[str, Any]
