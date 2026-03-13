@@ -1,3 +1,3 @@
 from .poisson import PoissonFactorization
-from .poisson import PoissonAutoencoder
+PoissonAutoencoder = PoissonFactorization  # legacy alias
 from .bernoulli import BernoulliFactorization
