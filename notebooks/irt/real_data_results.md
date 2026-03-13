@@ -1,6 +1,6 @@
 # Real Data Results — IRT Model Comparison
 
-**Date**: 2026-03-12
+**Date**: 2026-03-13
 **Models**: Baseline GRM, MICE-only GRM, Mixed (IRT+MICE stacking) GRM
 **Stacking weights**: Yao et al. (2018) per-item pointwise LOO optimization
 
@@ -23,25 +23,25 @@
 | **WPI** | 2 | 6,019 | 116 | 35.4% | Baseline | 0.4125 | 0.4125 | -59.235 +/- 0.158 | -0.515 +/- 0.001 |
 | | | | | | MICE-only | 0.4085 | 0.4086 | -58.112 +/- 0.163 | -0.506 +/- 0.001 |
 | | | | | | Mixed | 0.4127 | 0.4131 | -61.262 +/- 0.188 | -0.533 +/- 0.002 |
-| **EQSQ** | 4 | 13,256 | 120 | 11.1% | Baseline | — | — | — | — |
-| | | | | | MICE-only | — | — | — | — |
-| | | | | | Mixed | — | — | — | — |
-
-*EQSQ: retraining imputation models with improved convergence settings (500 epochs, lr=5e-4, patience=30)*
+| **EQSQ** | 4 | 13,256 | 120 | 11.1% | Baseline | 1.0065 | 1.1023 | -189.775 +/- 0.150 | -1.589 +/- 0.001 |
+| | | | | | MICE-only | 0.8750 | 0.8750 | -143.574 +/- 0.135 | -1.202 +/- 0.001 |
+| | | | | | Mixed | 0.8754 | 0.8754 | -143.625 +/- 0.135 | -1.203 +/- 0.001 |
 
 ## Key Observations
 
 ### ELPD (higher = better)
 
-- **MICE-only beats baseline on all 5 datasets** in ELPD/person
+- **MICE-only beats baseline on all 6 datasets** in ELPD/person
+- **EQSQ shows largest imputation benefit**: MICE-only ELPD -143.57 vs baseline -189.77 (24% improvement)
 - **Mixed (stacking) is best on NPI** (massive improvement: -22.02 vs -27.62 baseline)
 - **Mixed is competitive on RWA and TMA** (slightly better than baseline, close to MICE-only)
 - **Mixed underperforms on GRIT and WPI** — possibly overfitting stacking weights
 
 ### RMSE (lower = better)
 
-- **MICE-only has lowest Pred RMSE on 4/5 datasets** (GRIT, TMA, RWA, WPI)
+- **MICE-only has lowest Pred RMSE on 5/6 datasets** (GRIT, TMA, RWA, WPI, EQSQ)
 - **Mixed has lowest Pred RMSE on NPI** (0.4252 vs 0.4998 baseline, a 15% improvement)
+- **EQSQ imputation models**: RMSE 0.875 vs baseline 1.007 (13% improvement)
 - Pred RMSE and LOO-RMSE are nearly identical across all models
 
 ## Dataset Characteristics
