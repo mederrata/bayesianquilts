@@ -258,6 +258,66 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
 
         return log_lik
 
+    def total_log_likelihood(
+        self, data: Dict[str, Any], params: Dict[str, Any]
+    ) -> jnp.ndarray:
+        """Compute total log-likelihood across ALL observations for per-obs params.
+
+        For beta shape (S, N, F), computes for each (s, i):
+            result[s, i] = Σ_j log ℓ(d_j | beta[s, i, :], intercept[s, i])
+
+        Uses einsum 'jf,snf->snj' for O(S*N*N_data*F) vectorized computation.
+        """
+        X = jnp.asarray(data["X"], dtype=self.dtype)
+        y = jnp.asarray(data["y"], dtype=self.dtype)
+        y = jnp.atleast_1d(jnp.squeeze(y))
+        offset = data.get("offset", jnp.zeros_like(y))
+
+        beta = params["beta"]
+        intercept = params["intercept"]
+
+        # Squeeze accumulated dimensions (same as log_likelihood)
+        while beta.ndim > 3:
+            orig = beta.shape
+            beta = jnp.squeeze(
+                beta,
+                axis=tuple(i for i in range(1, beta.ndim - 1) if beta.shape[i] == 1),
+            )
+            if beta.ndim > 3 and beta.shape == orig:
+                break
+        while intercept.ndim > 2:
+            orig = intercept.shape
+            intercept = jnp.squeeze(
+                intercept,
+                axis=tuple(i for i in range(1, intercept.ndim - 1) if intercept.shape[i] == 1),
+            )
+            if intercept.ndim > 2 and intercept.shape == orig:
+                break
+        intercept = jnp.squeeze(intercept)
+        if intercept.ndim == 0:
+            intercept = jnp.atleast_1d(intercept)
+
+        if beta.ndim == 3:
+            # beta: (S, N, F), X: (N_data, F) -> log_rate: (S, N, N_data)
+            log_rate = jnp.einsum("jf,snf->snj", X, beta)
+            if intercept.ndim == 1:
+                log_rate = log_rate + intercept[:, jnp.newaxis, jnp.newaxis]
+            else:
+                log_rate = log_rate + intercept[:, :, jnp.newaxis]
+            log_rate = log_rate + offset[jnp.newaxis, jnp.newaxis, :]
+        elif beta.ndim == 2:
+            # Global params
+            log_rate = jnp.einsum("jf,sf->sj", X, beta) + intercept[:, jnp.newaxis] + offset[jnp.newaxis, :]
+            rate = jnp.exp(log_rate)
+            ll = y[jnp.newaxis, :] * log_rate - rate
+            return jnp.sum(ll, axis=-1, keepdims=True)  # (S, 1)
+        else:
+            raise ValueError(f"beta shape {beta.shape} not supported")
+
+        rate = jnp.exp(log_rate)
+        ll = y[jnp.newaxis, jnp.newaxis, :] * log_rate - rate  # (S, N, N_data)
+        return jnp.sum(ll, axis=-1)  # (S, N)
+
     def extract_parameters(self, params: Dict[str, Any]) -> jnp.ndarray:
         """Extract parameters into flattened array."""
         beta = params["beta"]
