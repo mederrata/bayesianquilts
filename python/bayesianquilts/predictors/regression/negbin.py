@@ -176,7 +176,7 @@ class NegativeBinomialRegression(BayesianModel):
             # Case 2: Standard MCMC/VI (S, n_feat)
             # X (N, D), beta (S, D) -> (S, N)
             # intercept may be (S,) or (S, 1) - squeeze to 1D then expand
-            intercept_1d = jnp.squeeze(intercept) if intercept.ndim > 1 else intercept
+            intercept_1d = intercept.reshape(-1) if intercept.ndim > 1 else intercept
             eta = jnp.einsum("nd,sd->sn", X, beta) + intercept_1d[:, jnp.newaxis]
         elif beta.ndim == 3:
             # Case 3: AIS per-datum parameters (S, N, n_feat)
