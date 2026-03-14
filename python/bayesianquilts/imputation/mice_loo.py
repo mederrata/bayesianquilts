@@ -821,9 +821,10 @@ class MICEBayesianLOO(MICELogistic):
         best_loss = float('inf')
         patience_counter = 0
         max_patience = 20
-        
+
         for step in range(self.pathfinder_maxiter):
-            surrogate_params, opt_state, loss = update_step(surrogate_params, opt_state, seed + step)
+            step_key = jax.random.fold_in(key, step)
+            surrogate_params, opt_state, loss = update_step(surrogate_params, opt_state, step_key)
             
             # Check convergence
             if loss < best_loss:
@@ -838,7 +839,8 @@ class MICEBayesianLOO(MICELogistic):
         # Sample from final surrogate
         try:
             final_surrogate = create_surrogate(surrogate_params)
-            samples = final_surrogate.sample(self.pathfinder_num_samples, seed=jax.random.PRNGKey(seed + 1000))
+            _, sample_key = jax.random.split(key)
+            samples = final_surrogate.sample(self.pathfinder_num_samples, seed=sample_key)
 
             # Convert to dict format
             samples_dict = {}
