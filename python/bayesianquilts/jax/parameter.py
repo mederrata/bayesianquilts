@@ -651,8 +651,8 @@ class Decomposed(object):
                 partial_sum += v
                 continue
 
-            from_shape = batch_shape + self._tensor_part_shapes[k]
-            to_shape = batch_shape + self.shape()
+            from_shape = batch_shape + list(self._tensor_part_shapes[k])
+            to_shape = batch_shape + list(self.shape())
 
             # Handle implicit coding
             if self._implicit and (np.prod(part_interact_shape) > 1):
