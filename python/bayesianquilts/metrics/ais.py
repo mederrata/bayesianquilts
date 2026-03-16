@@ -17,6 +17,8 @@ Each transformation can be applied to perform importance sampling for
 leave-one-out cross-validation predictions.
 """
 
+import time
+
 import jax
 import jax.numpy as jnp
 from abc import ABC, abstractmethod
@@ -1474,6 +1476,7 @@ class AdaptiveImportanceSampler:
         khat_threshold: float = 0.7,
         n_loo_samples: Optional[int] = None,
         rng_key: Optional[jnp.ndarray] = None,
+        warmup: bool = False,
     ):
         """Perform Adaptive Importance Sampling for Leave-One-Out CV.
 
@@ -1661,6 +1664,53 @@ class AdaptiveImportanceSampler:
                 transforms[name] = all_transforms[name]
         # 'identity' is handled separately below
 
+        # JIT warmup: run each transform once on a small subset to trigger compilation
+        if warmup:
+            n_warmup = min(2, log_ell.shape[1])
+            warmup_data = jax.tree_util.tree_map(
+                lambda x: x[:n_warmup] if x.ndim >= 1 and x.shape[0] == log_ell.shape[1] else x,
+                data
+            )
+            warmup_log_ell = log_ell[:, :n_warmup]
+            warmup_theta = jax.tree_util.tree_map(
+                lambda x: x[:, :n_warmup] if x.ndim >= 2 else x,
+                theta_expanded
+            )
+            warmup_kwargs = {
+                "log_ell": warmup_log_ell,
+                "log_ell_prime": (
+                    jax.tree_util.tree_map(
+                        lambda x: x[:, :n_warmup] if x.ndim >= 2 and x.shape[1] == log_ell.shape[1] else x,
+                        log_ell_prime
+                    ) if log_ell_prime is not None else None
+                ),
+                "log_ell_doubleprime": (
+                    jax.tree_util.tree_map(
+                        lambda x: x[:, :n_warmup] if x.ndim >= 2 and x.shape[1] == log_ell.shape[1] else x,
+                        log_ell_doubleprime
+                    ) if log_ell_doubleprime is not None else None
+                ),
+                "log_pi": log_pi,
+                "grad_log_pi": grad_log_pi if 'grad_log_pi' in dir() else None,
+                "log_ell_original": warmup_log_ell,
+                "theta_std": theta_std,
+                "variational": variational,
+                "surrogate_log_prob_fn": self.surrogate_log_prob_fn,
+                "n_loo_samples": n_loo_samples,
+                "rng_key": rng_key if rng_key is not None else jax.random.PRNGKey(0),
+            }
+            for wname, wtransform in transforms.items():
+                try:
+                    _wres = wtransform(
+                        max_iter=1, params=params, theta=warmup_theta,
+                        data=warmup_data, hbar=1.0, **warmup_kwargs,
+                    )
+                    jax.block_until_ready(_wres)
+                except Exception:
+                    pass
+            if verbose:
+                print("JIT warmup complete.")
+
         # Initialize best results
         n_data = log_ell.shape[1]
         best_metrics = {
@@ -1676,9 +1726,11 @@ class AdaptiveImportanceSampler:
         adapted_mask = jnp.zeros(n_data, dtype=bool)
 
         results = {}
+        timings = {}
 
         # Handle 'identity' sweep explicitly if in transform_order
         if "identity" in transform_order:
+            _t0 = time.perf_counter()
             if verbose:
                 print("Running identity...")
             # Compute identity importance weights (standard PSIS-LOO)
@@ -1727,6 +1779,8 @@ class AdaptiveImportanceSampler:
                 "ll_loo_psis": ll_loo_psis,
             }
             results["identity"] = res_identity
+            jax.block_until_ready(res_identity)
+            timings["identity"] = time.perf_counter() - _t0
 
             # Update best metrics
             idx = khat < best_metrics["khat"]
@@ -1769,6 +1823,7 @@ class AdaptiveImportanceSampler:
 
         # Run sweeps in order of computational complexity
         for name, transform in transforms.items():
+            _t0_transform = time.perf_counter()
             # Early exit if all points are adapted and we're not forcing all transformations
             if not try_all_transformations and jnp.all(adapted_mask):
                 if verbose:
@@ -1852,7 +1907,12 @@ class AdaptiveImportanceSampler:
                         print(f"Failed {name} rho={rho}: {e}")
                     continue
 
+            # Block until all JAX computations for this transform are done
+            jax.block_until_ready(best_metrics)
+            timings[name] = time.perf_counter() - _t0_transform
+
         results["best"] = best_metrics
+        results["timings"] = timings
         return results
 
 
