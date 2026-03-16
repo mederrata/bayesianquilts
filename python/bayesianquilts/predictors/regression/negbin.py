@@ -195,35 +195,41 @@ class NegativeBinomialRegression(BayesianModel):
         else:
             raise ValueError(f"Unsupported beta dimensionality: {beta.ndim}")
 
-        mean = jnp.exp(eta).astype(self.dtype)
-
         # Handle log_concentration that might be (S,), (S, 1), or (S, N, 1)
         if log_concentration.ndim == 3:
-            concentration = jnp.exp(jnp.squeeze(log_concentration, axis=-1))
+            log_conc = jnp.squeeze(log_concentration, axis=-1)
         elif log_concentration.ndim == 2 and log_concentration.shape[-1] == 1:
-            concentration = jnp.exp(jnp.squeeze(log_concentration, axis=-1))
+            log_conc = jnp.squeeze(log_concentration, axis=-1)
         else:
-            concentration = jnp.exp(log_concentration)
+            log_conc = log_concentration
 
+        concentration = jnp.exp(log_conc)
         concentration = (concentration + jnp.array(1e-6, dtype=self.dtype)).astype(
             self.dtype
         )
 
         # Convert to NegativeBinomial parameters
         total_count = concentration
-        # Broadcast concentration if needed for probs calculation
-        # When mean is (S, N) and concentration is (S,), we need (S, 1)
-        if total_count.ndim < mean.ndim:
+        # Broadcast concentration if needed
+        # When eta is (S, N) and concentration is (S,), we need (S, 1)
+        if total_count.ndim < eta.ndim:
             total_count_exp = total_count[..., jnp.newaxis]
+            log_conc_exp = log_conc[..., jnp.newaxis]
         else:
             total_count_exp = total_count
+            log_conc_exp = log_conc
 
-        probs = mean / (total_count_exp + mean)
+        # Compute probs in numerically stable way using logits
+        # logits = log(mean/conc) = eta - log_conc, avoids exp(eta) overflow
+        logits = eta - log_conc_exp
+        probs = jax.nn.sigmoid(logits).astype(self.dtype)
         probs = jnp.clip(
             probs,
             jnp.array(1e-6, dtype=self.dtype),
             jnp.array(1 - 1e-6, dtype=self.dtype),
         )
+
+        mean = jnp.exp(jnp.clip(eta, a_max=30.0)).astype(self.dtype)
 
         return mean, total_count_exp, probs
 
