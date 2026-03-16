@@ -299,6 +299,7 @@ def training_loop(
     try:
         for epoch in range(num_epochs):
             epoch_loss = 0.0
+            valid_steps = 0
             grad_accumulator = jax.tree_util.tree_map(
                 jnp.zeros_like, unfreeze(filter_params(params))
             )
@@ -386,6 +387,7 @@ def training_loop(
 
                         # Normal processing - no NaN/Inf detected
                         epoch_loss += loss_val
+                        valid_steps += 1
 
                         # Only accumulate gradients for selected keys
                         filtered_grads = filter_params(grads[0])
@@ -430,7 +432,7 @@ def training_loop(
                     except KeyboardInterrupt:
                         print("\nTraining interrupted by user.")
                         raise
-            avg_epoch_loss = epoch_loss / steps_per_epoch
+            avg_epoch_loss = epoch_loss / max(valid_steps, 1) if valid_steps > 0 else float("inf")
             epoch_losses += [avg_epoch_loss]
 
             if snapshot_epoch is not None and epoch + 1 == snapshot_epoch:

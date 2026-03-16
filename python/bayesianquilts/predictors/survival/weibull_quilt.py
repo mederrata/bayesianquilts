@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quilted piecewise exponential survival model."""
+"""Quilted Weibull survival model."""
 
 from collections import defaultdict
 
@@ -14,65 +14,63 @@ from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 from bayesianquilts.model import QuiltedBayesianModel
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
-_RATE_FLOOR = 1e-12
-_RATE_CEIL = 1e4
+_CONC_FLOOR = 1e-6
+_CONC_CEIL = 20.0
+_SCALE_FLOOR = 1e-12
+_SCALE_CEIL = 1e6
 
 
-def _piecewise_exp_ll(rates, time, event, breakpoints, dtype):
-    """Compute piecewise exponential log-likelihood with censoring.
+def _weibull_ll(concentration, scale, time, event, dtype):
+    """Compute Weibull log-likelihood with censoring.
 
     Args:
-        rates: (S, N, n_intervals) positive hazard rates
-        time: (N,) observed times
+        concentration: (S, N) shape parameter k > 0
+        scale: (S, N) scale parameter lambda > 0
+        time: (N,) observed times > 0
         event: (N,) event indicators (1=event, 0=censored)
-        breakpoints: (n_breaks,) interval boundaries
         dtype: computation dtype
 
     Returns:
         (S, N) log-likelihood array
     """
-    rates = jnp.clip(rates, _RATE_FLOOR, _RATE_CEIL)
+    concentration = jnp.clip(concentration, _CONC_FLOOR, _CONC_CEIL)
+    scale = jnp.clip(scale, _SCALE_FLOOR, _SCALE_CEIL)
 
-    indices = (time[:, jnp.newaxis] > breakpoints).sum(axis=-1)
+    t = time[jnp.newaxis, :]  # (1, N)
+    log_t = jnp.log(jnp.maximum(t, 1e-30))
+    log_scale = jnp.log(scale)
 
-    hazard = jnp.take_along_axis(
-        rates, jnp.broadcast_to(
-            indices[jnp.newaxis, :, jnp.newaxis],
-            (rates.shape[0], indices.shape[0], 1)
-        ), axis=-1
-    ).squeeze(axis=-1)
+    # z^k = (t/lambda)^k = exp(k * (log(t) - log(lambda)))
+    log_z = concentration * (log_t - log_scale)
+    z_k = jnp.exp(log_z)
 
-    time_gaps = jnp.concatenate(
-        [breakpoints[0:1], breakpoints[1:] - breakpoints[:-1]]
-    )
-    cum_masses = jnp.cumsum(
-        rates[..., :-1] * time_gaps[jnp.newaxis, jnp.newaxis, :], axis=-1
-    )
-    indicator = (time[:, jnp.newaxis] > breakpoints).astype(dtype)
-    cum_hazard_completed = (indicator[jnp.newaxis, ...] * cum_masses).sum(axis=-1)
-
-    padded_breakpoints = jnp.concatenate([jnp.zeros(1, dtype=dtype), breakpoints])
-    changepoint = padded_breakpoints[indices]
-    cum_hazard = cum_hazard_completed + hazard * (
-        time[jnp.newaxis, :] - changepoint[jnp.newaxis, :]
+    # log f(t) = log(k) - log(lambda) + (k-1)*(log(t) - log(lambda)) - (t/lambda)^k
+    log_prob = (
+        jnp.log(concentration)
+        - log_scale
+        + (concentration - 1) * (log_t - log_scale)
+        - z_k
     )
 
-    log_prob = jnp.log(hazard) - cum_hazard
-    log_sf = -cum_hazard
+    # log S(t) = -(t/lambda)^k
+    log_sf = -z_k
 
     return event[jnp.newaxis, :] * log_prob + (1 - event[jnp.newaxis, :]) * log_sf
 
 
-class PiecewiseExponentialQuilt(QuiltedBayesianModel):
-    """Quilted piecewise exponential survival model.
+class WeibullQuilt(QuiltedBayesianModel):
+    """Quilted Weibull survival model.
 
-    Additive decomposition in log-rate space (multiplicative on hazard)
-    with horseshoe priors for shrinkage of higher-order interactions.
+    Additive decomposition in log-parameter space (multiplicative on
+    concentration and scale) with horseshoe priors for shrinkage of
+    higher-order interactions.
+
+    Each group gets its own Weibull(concentration, scale) parameters.
+    The decomposition operates on [log_concentration, log_scale] jointly.
     """
 
     def __init__(
         self,
-        breakpoints,
         rate_interact,
         shrinkage_scale=4e-2,
         dim_decay_factor=0.9,
@@ -82,16 +80,14 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
     ):
         super().__init__(dtype=dtype)
         self.time_scale = float(time_scale)
-        self.breakpoints = jnp.asarray(breakpoints, dtype=dtype) / self.time_scale
-        self.n_intervals = len(breakpoints) + 1
         self.shrinkage_scale = shrinkage_scale
         self.dim_decay_factor = dim_decay_factor
         self.rate_interact = rate_interact
 
-        self.rate_decomposition = Decomposed(
+        self.param_decomposition = Decomposed(
             interactions=rate_interact,
-            param_shape=[self.n_intervals],
-            name="log_rate",
+            param_shape=[2],  # [log_concentration, log_scale]
+            name="weibull",
             dtype=dtype,
             post_fn=jnp.exp,
         )
@@ -101,107 +97,110 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
 
     def create_distributions(self):
         (
-            rate_tensors,
-            rate_vars,
-            rate_shapes,
-        ) = self.rate_decomposition.generate_tensors(dtype=self.dtype)
+            param_tensors,
+            param_vars,
+            param_shapes,
+        ) = self.param_decomposition.generate_tensors(dtype=self.dtype)
 
-        rate_scales = {
+        param_scales = {
             k: 2 * self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
-            for k, v in rate_shapes.items()
+            for k, v in param_shapes.items()
         }
 
-        self.rate_vars = rate_vars
-        self.rate_var_list = list(rate_vars.keys())
+        self.param_vars = param_vars
+        self.param_var_list = list(param_vars.keys())
 
-        rate_dict = {}
-        for label, tensor in rate_tensors.items():
-            rate_dict[label] = tfd.Independent(
+        param_dict = {}
+        for label, tensor in param_tensors.items():
+            param_dict[label] = tfd.Independent(
                 tfd.Normal(
                     loc=jnp.zeros_like(jnp.asarray(tensor, self.dtype)),
-                    scale=rate_scales[label]
+                    scale=param_scales[label]
                     * jnp.ones_like(jnp.asarray(tensor, self.dtype)),
                 ),
                 reinterpreted_batch_ndims=len(tensor.shape),
             )
 
-        # Horseshoe hyperpriors (standard horseshoe, no slab)
-        interaction_prod = np.prod(self.rate_decomposition._interaction_shape)
-        hs_shape = [interaction_prod, 1, self.n_intervals]
+        # Horseshoe hyperpriors
+        interaction_prod = np.prod(self.param_decomposition._interaction_shape)
+        hs_shape = [interaction_prod, 1, 2]
 
-        rate_dict["tau"] = tfd.Independent(
+        param_dict["tau"] = tfd.Independent(
             tfd.HalfNormal(
                 scale=self.shrinkage_scale
                 * jnp.ones(hs_shape, dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=3,
         )
-        rate_dict["lambda_j"] = tfd.Independent(
+        param_dict["lambda_j"] = tfd.Independent(
             tfd.HalfNormal(
                 scale=jnp.ones(hs_shape, dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=3,
         )
 
-        # Initial values
-        rate_tensors["tau"] = (
+        param_tensors["tau"] = (
             self.shrinkage_scale
             * jnp.ones(hs_shape, dtype=self.dtype)
         )
-        rate_tensors["lambda_j"] = jnp.ones(hs_shape, dtype=self.dtype)
+        param_tensors["lambda_j"] = jnp.ones(hs_shape, dtype=self.dtype)
 
-        rate_model = tfd.JointDistributionNamed(rate_dict)
+        param_model = tfd.JointDistributionNamed(param_dict)
 
         bijectors = defaultdict(tfp.bijectors.Identity)
         bijectors["tau"] = tfp.bijectors.Softplus()
         bijectors["lambda_j"] = tfp.bijectors.Softplus()
 
-        rate_surrogate_gen, rate_param_init = (
+        param_surrogate_gen, param_param_init = (
             build_factored_surrogate_posterior_generator(
-                rate_model, bijectors=bijectors
+                param_model, bijectors=bijectors
             )
         )
 
         self.prior_distribution = tfd.JointDistributionNamed(
-            {"rate_model": rate_model}
+            {"param_model": param_model}
         )
 
         self.surrogate_distribution_generator = (
             lambda params: tfd.JointDistributionNamed(
-                {**rate_surrogate_gen(params).model}
+                {**param_surrogate_gen(params).model}
             )
         )
-        self.surrogate_parameter_initializer = lambda: {**rate_param_init()}
+        self.surrogate_parameter_initializer = lambda: {**param_param_init()}
 
         self.params = self.surrogate_parameter_initializer()
         self.var_list = list(self.params.keys())
 
     def predictive_distribution(self, data, **params):
         try:
-            rate_params = params["rate_params"]
+            param_params = params["param_params"]
         except KeyError:
-            rate_params = {k: params[k] for k in self.rate_var_list}
+            param_params = {k: params[k] for k in self.param_var_list}
 
-        rate_indices = self.rate_decomposition.retrieve_indices(data)
+        param_indices = self.param_decomposition.retrieve_indices(data)
 
-        # lookup returns (S, N, 1, n_intervals) with post_fn=exp applied
-        # squeeze the interaction dim to get (S, N, n_intervals)
-        rates = self.rate_decomposition.lookup(
-            rate_indices, tensors=rate_params
+        # lookup returns (S, N, 1, 2) with post_fn=exp applied
+        # squeeze the interaction dim to get (S, N, 2)
+        weibull_params = self.param_decomposition.lookup(
+            param_indices, tensors=param_params
         )
-        if rates.ndim == 4:
-            rates = rates.squeeze(axis=-2)
+        if weibull_params.ndim == 4:
+            weibull_params = weibull_params.squeeze(axis=-2)
+
+        # weibull_params shape: (S, N, 2)
+        concentration = weibull_params[..., 0]  # (S, N)
+        scale = weibull_params[..., 1]  # (S, N)
 
         time = jnp.asarray(jnp.squeeze(data["time"]), self.dtype) / self.time_scale
         event = jnp.asarray(jnp.squeeze(data["event"]), self.dtype)
 
-        log_likelihood = _piecewise_exp_ll(
-            rates, time, event, self.breakpoints, self.dtype
+        log_likelihood = _weibull_ll(
+            concentration, scale, time, event, self.dtype
         )
 
         return {
             "log_likelihood": log_likelihood,
-            "prediction": rates,
+            "prediction": weibull_params,
         }
 
     def log_likelihood(self, data, **params):
@@ -224,19 +223,18 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
             jnp.ones_like(log_likelihood) * min_val,
         )
 
-        rate_prior_params = {
+        param_prior_params = {
             k: jnp.asarray(params[k], self.dtype)
-            for k in self.rate_var_list
+            for k in self.param_var_list
         }
         for k in ["tau", "lambda_j"]:
-            rate_prior_params[k] = jnp.asarray(params[k], self.dtype)
+            param_prior_params[k] = jnp.asarray(params[k], self.dtype)
         prior = self.prior_distribution.log_prob(
-            {"rate_model": rate_prior_params}
+            {"param_model": param_prior_params}
         )
 
-        # Horseshoe effective prior on summed rate decomposition
-        # Standard horseshoe: scale = tau * lambda_j
-        def rate_effective(lambda_j, tau):
+        # Horseshoe effective prior: scale = tau * lambda_j
+        def param_effective(lambda_j, tau):
             return tfd.Independent(
                 tfd.Normal(
                     loc=jnp.zeros_like(lambda_j),
@@ -245,11 +243,11 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
                 reinterpreted_batch_ndims=3,
             )
 
-        rate_coefs = self.rate_decomposition.sum_parts(params)
-        rate_coefs = jnp.asarray(rate_coefs, self.dtype)
-        # Add axis for broadcasting with horseshoe: (S, 12, 4) -> (S, 12, 1, 4)
-        rate_coefs = rate_coefs[..., jnp.newaxis, :]
-        rate_horseshoe = rate_effective(
+        param_coefs = self.param_decomposition.sum_parts(params)
+        param_coefs = jnp.asarray(param_coefs, self.dtype)
+        # Add axis for broadcasting with horseshoe: (S, 12, 2) -> (S, 12, 1, 2)
+        param_coefs = param_coefs[..., jnp.newaxis, :]
+        param_horseshoe = param_effective(
             params["lambda_j"], params["tau"]
         )
         prior_weight = jnp.asarray(prior_weight, self.dtype)
@@ -258,7 +256,7 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
             jnp.sum(log_likelihood, axis=-1)
             + prior_weight * prior
             + prior_weight
-            * jnp.asarray(rate_horseshoe.log_prob(rate_coefs), self.dtype)
+            * jnp.asarray(param_horseshoe.log_prob(param_coefs), self.dtype)
         )
 
         return energy
@@ -293,15 +291,13 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
         )
 
 
-class PiecewiseExponentialLikelihood(AutoDiffLikelihoodMixin):
-    """AIS-compatible likelihood for the piecewise exponential quilt model."""
+class WeibullLikelihood(AutoDiffLikelihoodMixin):
+    """AIS-compatible likelihood for the Weibull quilt model."""
 
-    def __init__(self, breakpoints, rate_decomposition, time_scale=1.0,
-                 dtype=jnp.float64):
+    def __init__(self, param_decomposition, time_scale=1.0, dtype=jnp.float64):
         self.time_scale = float(time_scale)
-        self.breakpoints = jnp.asarray(breakpoints, dtype=dtype) / self.time_scale
-        self.rate_decomposition = rate_decomposition
-        self.rate_var_list = list(rate_decomposition._tensor_parts.keys())
+        self.param_decomposition = param_decomposition
+        self.param_var_list = list(param_decomposition._tensor_parts.keys())
         self.dtype = dtype
 
     def log_likelihood(self, data, params):
@@ -309,56 +305,52 @@ class PiecewiseExponentialLikelihood(AutoDiffLikelihoodMixin):
 
         Returns (S, N) array.
         """
-        rate_params = {k: params[k] for k in self.rate_var_list if k in params}
+        param_params = {k: params[k] for k in self.param_var_list if k in params}
 
-        rate_indices = self.rate_decomposition.retrieve_indices(data)
-        rates = self.rate_decomposition.lookup(
-            rate_indices, tensors=rate_params
+        param_indices = self.param_decomposition.retrieve_indices(data)
+        weibull_params = self.param_decomposition.lookup(
+            param_indices, tensors=param_params
         )
-        if rates.ndim == 4:
-            rates = rates.squeeze(axis=-2)
+        if weibull_params.ndim == 4:
+            weibull_params = weibull_params.squeeze(axis=-2)
+
+        concentration = weibull_params[..., 0]
+        scale = weibull_params[..., 1]
 
         time = jnp.asarray(jnp.squeeze(data["time"]), self.dtype) / self.time_scale
         event = jnp.asarray(jnp.squeeze(data["event"]), self.dtype)
 
-        return _piecewise_exp_ll(rates, time, event, self.breakpoints, self.dtype)
+        return _weibull_ll(concentration, scale, time, event, self.dtype)
 
     def extract_parameters(self, params):
-        """Flatten rate decomposition params to (S, D)."""
-        rate_params = {k: params[k] for k in self.rate_var_list if k in params}
-        # sum_parts returns (S, prod(interaction_shape), n_intervals) before post_fn
-        # We need it without post_fn for parameter space operations
-        summed = self.rate_decomposition.sum_parts(rate_params)
-        # Flatten last dims to get (S, D)
+        """Flatten Weibull decomposition params to (S, D)."""
+        param_params = {k: params[k] for k in self.param_var_list if k in params}
+        summed = self.param_decomposition.sum_parts(param_params)
         batch_shape = summed.shape[:-2]
         flat = jnp.reshape(summed, batch_shape + (-1,))
-        # If no batch dim, add one
         if flat.ndim == 1:
             flat = flat[jnp.newaxis, :]
         return flat
 
     def reconstruct_parameters(self, flat_params, template):
-        """Reconstruct from flat array — store as global component only."""
-        n_intervals = self.rate_decomposition._param_shape[0]
+        """Reconstruct from flat array -- store as global component only."""
+        n_params = self.param_decomposition._param_shape[0]  # 2
         interaction_size = np.prod(
-            self.rate_decomposition._interaction_shape
+            self.param_decomposition._interaction_shape
         )
 
-        # Reshape flat (S, D) -> (S, interaction_size, n_intervals)
         summed = jnp.reshape(
-            flat_params, flat_params.shape[:-1] + (interaction_size, n_intervals)
+            flat_params, flat_params.shape[:-1] + (interaction_size, n_params)
         )
 
-        # Store everything in the global component
-        global_key = self.rate_decomposition._name + "__"
+        global_key = self.param_decomposition._name + "__"
         result = {}
-        for k in self.rate_var_list:
+        for k in self.param_var_list:
             if k == global_key:
                 result[k] = summed
             else:
                 result[k] = jnp.zeros_like(template[k])
 
-        # Copy non-rate params from template
         for k, v in template.items():
             if k not in result:
                 result[k] = v
