@@ -1151,6 +1151,141 @@ class MM2(GlobalTransformation):
         }
 
 
+class MixIS(GlobalTransformation):
+    """Mixture Importance Sampling (MixIS) for LOO-CV.
+
+    Implements the method of Silva & Zanella (2024), "Robust leave-one-out
+    cross-validation for high-dimensional Bayesian models", JASA.
+
+    Instead of transforming posterior samples, MixIS uses a mixture proposal:
+        q_mix(θ) ∝ π(θ|D) · Σ_i 1/ℓ(θ|d_i)
+
+    Samples are drawn from q_mix via importance resampling from the posterior.
+    For each LOO fold i, the IS weight for a mixture sample θ* is:
+        ν_i(θ*) = [1/ℓ(θ*|d_i)] / [Σ_j 1/ℓ(θ*|d_j)]
+
+    This guarantees finite variance of the IS estimator even when standard
+    PSIS-LOO fails (high Pareto-k values).
+    """
+
+    def __init__(self, likelihood_fn: LikelihoodFunction, n_mix_samples: int = None):
+        """Initialize MixIS.
+
+        Args:
+            likelihood_fn: Likelihood function.
+            n_mix_samples: Number of samples to draw from the mixture proposal.
+                If None, uses the same number as the input posterior samples.
+        """
+        super().__init__(likelihood_fn)
+        self.n_mix_samples = n_mix_samples
+
+    def __call__(
+        self,
+        max_iter,
+        params,
+        theta,
+        data,
+        log_ell,
+        log_pi=None,
+        log_ell_original=None,
+        rng_key=None,
+        **kwargs,
+    ):
+        """Apply MixIS.
+
+        Args:
+            params: Original posterior samples, dict with leaves of shape (S, ...).
+            theta: Expanded params (S, 1, ...) — not used directly by MixIS.
+            data: Input data dict.
+            log_ell: Log-likelihoods (S, N) from posterior samples.
+            log_ell_original: Same as log_ell for MixIS (required).
+            rng_key: JAX PRNG key for resampling.
+
+        Returns:
+            Dict with khat, p_loo_psis, ll_loo_psis, etc.
+        """
+        if log_ell_original is None:
+            log_ell_original = log_ell
+        if rng_key is None:
+            rng_key = jax.random.PRNGKey(42)
+
+        # log_ell_original: (S, N)
+        S, N = log_ell_original.shape
+
+        n_mix = self.n_mix_samples if self.n_mix_samples is not None else S
+
+        # Step 1: Compute mixture weights for each posterior sample
+        # log w_mix(θ_s) = log Σ_i exp(-log ℓ(θ_s|d_i))
+        # = log Σ_i 1/ℓ(θ_s|d_i)
+        neg_log_ell = -log_ell_original  # (S, N)
+        log_w_mix = jax.nn.logsumexp(neg_log_ell, axis=1)  # (S,)
+
+        # Step 2: Resample from posterior with mixture weights
+        # Normalize log_w_mix to get sampling probabilities
+        log_probs = log_w_mix - jax.nn.logsumexp(log_w_mix)
+        resample_idx = jax.random.categorical(
+            rng_key, log_probs, shape=(n_mix,)
+        )  # (n_mix,)
+
+        # Resample params
+        resampled_params = jax.tree_util.tree_map(
+            lambda p: p[resample_idx], params
+        )
+
+        # Step 3: Compute log-likelihoods at resampled params
+        log_ell_resampled = self.likelihood_fn.log_likelihood(
+            data, resampled_params
+        )  # (n_mix, N)
+
+        # Resampled mixture weights
+        neg_log_ell_resampled = -log_ell_resampled  # (n_mix, N)
+        log_w_mix_resampled = jax.nn.logsumexp(
+            neg_log_ell_resampled, axis=1, keepdims=True
+        )  # (n_mix, 1)
+
+        # Step 4: For each LOO fold i, compute IS weights
+        # log ν_i(θ*) = -log ℓ(θ*|d_i) - log w_mix(θ*)
+        #             = -log ℓ(θ*|d_i) - log Σ_j 1/ℓ(θ*|d_j)
+        log_nu = neg_log_ell_resampled - log_w_mix_resampled  # (n_mix, N)
+
+        # Step 5: PSIS smoothing and khat computation
+        log_nu_centered = log_nu - jnp.max(log_nu, axis=0, keepdims=True)
+        log_nu_f64 = log_nu_centered.astype(jnp.float64)
+        psis_log_weights, khat = psis.psislw(log_nu_f64)
+
+        # Normalize weights
+        eta_weights = _normalize_weights(log_nu_f64)
+        psis_weights = _normalize_weights(psis_log_weights)
+
+        # Step 6: Compute LOO predictions
+        exp_log_ell_resampled = jnp.exp(log_ell_resampled)
+
+        weight_entropy = _compute_entropy(eta_weights)
+        psis_entropy = _compute_entropy(psis_weights)
+
+        p_loo_eta = _weighted_sum(eta_weights, exp_log_ell_resampled)
+        p_loo_psis = _weighted_sum(psis_weights, exp_log_ell_resampled)
+
+        ll_loo_eta = _weighted_sum(eta_weights, exp_log_ell_resampled)
+        ll_loo_psis = _weighted_sum(psis_weights, exp_log_ell_resampled)
+
+        return {
+            "theta_new": resampled_params,
+            "log_jacobian": jnp.zeros_like(log_ell_resampled),
+            "eta_weights": eta_weights,
+            "psis_weights": psis_weights,
+            "khat": khat,
+            "predictions": log_ell_resampled,
+            "log_ell_new": log_ell_resampled,
+            "weight_entropy": weight_entropy,
+            "psis_entropy": psis_entropy,
+            "p_loo_eta": p_loo_eta,
+            "p_loo_psis": p_loo_psis,
+            "ll_loo_eta": ll_loo_eta,
+            "ll_loo_psis": ll_loo_psis,
+        }
+
+
 class AutoDiffLikelihoodMixin(LikelihoodFunction):
     """Mixin to provide automatic differentiation for LikelihoodFunction.
 
@@ -1315,6 +1450,7 @@ class AdaptiveImportanceSampler:
         'identity',   # No computation - just standard PSIS-LOO
         'mm1',        # Global moment matching (shift only)
         'mm2',        # Global moment matching (shift + scale)
+        'mixis',      # Mixture importance sampling (resampling-based)
         'pmm1',       # Partial moment matching (shift)
         'pmm2',       # Partial moment matching (shift + scale)
         'll',         # Likelihood descent (requires gradient)
@@ -1397,19 +1533,28 @@ class AdaptiveImportanceSampler:
 
         # Initial computations
         log_ell = self.likelihood_fn.log_likelihood(data, params)  # (S, N)
-        
+
         # Use params directly as theta (PyTree)
-        theta = params 
+        theta = params
 
-        # Precompute potentially expensive derivatives once
-        log_ell_prime = self.likelihood_fn.log_likelihood_gradient(
-            data, params
+        # Only compute expensive derivatives if needed by requested transformations
+        needs_derivatives = transformations is None or any(
+            t != 'identity' for t in transformations
         )
 
-        # Hessian diagonal - generally used for Variance transform
-        log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(
-            data, params
-        )
+        if needs_derivatives:
+            # Precompute potentially expensive derivatives once
+            log_ell_prime = self.likelihood_fn.log_likelihood_gradient(
+                data, params
+            )
+
+            # Hessian diagonal - generally used for Variance transform
+            log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(
+                data, params
+            )
+        else:
+            log_ell_prime = None
+            log_ell_doubleprime = None
         
         # Determine log_pi for transformations
         if variational and self.surrogate_log_prob_fn is not None:
@@ -1487,6 +1632,7 @@ class AdaptiveImportanceSampler:
             "pmm2": PMM2(self.likelihood_fn),
             "mm1": MM1(self.likelihood_fn),
             "mm2": MM2(self.likelihood_fn),
+            "mixis": MixIS(self.likelihood_fn),
         }
 
         if f_fn is not None:
