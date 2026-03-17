@@ -713,7 +713,12 @@ class BayesianModel(nnx.Module, ABC):
         # it so that __init__ receives the original scalar type.
         def _maybe_unwrap(v):
             if isinstance(v, list):
-                arr = np.asarray(v)
+                try:
+                    arr = np.asarray(v)
+                except ValueError:
+                    # Inhomogeneous nested lists (e.g. ragged tuples) —
+                    # return as-is; the constructor knows what to do.
+                    return v
                 if arr.ndim == 0 or arr.size == 1:
                     return arr.item()
                 return arr
