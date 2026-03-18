@@ -10,6 +10,7 @@ functions.
 The framework implements several transformation strategies:
 - Likelihood descent: T_ll
 - KL divergence based: T_kl
+- Natural-gradient KL: T_nkl (preconditioned by posterior covariance)
 - Variance based: T_var
 - Identity: T_I
 
@@ -785,6 +786,101 @@ class KLDivergence(SmallStepTransformation):
         return jax.tree_util.tree_map(apply_scale, grad_ll)
 
 
+class NaturalKLDivergence(SmallStepTransformation):
+    """Natural-gradient KL transformation: preconditions KL's Q by the posterior covariance.
+
+    The standard KL transformation pushes samples along grad(1/ell_i), which is
+    steepest descent in Euclidean space.  The natural-gradient variant replaces
+    this with Sigma @ grad(1/ell_i), where Sigma is the posterior covariance
+    (an estimate of J^{-1}).  This accounts for posterior curvature and aligns
+    the step direction with the influence-function optimal shift J^{-1} grad(log ell_i).
+
+    Still a perturbative (small-step) transform: T(theta) = theta + h * Sigma @ Q_kl.
+    """
+
+    def __init__(self, likelihood_fn: LikelihoodFunction, posterior_cov: jnp.ndarray):
+        """
+        Args:
+            likelihood_fn: Likelihood function implementing LikelihoodFunction protocol.
+            posterior_cov: Posterior covariance matrix, shape (K_total, K_total), where
+                K_total is the total number of flattened parameters across all PyTree leaves.
+        """
+        super().__init__(likelihood_fn)
+        self.posterior_cov = posterior_cov  # (K_total, K_total)
+
+    def compute_Q(
+        self,
+        theta: Any,
+        data: Any,
+        params: Dict[str, Any],
+        current_log_ell: jnp.ndarray,
+        log_pi: jnp.ndarray = None,
+        log_ell_original: jnp.ndarray = None,
+        **kwargs,
+    ) -> Any:
+        if log_pi is None:
+            raise ValueError("log_pi required for NaturalKLDivergence")
+
+        # --- Compute standard KL Q vector ---
+        log_pi_norm = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
+
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        grad_leaves, treedef = jax.tree_util.tree_flatten(grad_ll)
+        max_ndim = max(leaf.ndim for leaf in grad_leaves) if grad_leaves else 3
+
+        log_pi_expanded = log_pi_norm[:, jnp.newaxis, jnp.newaxis]
+        while log_pi_expanded.ndim < max_ndim:
+            log_pi_expanded = log_pi_expanded[..., jnp.newaxis]
+
+        log_ell_expanded = current_log_ell[..., jnp.newaxis]
+        scaling = -jnp.exp(log_pi_expanded - log_ell_expanded)  # (S, N, 1)
+
+        def apply_scale(g):
+            return scaling[..., 0] * g if g.ndim == 2 else scaling * g
+
+        Q_kl_tree = jax.tree_util.tree_map(apply_scale, grad_ll)
+
+        # --- Precondition by posterior covariance ---
+        # Flatten Q_kl leaves to (S, N, K_total), multiply by Sigma, unflatten
+        Q_leaves, _ = jax.tree_util.tree_flatten(Q_kl_tree)
+        S, N = current_log_ell.shape
+
+        # Flatten: each leaf (S, N, K_i) or (S, N) -> (S, N, K_i)
+        flat_parts = []
+        split_sizes = []
+        for leaf in Q_leaves:
+            if leaf.ndim == 2:
+                flat_parts.append(leaf[..., jnp.newaxis])  # (S, N, 1)
+                split_sizes.append(1)
+            else:
+                # Flatten trailing dims: (S, N, K1, K2, ...) -> (S, N, prod(K...))
+                trailing = leaf.shape[2:]
+                flat_parts.append(leaf.reshape(S, N, -1))
+                split_sizes.append(int(jnp.prod(jnp.array(trailing))))
+
+        Q_flat = jnp.concatenate(flat_parts, axis=-1)  # (S, N, K_total)
+
+        # Apply covariance: Q_nat = Q_flat @ Sigma^T = Q_flat @ Sigma (symmetric)
+        Q_nat_flat = jnp.einsum('snk,kj->snj', Q_flat, self.posterior_cov)  # (S, N, K_total)
+
+        # Unflatten back to PyTree
+        splits = jnp.cumsum(jnp.array(split_sizes[:-1]))
+        Q_nat_parts = jnp.split(Q_nat_flat, splits, axis=-1)
+
+        result_leaves = []
+        for i, (orig_leaf, nat_part) in enumerate(zip(Q_leaves, Q_nat_parts)):
+            if orig_leaf.ndim == 2:
+                result_leaves.append(nat_part[..., 0])  # (S, N)
+            else:
+                result_leaves.append(nat_part.reshape(orig_leaf.shape))
+
+        return jax.tree_util.tree_unflatten(treedef, result_leaves)
+
+
 class Variance(SmallStepTransformation):
     """Variance-based transformation with optional target function f.
 
@@ -1457,6 +1553,7 @@ class AdaptiveImportanceSampler:
         'pmm2',       # Partial moment matching (shift + scale)
         'll',         # Likelihood descent (requires gradient)
         'kl',         # KL divergence (requires gradient + posterior weights)
+        'nkl',        # Natural-gradient KL (requires gradient + posterior covariance)
         'var',        # Variance-based (requires gradient + Hessian + f_fn)
     ]
 
@@ -1497,7 +1594,7 @@ class AdaptiveImportanceSampler:
                   Signature: f_fn(data, **params) -> (S, N)
             rhos: Optional manual grid of step sizes. If None, generated from n_sweeps.
             transformations: Optional list of transformation names to run.
-                             Available: 'll', 'kl', 'var', 'pmm1', 'pmm2', 'mm1', 'mm2', 'identity'.
+                             Available: 'll', 'kl', 'nkl', 'var', 'pmm1', 'pmm2', 'mm1', 'mm2', 'identity'.
                              If None, uses DEFAULT_TRANSFORMATION_ORDER.
             try_all_transformations: If False (default), skip transformations for data
                              points that have already achieved khat < khat_threshold.
@@ -1727,6 +1824,20 @@ class AdaptiveImportanceSampler:
 
         theta_expanded = jax.tree_util.tree_map(expand_dims, theta)
 
+        # Compute posterior covariance for natural-gradient KL transform.
+        # Flatten theta leaves to (S, K_total), compute sample covariance.
+        _theta_leaves = jax.tree_util.tree_leaves(theta)
+        _theta_flat_parts = []
+        for _leaf in _theta_leaves:
+            if _leaf.ndim == 1:
+                _theta_flat_parts.append(_leaf[:, jnp.newaxis])
+            else:
+                _theta_flat_parts.append(_leaf.reshape(_leaf.shape[0], -1))
+        _theta_flat = jnp.concatenate(_theta_flat_parts, axis=-1)  # (S, K_total)
+        _posterior_cov = jnp.cov(_theta_flat.T)  # (K_total, K_total)
+        # Ensure matrix is well-conditioned with small ridge
+        _posterior_cov = _posterior_cov + 1e-6 * jnp.eye(_posterior_cov.shape[0])
+
         # Define search grid for rho (step size factor)
         if rhos is None:
             rhos = jnp.logspace(-2, 1, 7) * initial_step_size
@@ -1741,6 +1852,8 @@ class AdaptiveImportanceSampler:
             "likelihood_descent": LikelihoodDescent(_lik),
             "kl": KLDivergence(_lik),
             "kl_divergence": KLDivergence(_lik),
+            "nkl": NaturalKLDivergence(_lik, _posterior_cov),
+            "natural_kl": NaturalKLDivergence(_lik, _posterior_cov),
             "pmm1": PMM1(_lik),
             "pmm2": PMM2(_lik),
             "mm1": MM1(_lik),
@@ -1975,6 +2088,7 @@ class AdaptiveImportanceSampler:
                     shorthand_map = {
                         "likelihood_descent": "ll",
                         "kl_divergence": "kl",
+                        "natural_kl": "nkl",
                         "variance_based": "var",
                         "pmm1": "pmm1",
                         "pmm2": "pmm2",
