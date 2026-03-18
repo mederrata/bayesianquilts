@@ -50,7 +50,7 @@ def data_factory():
 print("Loading baseline GRM...")
 model_baseline = GRModel(
     item_keys=item_keys, num_people=SUBSAMPLE_N, dim=1,
-    kappa_scale=0.1, response_cardinality=response_cardinality,
+    response_cardinality=response_cardinality,
     dtype=jnp.float32,
         parameterization="log_scale",
 )
@@ -102,7 +102,7 @@ NUM_EPOCHS = 200
 
 model_imputed = GRModel(
     item_keys=item_keys, num_people=SUBSAMPLE_N, dim=1,
-    kappa_scale=0.1, response_cardinality=response_cardinality,
+    response_cardinality=response_cardinality,
     dtype=jnp.float32,
         parameterization="log_scale", imputation_model=mixed_imputation,
 )

@@ -572,12 +572,7 @@ class GRModel(IRTModel):
     def create_distributions(self, grouping_params=None):
         """Create prior and surrogate distributions."""
         prior_scale = getattr(self, 'discrimination_prior_scale', None)
-        prior_type = getattr(self, 'discrimination_prior', 'horseshoe')
-        expected_sparsity = getattr(self, 'expected_sparsity', None)
-        use_reg_horseshoe = (prior_type == 'regularized_horseshoe'
-                             or (prior_type == 'horseshoe' and expected_sparsity is not None))
-        use_horseshoe = (not use_reg_horseshoe
-                         and prior_scale is None and prior_type == 'horseshoe')
+        prior_type = getattr(self, 'discrimination_prior', 'half_normal')
 
         self.bijectors = {
             k: tfb.Identity() for k in ["abilities", "mu", "difficulties0"]
@@ -587,17 +582,8 @@ class GRModel(IRTModel):
         if self.response_cardinality > 2:
             self.bijectors["ddifficulties"] = tfb.Softplus()
 
-        if use_horseshoe:
-            self.bijectors["eta"] = tfb.Softplus()
-            self.bijectors["kappa"] = tfb.Softplus()
-            self.bijectors["eta_a"] = tfb.Softplus()
-            self.bijectors["kappa_a"] = tfb.Softplus()
-            self.bijectors["xi"] = tfb.Softplus()
-
-        if use_reg_horseshoe:
-            self.bijectors["local_scales"] = tfb.Softplus()
+        if prior_type == 'horseshoe':
             self.bijectors["global_scale"] = tfb.Softplus()
-            self.bijectors["slab_scale2"] = tfb.Softplus()
 
         K = self.response_cardinality
 
@@ -624,108 +610,49 @@ class GRModel(IRTModel):
             ),
         )
 
-        if use_reg_horseshoe:
-            # Regularized horseshoe (Piironen & Vehtari, 2017)
-            # τ₀ = (p₀ / (p - p₀)) / √n
-            p = self.num_items
-            if expected_sparsity is not None:
-                p0 = expected_sparsity * p
-            else:
-                p0 = p / 10.0  # default: 1/10 of items are relevant
-            tau0 = (p0 / (p - p0)) / jnp.sqrt(float(self.num_people))
-
-            slab_scale = getattr(self, 'slab_scale', 2.0)
-            slab_df = getattr(self, 'slab_df', 4)
-
-            # Local scales: λ_i ~ C+(0, 1) per item
-            grm_joint_distribution_dict["local_scales"] = tfd.Independent(
-                tfd.HalfCauchy(
-                    loc=jnp.zeros((1, self.dimensions, self.num_items, 1), dtype=self.dtype),
-                    scale=jnp.ones((1, self.dimensions, self.num_items, 1), dtype=self.dtype),
-                ),
-                reinterpreted_batch_ndims=4,
-            )
-            # Global scale: τ ~ C+(0, τ₀)
+        if prior_type == 'horseshoe':
+            # TFP Horseshoe with local shrinkage marginalized analytically.
+            # Global shrinkage τ ~ HalfCauchy is kept as a separate parameter.
+            # discriminations | τ ~ AbsHorseshoe(scale=τ) for positive,
+            #                      Horseshoe(scale=τ) otherwise.
+            global_scale_prior = float(prior_scale) if prior_scale is not None else 1.0
             grm_joint_distribution_dict["global_scale"] = tfd.Independent(
                 tfd.HalfCauchy(
                     loc=jnp.zeros((1, self.dimensions, 1, 1), dtype=self.dtype),
-                    scale=jnp.asarray(tau0, dtype=self.dtype)
+                    scale=jnp.asarray(global_scale_prior, dtype=self.dtype)
                     * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
                 ),
                 reinterpreted_batch_ndims=4,
             )
-            # Slab: c² ~ InverseGamma(ν/2, ν·s²/2)
-            grm_joint_distribution_dict["slab_scale2"] = tfd.Independent(
-                tfd.InverseGamma(
-                    jnp.asarray(slab_df / 2.0, dtype=self.dtype)
-                    * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
-                    jnp.asarray(slab_df * slab_scale**2 / 2.0, dtype=self.dtype)
-                    * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
-                ),
-                reinterpreted_batch_ndims=4,
-            )
-            # Discriminations: α ~ HalfNormal(τ·λ̃)
-            # where λ̃ = c·λ / √(c² + τ²·λ²)
-            def _reg_horseshoe_disc(local_scales, global_scale, slab_scale2):
-                ls = jnp.asarray(local_scales, dtype=self.dtype)
-                gs = jnp.asarray(global_scale, dtype=self.dtype)
-                c2 = jnp.asarray(slab_scale2, dtype=self.dtype)
-                c = jnp.sqrt(c2)
-                tau2_lambda2 = gs**2 * ls**2
-                lambda_tilde = c * ls / jnp.sqrt(c2 + tau2_lambda2)
-                eff_scale = jnp.maximum(gs * lambda_tilde, jnp.asarray(1e-10, dtype=self.dtype))
-                return tfd.Independent(
-                    tfd.HalfNormal(scale=eff_scale),
-                    reinterpreted_batch_ndims=4,
-                )
-            grm_joint_distribution_dict["discriminations"] = _reg_horseshoe_disc
-
-        elif use_horseshoe:
-            grm_joint_distribution_dict["discriminations"] = (
-                (
-                    lambda eta, kappa: tfd.Independent(
-                        AbsHorseshoe(scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype)), reinterpreted_batch_ndims=4
-                    )
-                )
-                if self.positive_discriminations
-                else (
-                    lambda eta, xi, kappa: tfd.Independent(
-                        tfd.Horseshoe(
-                            loc=jnp.zeros(
+            if self.positive_discriminations:
+                grm_joint_distribution_dict["discriminations"] = (
+                    lambda global_scale: tfd.Independent(
+                        AbsHorseshoe(
+                            scale=jnp.asarray(global_scale, dtype=self.dtype)
+                            * jnp.ones(
                                 (1, self.dimensions, self.num_items, 1),
                                 dtype=self.dtype,
                             ),
-                            scale=jnp.asarray(eta, dtype=self.dtype) * jnp.asarray(kappa, dtype=self.dtype),
                         ),
                         reinterpreted_batch_ndims=4,
                     )
                 )
-            )
-            grm_joint_distribution_dict["eta"] = tfd.Independent(
-                tfd.HalfNormal(
-                    scale=self.eta_scale
-                    * jnp.ones((1, 1, self.num_items, 1), dtype=self.dtype),
-                ),
-                reinterpreted_batch_ndims=4,
-            )
-            grm_joint_distribution_dict["kappa"] = lambda kappa_a: tfd.Independent(
-                SqrtInverseGamma(
-                    0.5 * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
-                    jnp.asarray(1.0, dtype=self.dtype) / jnp.asarray(kappa_a, dtype=self.dtype),
-                ),
-                reinterpreted_batch_ndims=4,
-            )
-            grm_joint_distribution_dict["kappa_a"] = tfd.Independent(
-                tfd.InverseGamma(
-                    0.5 * jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype),
-                    jnp.ones((1, self.dimensions, 1, 1), dtype=self.dtype)
-                    / self.kappa_scale**2,
-                ),
-                reinterpreted_batch_ndims=4,
-            )
+            else:
+                grm_joint_distribution_dict["discriminations"] = (
+                    lambda global_scale: tfd.Independent(
+                        tfd.Horseshoe(
+                            scale=jnp.asarray(global_scale, dtype=self.dtype)
+                            * jnp.ones(
+                                (1, self.dimensions, self.num_items, 1),
+                                dtype=self.dtype,
+                            ),
+                        ),
+                        reinterpreted_batch_ndims=4,
+                    )
+                )
         else:
             # Simple prior on discriminations — no hyperpriors
-            _scale = float(prior_scale) if prior_scale is not None else 1.0
+            _scale = float(prior_scale) if prior_scale is not None else 2.0
             disc_scale = jnp.asarray(
                 _scale * jnp.ones(
                     (1, self.dimensions, self.num_items, 1), dtype=self.dtype),
