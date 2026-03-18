@@ -10,12 +10,15 @@ functions.
 The framework implements several transformation strategies:
 - Likelihood descent: T_ll
 - KL divergence based: T_kl
+- Natural-gradient KL: T_nkl (preconditioned by posterior covariance)
 - Variance based: T_var
 - Identity: T_I
 
 Each transformation can be applied to perform importance sampling for
 leave-one-out cross-validation predictions.
 """
+
+import time
 
 import jax
 import jax.numpy as jnp
@@ -783,6 +786,101 @@ class KLDivergence(SmallStepTransformation):
         return jax.tree_util.tree_map(apply_scale, grad_ll)
 
 
+class NaturalKLDivergence(SmallStepTransformation):
+    """Natural-gradient KL transformation: preconditions KL's Q by the posterior covariance.
+
+    The standard KL transformation pushes samples along grad(1/ell_i), which is
+    steepest descent in Euclidean space.  The natural-gradient variant replaces
+    this with Sigma @ grad(1/ell_i), where Sigma is the posterior covariance
+    (an estimate of J^{-1}).  This accounts for posterior curvature and aligns
+    the step direction with the influence-function optimal shift J^{-1} grad(log ell_i).
+
+    Still a perturbative (small-step) transform: T(theta) = theta + h * Sigma @ Q_kl.
+    """
+
+    def __init__(self, likelihood_fn: LikelihoodFunction, posterior_cov: jnp.ndarray):
+        """
+        Args:
+            likelihood_fn: Likelihood function implementing LikelihoodFunction protocol.
+            posterior_cov: Posterior covariance matrix, shape (K_total, K_total), where
+                K_total is the total number of flattened parameters across all PyTree leaves.
+        """
+        super().__init__(likelihood_fn)
+        self.posterior_cov = posterior_cov  # (K_total, K_total)
+
+    def compute_Q(
+        self,
+        theta: Any,
+        data: Any,
+        params: Dict[str, Any],
+        current_log_ell: jnp.ndarray,
+        log_pi: jnp.ndarray = None,
+        log_ell_original: jnp.ndarray = None,
+        **kwargs,
+    ) -> Any:
+        if log_pi is None:
+            raise ValueError("log_pi required for NaturalKLDivergence")
+
+        # --- Compute standard KL Q vector ---
+        log_pi_norm = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
+
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        grad_leaves, treedef = jax.tree_util.tree_flatten(grad_ll)
+        max_ndim = max(leaf.ndim for leaf in grad_leaves) if grad_leaves else 3
+
+        log_pi_expanded = log_pi_norm[:, jnp.newaxis, jnp.newaxis]
+        while log_pi_expanded.ndim < max_ndim:
+            log_pi_expanded = log_pi_expanded[..., jnp.newaxis]
+
+        log_ell_expanded = current_log_ell[..., jnp.newaxis]
+        scaling = -jnp.exp(log_pi_expanded - log_ell_expanded)  # (S, N, 1)
+
+        def apply_scale(g):
+            return scaling[..., 0] * g if g.ndim == 2 else scaling * g
+
+        Q_kl_tree = jax.tree_util.tree_map(apply_scale, grad_ll)
+
+        # --- Precondition by posterior covariance ---
+        # Flatten Q_kl leaves to (S, N, K_total), multiply by Sigma, unflatten
+        Q_leaves, _ = jax.tree_util.tree_flatten(Q_kl_tree)
+        S, N = current_log_ell.shape
+
+        # Flatten: each leaf (S, N, K_i) or (S, N) -> (S, N, K_i)
+        flat_parts = []
+        split_sizes = []
+        for leaf in Q_leaves:
+            if leaf.ndim == 2:
+                flat_parts.append(leaf[..., jnp.newaxis])  # (S, N, 1)
+                split_sizes.append(1)
+            else:
+                # Flatten trailing dims: (S, N, K1, K2, ...) -> (S, N, prod(K...))
+                trailing = leaf.shape[2:]
+                flat_parts.append(leaf.reshape(S, N, -1))
+                split_sizes.append(int(jnp.prod(jnp.array(trailing))))
+
+        Q_flat = jnp.concatenate(flat_parts, axis=-1)  # (S, N, K_total)
+
+        # Apply covariance: Q_nat = Q_flat @ Sigma^T = Q_flat @ Sigma (symmetric)
+        Q_nat_flat = jnp.einsum('snk,kj->snj', Q_flat, self.posterior_cov)  # (S, N, K_total)
+
+        # Unflatten back to PyTree
+        splits = jnp.cumsum(jnp.array(split_sizes[:-1]))
+        Q_nat_parts = jnp.split(Q_nat_flat, splits, axis=-1)
+
+        result_leaves = []
+        for i, (orig_leaf, nat_part) in enumerate(zip(Q_leaves, Q_nat_parts)):
+            if orig_leaf.ndim == 2:
+                result_leaves.append(nat_part[..., 0])  # (S, N)
+            else:
+                result_leaves.append(nat_part.reshape(orig_leaf.shape))
+
+        return jax.tree_util.tree_unflatten(treedef, result_leaves)
+
+
 class Variance(SmallStepTransformation):
     """Variance-based transformation with optional target function f.
 
@@ -1151,6 +1249,141 @@ class MM2(GlobalTransformation):
         }
 
 
+class MixIS(GlobalTransformation):
+    """Mixture Importance Sampling (MixIS) for LOO-CV.
+
+    Implements the method of Silva & Zanella (2024), "Robust leave-one-out
+    cross-validation for high-dimensional Bayesian models", JASA.
+
+    Instead of transforming posterior samples, MixIS uses a mixture proposal:
+        q_mix(θ) ∝ π(θ|D) · Σ_i 1/ℓ(θ|d_i)
+
+    Samples are drawn from q_mix via importance resampling from the posterior.
+    For each LOO fold i, the IS weight for a mixture sample θ* is:
+        ν_i(θ*) = [1/ℓ(θ*|d_i)] / [Σ_j 1/ℓ(θ*|d_j)]
+
+    This guarantees finite variance of the IS estimator even when standard
+    PSIS-LOO fails (high Pareto-k values).
+    """
+
+    def __init__(self, likelihood_fn: LikelihoodFunction, n_mix_samples: int = None):
+        """Initialize MixIS.
+
+        Args:
+            likelihood_fn: Likelihood function.
+            n_mix_samples: Number of samples to draw from the mixture proposal.
+                If None, uses the same number as the input posterior samples.
+        """
+        super().__init__(likelihood_fn)
+        self.n_mix_samples = n_mix_samples
+
+    def __call__(
+        self,
+        max_iter,
+        params,
+        theta,
+        data,
+        log_ell,
+        log_pi=None,
+        log_ell_original=None,
+        rng_key=None,
+        **kwargs,
+    ):
+        """Apply MixIS.
+
+        Args:
+            params: Original posterior samples, dict with leaves of shape (S, ...).
+            theta: Expanded params (S, 1, ...) — not used directly by MixIS.
+            data: Input data dict.
+            log_ell: Log-likelihoods (S, N) from posterior samples.
+            log_ell_original: Same as log_ell for MixIS (required).
+            rng_key: JAX PRNG key for resampling.
+
+        Returns:
+            Dict with khat, p_loo_psis, ll_loo_psis, etc.
+        """
+        if log_ell_original is None:
+            log_ell_original = log_ell
+        if rng_key is None:
+            rng_key = jax.random.PRNGKey(42)
+
+        # log_ell_original: (S, N)
+        S, N = log_ell_original.shape
+
+        n_mix = self.n_mix_samples if self.n_mix_samples is not None else S
+
+        # Step 1: Compute mixture weights for each posterior sample
+        # log w_mix(θ_s) = log Σ_i exp(-log ℓ(θ_s|d_i))
+        # = log Σ_i 1/ℓ(θ_s|d_i)
+        neg_log_ell = -log_ell_original  # (S, N)
+        log_w_mix = jax.nn.logsumexp(neg_log_ell, axis=1)  # (S,)
+
+        # Step 2: Resample from posterior with mixture weights
+        # Normalize log_w_mix to get sampling probabilities
+        log_probs = log_w_mix - jax.nn.logsumexp(log_w_mix)
+        resample_idx = jax.random.categorical(
+            rng_key, log_probs, shape=(n_mix,)
+        )  # (n_mix,)
+
+        # Resample params
+        resampled_params = jax.tree_util.tree_map(
+            lambda p: p[resample_idx], params
+        )
+
+        # Step 3: Compute log-likelihoods at resampled params
+        log_ell_resampled = self.likelihood_fn.log_likelihood(
+            data, resampled_params
+        )  # (n_mix, N)
+
+        # Resampled mixture weights
+        neg_log_ell_resampled = -log_ell_resampled  # (n_mix, N)
+        log_w_mix_resampled = jax.nn.logsumexp(
+            neg_log_ell_resampled, axis=1, keepdims=True
+        )  # (n_mix, 1)
+
+        # Step 4: For each LOO fold i, compute IS weights
+        # log ν_i(θ*) = -log ℓ(θ*|d_i) - log w_mix(θ*)
+        #             = -log ℓ(θ*|d_i) - log Σ_j 1/ℓ(θ*|d_j)
+        log_nu = neg_log_ell_resampled - log_w_mix_resampled  # (n_mix, N)
+
+        # Step 5: PSIS smoothing and khat computation
+        log_nu_centered = log_nu - jnp.max(log_nu, axis=0, keepdims=True)
+        log_nu_f64 = log_nu_centered.astype(jnp.float64)
+        psis_log_weights, khat = psis.psislw(log_nu_f64)
+
+        # Normalize weights
+        eta_weights = _normalize_weights(log_nu_f64)
+        psis_weights = _normalize_weights(psis_log_weights)
+
+        # Step 6: Compute LOO predictions
+        exp_log_ell_resampled = jnp.exp(log_ell_resampled)
+
+        weight_entropy = _compute_entropy(eta_weights)
+        psis_entropy = _compute_entropy(psis_weights)
+
+        p_loo_eta = _weighted_sum(eta_weights, exp_log_ell_resampled)
+        p_loo_psis = _weighted_sum(psis_weights, exp_log_ell_resampled)
+
+        ll_loo_eta = _weighted_sum(eta_weights, exp_log_ell_resampled)
+        ll_loo_psis = _weighted_sum(psis_weights, exp_log_ell_resampled)
+
+        return {
+            "theta_new": resampled_params,
+            "log_jacobian": jnp.zeros_like(log_ell_resampled),
+            "eta_weights": eta_weights,
+            "psis_weights": psis_weights,
+            "khat": khat,
+            "predictions": log_ell_resampled,
+            "log_ell_new": log_ell_resampled,
+            "weight_entropy": weight_entropy,
+            "psis_entropy": psis_entropy,
+            "p_loo_eta": p_loo_eta,
+            "p_loo_psis": p_loo_psis,
+            "ll_loo_eta": ll_loo_eta,
+            "ll_loo_psis": ll_loo_psis,
+        }
+
+
 class AutoDiffLikelihoodMixin(LikelihoodFunction):
     """Mixin to provide automatic differentiation for LikelihoodFunction.
 
@@ -1315,10 +1548,12 @@ class AdaptiveImportanceSampler:
         'identity',   # No computation - just standard PSIS-LOO
         'mm1',        # Global moment matching (shift only)
         'mm2',        # Global moment matching (shift + scale)
+        'mixis',      # Mixture importance sampling (resampling-based)
         'pmm1',       # Partial moment matching (shift)
         'pmm2',       # Partial moment matching (shift + scale)
         'll',         # Likelihood descent (requires gradient)
         'kl',         # KL divergence (requires gradient + posterior weights)
+        'nkl',        # Natural-gradient KL (requires gradient + posterior covariance)
         'var',        # Variance-based (requires gradient + Hessian + f_fn)
     ]
 
@@ -1338,6 +1573,7 @@ class AdaptiveImportanceSampler:
         khat_threshold: float = 0.7,
         n_loo_samples: Optional[int] = None,
         rng_key: Optional[jnp.ndarray] = None,
+        warmup: bool = False,
     ):
         """Perform Adaptive Importance Sampling for Leave-One-Out CV.
 
@@ -1358,7 +1594,7 @@ class AdaptiveImportanceSampler:
                   Signature: f_fn(data, **params) -> (S, N)
             rhos: Optional manual grid of step sizes. If None, generated from n_sweeps.
             transformations: Optional list of transformation names to run.
-                             Available: 'll', 'kl', 'var', 'pmm1', 'pmm2', 'mm1', 'mm2', 'identity'.
+                             Available: 'll', 'kl', 'nkl', 'var', 'pmm1', 'pmm2', 'mm1', 'mm2', 'identity'.
                              If None, uses DEFAULT_TRANSFORMATION_ORDER.
             try_all_transformations: If False (default), skip transformations for data
                              points that have already achieved khat < khat_threshold.
@@ -1395,26 +1631,73 @@ class AdaptiveImportanceSampler:
         if n_samples == 0:
             raise ValueError("Parameter arrays must have at least 1 sample")
 
+        # Flatten multi-dimensional parameter leaves to 2D (S, K_flat).
+        # Transforms assume (S, K) params / (S, N, K) gradients / (S, 1, K) theta.
+        # Neural networks have leaves like w_0: (S, D_in, D_out) which break
+        # broadcasting assumptions in PMM1/PMM2/MM1/MM2/KL/LL transforms.
+        #
+        # We store original shapes to unflatten before calling the model.
+        _original_shapes = {
+            k: v.shape[1:] for k, v in params.items()
+            if isinstance(v, jnp.ndarray) and v.ndim > 2
+        }
+
+        def _flatten_trailing(x):
+            """Reshape (S, D1, D2, ...) -> (S, K) where K = prod(D1, D2, ...)."""
+            if x.ndim <= 2:
+                return x
+            return x.reshape(x.shape[0], -1)
+
+        def _flatten_trailing_grad(x):
+            """Reshape (S, N, D1, D2, ...) -> (S, N, K)."""
+            if x.ndim <= 3:
+                return x
+            return x.reshape(x.shape[0], x.shape[1], -1)
+
+        def _unflatten_params(flat_params):
+            """Restore original multi-dim shapes for model compatibility."""
+            if not _original_shapes:
+                return flat_params
+            result = {}
+            for k, v in flat_params.items():
+                if k in _original_shapes and isinstance(v, jnp.ndarray):
+                    orig_shape = _original_shapes[k]
+                    # v could be (S, K), (S, 1, K), or (S, N, K)
+                    batch_dims = v.shape[:-1]
+                    result[k] = v.reshape(batch_dims + orig_shape)
+                else:
+                    result[k] = v
+            return result
+
         # Initial computations
         log_ell = self.likelihood_fn.log_likelihood(data, params)  # (S, N)
-        
+
         # Use params directly as theta (PyTree)
-        theta = params 
+        theta = params
 
-        # Precompute potentially expensive derivatives once
-        log_ell_prime = self.likelihood_fn.log_likelihood_gradient(
-            data, params
+        # Only compute expensive derivatives if needed by requested transformations
+        needs_derivatives = transformations is None or any(
+            t != 'identity' for t in transformations
         )
 
-        # Hessian diagonal - generally used for Variance transform
-        log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(
-            data, params
-        )
-        
+        if needs_derivatives:
+            # Precompute potentially expensive derivatives once
+            log_ell_prime = self.likelihood_fn.log_likelihood_gradient(
+                data, params
+            )
+
+            # Hessian diagonal - generally used for Variance transform
+            log_ell_doubleprime = self.likelihood_fn.log_likelihood_hessian_diag(
+                data, params
+            )
+        else:
+            log_ell_prime = None
+            log_ell_doubleprime = None
+
         # Determine log_pi for transformations
         if variational and self.surrogate_log_prob_fn is not None:
             log_pi = self.surrogate_log_prob_fn(params)
-            
+
             # gradient of surrogate log prob w.r.t params
             # jax.grad returns structure matching params
             grad_log_pi = jax.grad(lambda p: jnp.sum(self.surrogate_log_prob_fn(p)))(
@@ -1439,37 +1722,121 @@ class AdaptiveImportanceSampler:
 
         # log_pi should be (S,) at this point
 
-        # Standard deviation of parameters (for standardization)
-        # theta is a PyTree (dict). We want std per leaf.
-        # theta shape (S, ...). std over S (axis 0).
-        
+        # Flatten all multi-dim parameter/gradient leaves for transform compatibility
+        params_flat = jax.tree_util.tree_map(_flatten_trailing, params)
+        theta = jax.tree_util.tree_map(_flatten_trailing, theta)
+        if grad_log_pi is not None:
+            grad_log_pi = jax.tree_util.tree_map(_flatten_trailing, grad_log_pi)
+        if needs_derivatives and log_ell_prime is not None:
+            log_ell_prime = jax.tree_util.tree_map(
+                _flatten_trailing_grad, log_ell_prime
+            )
+        if needs_derivatives and log_ell_doubleprime is not None:
+            log_ell_doubleprime = jax.tree_util.tree_map(
+                _flatten_trailing_grad, log_ell_doubleprime
+            )
+
+        # Wrap likelihood_fn to auto-unflatten params before model calls.
+        # Transforms operate in flat space but the model needs original shapes.
+        if _original_shapes:
+            _real_likelihood_fn = self.likelihood_fn
+
+            class _FlatLikelihoodWrapper:
+                """Thin wrapper that unflattens params before forwarding to model."""
+                def __init__(self, real_fn, unflatten_fn):
+                    self._real = real_fn
+                    self._unflatten = unflatten_fn
+
+                def log_likelihood(self, data, params):
+                    # Check flat params: (S, K) = standard, (S, N, K) = per-obs
+                    first_flat = jax.tree_util.tree_leaves(params)[0]
+                    has_per_obs = first_flat.ndim >= 3  # (S, N, K_flat)
+                    unflat = self._unflatten(params)
+                    if has_per_obs:
+                        # Per-observation params: (S, N, D1, D2, ...)
+                        # Vmap over N dimension
+                        def _eval_one(params_i):
+                            return self._real.log_likelihood(data, params_i)
+                        # Transpose: (S, N, ...) -> (N, S, ...)
+                        params_t = jax.tree_util.tree_map(
+                            lambda p: jnp.moveaxis(p, 1, 0), unflat
+                        )
+                        result = jax.vmap(_eval_one)(params_t)  # (N, S, N_data)
+                        # We want (S, N_data) for each observation i,
+                        # where result[i, s, j] = log ell(d_j | theta_new[s, i])
+                        # For the LOO weight, we need log ell(d_i | theta_new[s, i])
+                        # That's the diagonal: result[i, s, i]
+                        # Return shape (S, N) extracting diagonal over (N, N_data)
+                        S, N_data = result.shape[1], result.shape[2]
+                        N = result.shape[0]
+                        if N == N_data:
+                            # Extract diagonal: log_ell_new[s, i] = result[i, s, i]
+                            diag = jnp.diagonal(result, axis1=0, axis2=2)  # (S, N)
+                            return diag
+                        else:
+                            # N != N_data: return full (S, N, N_data) transposed
+                            return jnp.moveaxis(result, 0, 1)  # (S, N, N_data)
+                    return self._real.log_likelihood(data, unflat)
+
+                def total_log_likelihood(self, data, params):
+                    """Override to ensure unflattening through the vmap path."""
+                    leaves = jax.tree_util.tree_leaves(params)
+                    if not leaves:
+                        return jnp.zeros(())
+                    first = leaves[0]
+                    if first.ndim <= 2:
+                        return jnp.sum(
+                            self.log_likelihood(data, params),
+                            axis=-1, keepdims=True
+                        )
+                    # Per-obs params (S, N, K...) - vmap over N
+                    params_t = jax.tree_util.tree_map(
+                        lambda p: jnp.moveaxis(p, 1, 0), params
+                    )
+                    def eval_one(pi):
+                        ll = self.log_likelihood(data, pi)
+                        return jnp.sum(ll, axis=-1)
+                    return jax.vmap(eval_one)(params_t).T
+
+                def __getattr__(self, name):
+                    return getattr(self._real, name)
+
+            _wrapped_likelihood = _FlatLikelihoodWrapper(
+                _real_likelihood_fn, _unflatten_params
+            )
+        else:
+            _wrapped_likelihood = self.likelihood_fn
+
         def compute_std(x):
             s = jnp.std(x, axis=0) # (...,)
             return jnp.where(s < 1e-6, 1.0, s)
 
         theta_std = jax.tree_util.tree_map(compute_std, theta)
 
-        # theta_expanded
-        # We need to broadcast theta (S, ...) to (S, 1, ...) for "N" dimension
-        # Transformations expect theta as (S, N, ...) sometimes?
-        # SmallStepTransformation normalizes Q (S, N, K) with theta_std (K).
-        # And updates theta (S, 1, K) + h(1, N, 1)*Q(S, N, K) -> theta_new (S, N, K)
-        
-        # So yes, we should expand theta to have the N dimension.
-        # theta leaves are (S, K_i...) or (S,).
-        # We want (S, 1, K_i...)
-        
+        # Expand theta (S, K) to (S, 1, K) for the N dimension.
+        # Transformations expect theta as (S, 1, K).
         def expand_dims(x):
-            # x is (S, ...)
-            # We want (S, 1, K...). 
-            # If x is (S,) -> (S, 1, 1)
-            # If x is (S, D) -> (S, 1, D)
+            # x is (S, K) or (S,)
             if x.ndim == 1:
                 return x[:, jnp.newaxis, jnp.newaxis]
             else:
                 return jnp.expand_dims(x, axis=1)
-            
+
         theta_expanded = jax.tree_util.tree_map(expand_dims, theta)
+
+        # Compute posterior covariance for natural-gradient KL transform.
+        # Flatten theta leaves to (S, K_total), compute sample covariance.
+        _theta_leaves = jax.tree_util.tree_leaves(theta)
+        _theta_flat_parts = []
+        for _leaf in _theta_leaves:
+            if _leaf.ndim == 1:
+                _theta_flat_parts.append(_leaf[:, jnp.newaxis])
+            else:
+                _theta_flat_parts.append(_leaf.reshape(_leaf.shape[0], -1))
+        _theta_flat = jnp.concatenate(_theta_flat_parts, axis=-1)  # (S, K_total)
+        _posterior_cov = jnp.cov(_theta_flat.T)  # (K_total, K_total)
+        # Ensure matrix is well-conditioned with small ridge
+        _posterior_cov = _posterior_cov + 1e-6 * jnp.eye(_posterior_cov.shape[0])
 
         # Define search grid for rho (step size factor)
         if rhos is None:
@@ -1477,21 +1844,26 @@ class AdaptiveImportanceSampler:
         elif not isinstance(rhos, jnp.ndarray):
             rhos = jnp.array(rhos)
 
-        # Instantiate transformations
+        # Instantiate transformations using the (possibly wrapped) likelihood
+        # that auto-unflattens params before calling the model.
+        _lik = _wrapped_likelihood
         all_transforms = {
-            "ll": LikelihoodDescent(self.likelihood_fn),
-            "likelihood_descent": LikelihoodDescent(self.likelihood_fn),
-            "kl": KLDivergence(self.likelihood_fn),
-            "kl_divergence": KLDivergence(self.likelihood_fn),
-            "pmm1": PMM1(self.likelihood_fn),
-            "pmm2": PMM2(self.likelihood_fn),
-            "mm1": MM1(self.likelihood_fn),
-            "mm2": MM2(self.likelihood_fn),
+            "ll": LikelihoodDescent(_lik),
+            "likelihood_descent": LikelihoodDescent(_lik),
+            "kl": KLDivergence(_lik),
+            "kl_divergence": KLDivergence(_lik),
+            "nkl": NaturalKLDivergence(_lik, _posterior_cov),
+            "natural_kl": NaturalKLDivergence(_lik, _posterior_cov),
+            "pmm1": PMM1(_lik),
+            "pmm2": PMM2(_lik),
+            "mm1": MM1(_lik),
+            "mm2": MM2(_lik),
+            "mixis": MixIS(_lik),
         }
 
         if f_fn is not None:
-             all_transforms["var"] = Variance(self.likelihood_fn, f_fn=f_fn)
-             all_transforms["variance_based"] = Variance(self.likelihood_fn, f_fn=f_fn)
+             all_transforms["var"] = Variance(_lik, f_fn=f_fn)
+             all_transforms["variance_based"] = Variance(_lik, f_fn=f_fn)
 
         # Determine transformation order
         if transformations is not None:
@@ -1515,6 +1887,53 @@ class AdaptiveImportanceSampler:
                 transforms[name] = all_transforms[name]
         # 'identity' is handled separately below
 
+        # JIT warmup: run each transform once on a small subset to trigger compilation
+        if warmup:
+            n_warmup = min(2, log_ell.shape[1])
+            warmup_data = jax.tree_util.tree_map(
+                lambda x: x[:n_warmup] if x.ndim >= 1 and x.shape[0] == log_ell.shape[1] else x,
+                data
+            )
+            warmup_log_ell = log_ell[:, :n_warmup]
+            warmup_theta = jax.tree_util.tree_map(
+                lambda x: x[:, :n_warmup] if x.ndim >= 2 else x,
+                theta_expanded
+            )
+            warmup_kwargs = {
+                "log_ell": warmup_log_ell,
+                "log_ell_prime": (
+                    jax.tree_util.tree_map(
+                        lambda x: x[:, :n_warmup] if x.ndim >= 2 and x.shape[1] == log_ell.shape[1] else x,
+                        log_ell_prime
+                    ) if log_ell_prime is not None else None
+                ),
+                "log_ell_doubleprime": (
+                    jax.tree_util.tree_map(
+                        lambda x: x[:, :n_warmup] if x.ndim >= 2 and x.shape[1] == log_ell.shape[1] else x,
+                        log_ell_doubleprime
+                    ) if log_ell_doubleprime is not None else None
+                ),
+                "log_pi": log_pi,
+                "grad_log_pi": grad_log_pi if 'grad_log_pi' in dir() else None,
+                "log_ell_original": warmup_log_ell,
+                "theta_std": theta_std,
+                "variational": variational,
+                "surrogate_log_prob_fn": self.surrogate_log_prob_fn,
+                "n_loo_samples": n_loo_samples,
+                "rng_key": rng_key if rng_key is not None else jax.random.PRNGKey(0),
+            }
+            for wname, wtransform in transforms.items():
+                try:
+                    _wres = wtransform(
+                        max_iter=1, params=params_flat, theta=warmup_theta,
+                        data=warmup_data, hbar=1.0, **warmup_kwargs,
+                    )
+                    jax.block_until_ready(_wres)
+                except Exception:
+                    pass
+            if verbose:
+                print("JIT warmup complete.")
+
         # Initialize best results
         n_data = log_ell.shape[1]
         best_metrics = {
@@ -1530,9 +1949,11 @@ class AdaptiveImportanceSampler:
         adapted_mask = jnp.zeros(n_data, dtype=bool)
 
         results = {}
+        timings = {}
 
         # Handle 'identity' sweep explicitly if in transform_order
         if "identity" in transform_order:
+            _t0 = time.perf_counter()
             if verbose:
                 print("Running identity...")
             # Compute identity importance weights (standard PSIS-LOO)
@@ -1581,6 +2002,8 @@ class AdaptiveImportanceSampler:
                 "ll_loo_psis": ll_loo_psis,
             }
             results["identity"] = res_identity
+            jax.block_until_ready(res_identity)
+            timings["identity"] = time.perf_counter() - _t0
 
             # Update best metrics
             idx = khat < best_metrics["khat"]
@@ -1606,6 +2029,12 @@ class AdaptiveImportanceSampler:
                     n_adapted = jnp.sum(adapted_mask).item()
                     print(f"  {n_adapted}/{n_data} points adapted (khat < {khat_threshold})")
 
+        # Wrap surrogate_log_prob_fn for flat param compatibility
+        _surrogate_fn = self.surrogate_log_prob_fn
+        if _original_shapes and _surrogate_fn is not None:
+            _real_surrogate = _surrogate_fn
+            _surrogate_fn = lambda p: _real_surrogate(_unflatten_params(p))
+
         # Common kwargs for all transforms
         common_kwargs = {
             "log_ell": log_ell,
@@ -1616,13 +2045,14 @@ class AdaptiveImportanceSampler:
             "log_ell_original": log_ell,
             "theta_std": theta_std,
             "variational": variational,
-            "surrogate_log_prob_fn": self.surrogate_log_prob_fn,
+            "surrogate_log_prob_fn": _surrogate_fn,
             "n_loo_samples": n_loo_samples,
             "rng_key": rng_key if rng_key is not None else jax.random.PRNGKey(0),
         }
 
         # Run sweeps in order of computational complexity
         for name, transform in transforms.items():
+            _t0_transform = time.perf_counter()
             # Early exit if all points are adapted and we're not forcing all transformations
             if not try_all_transformations and jnp.all(adapted_mask):
                 if verbose:
@@ -1648,7 +2078,7 @@ class AdaptiveImportanceSampler:
                 try:
                     res = transform(
                         max_iter=max_iter,
-                        params=params,
+                        params=params_flat,
                         theta=theta_expanded,
                         data=data,
                         hbar=rho,
@@ -1658,6 +2088,7 @@ class AdaptiveImportanceSampler:
                     shorthand_map = {
                         "likelihood_descent": "ll",
                         "kl_divergence": "kl",
+                        "natural_kl": "nkl",
                         "variance_based": "var",
                         "pmm1": "pmm1",
                         "pmm2": "pmm2",
@@ -1706,7 +2137,12 @@ class AdaptiveImportanceSampler:
                         print(f"Failed {name} rho={rho}: {e}")
                     continue
 
+            # Block until all JAX computations for this transform are done
+            jax.block_until_ready(best_metrics)
+            timings[name] = time.perf_counter() - _t0_transform
+
         results["best"] = best_metrics
+        results["timings"] = timings
         return results
 
 

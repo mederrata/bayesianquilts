@@ -62,6 +62,8 @@ def test_logistic_regression_ais():
 
     print(f"Transformations tested: {list(results.keys())}")
     for transform_name, result in results.items():
+        if transform_name == 'timings':
+            continue
         print(f"\n{transform_name.upper()} Transformation:")
         print(f"  - k-hat range: [{jnp.min(result['khat']):.3f}, {jnp.max(result['khat']):.3f}]")
         if 'weight_entropy' in result:
@@ -113,6 +115,8 @@ def test_poisson_regression_ais():
 
     print(f"Transformations tested: {list(results.keys())}")
     for transform_name, result in results.items():
+        if transform_name == 'timings':
+            continue
         print(f"\n{transform_name.upper()} Transformation:")
         print(f"  - k-hat range: [{jnp.min(result['khat']):.3f}, {jnp.max(result['khat']):.3f}]")
         print(f"  - Mean LL LOO (eta): {jnp.mean(result['ll_loo_eta']):.3f}")
@@ -162,6 +166,8 @@ def test_linear_regression_ais():
 
     print(f"Transformations tested: {list(results.keys())}")
     for transform_name, result in results.items():
+        if transform_name == 'timings':
+            continue
         print(f"\n{transform_name.upper()} Transformation:")
         print(f"  - k-hat range: [{jnp.min(result['khat']):.3f}, {jnp.max(result['khat']):.3f}]")
         if 'psis_entropy' in result:
@@ -239,6 +245,8 @@ def test_with_priors():
     for mode, results in [("Full", results_full), ("Variational", results_var)]:
         print(f"\n{mode} mode results:")
         for transform_name, result in results.items():
+            if transform_name == 'timings':
+                continue
             print(f"  {transform_name}: k-hat range [{jnp.min(result['khat']):.3f}, {jnp.max(result['khat']):.3f}]")
 
     return results_full, results_var
