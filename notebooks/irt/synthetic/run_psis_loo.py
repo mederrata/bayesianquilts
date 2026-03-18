@@ -83,7 +83,6 @@ def run_psis_loo(dataset_name, results_dir, n_samples=100, batch_size=256, seed=
         item_keys=item_keys,
         num_people=num_people,
         dim=1,
-        kappa_scale=0.1,
         response_cardinality=response_cardinality,
         dtype=jnp.float64,
     )

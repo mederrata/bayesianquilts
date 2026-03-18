@@ -106,15 +106,12 @@ def compute_weights(dataset_name, batch_size=256):
     from bayesianquilts.irt.grm import GRModel
     import yaml as _yaml
     print(f"Loading baseline GRM for {dataset_name}...")
-    # Fix kappa_scale serialization: flatten nested list to scalar before loading
+    # Backward compat: remove legacy kappa_scale from saved config
     cfg_path = baseline_dir / 'config.yaml'
     with open(cfg_path) as _f:
         _cfg = _yaml.safe_load(_f)
-    ks = _cfg.get('kappa_scale', 0.1)
-    while isinstance(ks, list):
-        ks = ks[0]
-    if ks != _cfg.get('kappa_scale'):
-        _cfg['kappa_scale'] = ks
+    if 'kappa_scale' in _cfg:
+        del _cfg['kappa_scale']
         with open(cfg_path, 'w') as _f:
             _yaml.dump(_cfg, _f)
     model_baseline = GRModel.load_from_disk(baseline_dir)

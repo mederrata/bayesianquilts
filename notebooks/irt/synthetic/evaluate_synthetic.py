@@ -27,7 +27,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
                  neural_lr=None, neural_batch_size=None,
                  batch_size=256, missingness_rate=0.25,
                  missing_respondent_frac=0.4,
-                 dim=1, kappa_scale=0.5, eta_scale=0.1, patience=10,
+                 dim=1, eta_scale=0.1, patience=10,
                  lr_decay_factor=0.9, clip_norm=1.0,
                  reload_neural_grm=False,
                  noisy_dim=True,
@@ -42,7 +42,6 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
                  compute_elpd_loo=False,
                  nn_hidden_sizes=4,
                  nn_prior_scale=0.5,
-                 discrimination_prior="horseshoe",
                  discrimination_prior_scale=None):
     """Run the full synthetic evaluation pipeline for one dataset.
 
@@ -105,7 +104,6 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         num_epochs=epochs,
         learning_rate=neural_lr,
         patience=patience,
-        kappa_scale=kappa_scale,
         eta_scale=eta_scale,
         lr_decay_factor=lr_decay_factor,
         clip_norm=clip_norm,
@@ -204,14 +202,13 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_baseline",
         dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
+        learning_rate=grm_lr, patience=patience,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         snapshot_epoch=snapshot_epoch, sample_size=sample_size,
         seed=seed, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
         qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
         compute_elpd_loo=compute_elpd_loo,
-        discrimination_prior=discrimination_prior,
         discrimination_prior_scale=discrimination_prior_scale,
     )
     if snapshot_params is not None:
@@ -226,14 +223,13 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         save_dir=output_dir / "grm_mice_only",
         imputation_model=mice_loo,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
+        learning_rate=grm_lr, patience=patience,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         initial_values=snapshot_params, sample_size=sample_size,
         seed=seed + 1, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
         qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
         compute_elpd_loo=compute_elpd_loo,
-        discrimination_prior=discrimination_prior,
         discrimination_prior_scale=discrimination_prior_scale,
     )
 
@@ -263,14 +259,13 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         save_dir=output_dir / "grm_imputed",
         imputation_model=mixed_imputation,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=grm_lr, patience=patience, kappa_scale=kappa_scale,
+        learning_rate=grm_lr, patience=patience,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
         initial_values=snapshot_params, sample_size=sample_size,
         seed=seed + 2, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
         qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
         compute_elpd_loo=compute_elpd_loo,
-        discrimination_prior=discrimination_prior,
         discrimination_prior_scale=discrimination_prior_scale,
     )
 
@@ -331,7 +326,6 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
             'grm_lr': grm_lr,
             'batch_size': batch_size,
             'dim': dim,
-            'kappa_scale': kappa_scale,
             'eta_scale': eta_scale,
             'patience': patience,
             'lr_decay_factor': lr_decay_factor,
@@ -467,8 +461,6 @@ def main():
     parser.add_argument("--missing-respondent-frac", type=float, default=0.4,
                         help="Fraction of respondents with any missing data (default 0.4)")
     parser.add_argument("--dim", type=int, default=1, help="Latent dimension")
-    parser.add_argument("--kappa-scale", type=float, default=0.5,
-                        help="Kappa scale for horseshoe prior")
     parser.add_argument("--eta-scale", type=float, default=0.1,
                         help="Eta scale for horseshoe prior (local shrinkage)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
@@ -503,9 +495,6 @@ def main():
                         help="Number of mixture-of-logits components in NeuralGRM (default 4)")
     parser.add_argument("--nn-prior-scale", type=float, default=0.5,
                         help="Prior scale for NN params (smaller = more regularization, default 0.5)")
-    parser.add_argument("--discrimination-prior", default="horseshoe",
-                        choices=["horseshoe", "half_normal", "half_cauchy"],
-                        help="Discrimination prior type (default horseshoe)")
     parser.add_argument("--discrimination-prior-scale", type=float, default=None,
                         help="Scale for half_normal/half_cauchy discrimination prior")
     args = parser.parse_args()
@@ -530,7 +519,6 @@ def main():
             missingness_rate=args.missingness,
             missing_respondent_frac=args.missing_respondent_frac,
             dim=args.dim,
-            kappa_scale=args.kappa_scale,
             eta_scale=args.eta_scale,
             patience=args.patience,
             lr_decay_factor=args.lr_decay_factor,
@@ -548,7 +536,6 @@ def main():
             compute_elpd_loo=args.elpd_loo,
             nn_hidden_sizes=args.nn_hidden_sizes,
             nn_prior_scale=args.nn_prior_scale,
-            discrimination_prior=args.discrimination_prior,
             discrimination_prior_scale=args.discrimination_prior_scale,
         )
         all_results[ds] = results
