@@ -33,15 +33,14 @@ class PiecewiseExponential(distribution.Distribution):
         name="PiecewiseExponential",
     ):
         parameters = dict(locals())
-        with tfp.util.name_scope(name) as name:
-            super(PiecewiseExponential, self).__init__(
-                dtype=dtype_util.common_dtype([rates, breakpoints], dtype_hint=jnp.float32),
-                validate_args=validate_args,
-                allow_nan_stats=allow_nan_stats,
-                reparameterization_type=(reparameterization.FULLY_REPARAMETERIZED),
-                parameters=parameters,
-                name=name,
-            )
+        super(PiecewiseExponential, self).__init__(
+            dtype=dtype_util.common_dtype([rates, breakpoints], dtype_hint=jnp.float32),
+            validate_args=validate_args,
+            allow_nan_stats=allow_nan_stats,
+            reparameterization_type=(reparameterization.FULLY_REPARAMETERIZED),
+            parameters=parameters,
+            name=name,
+        )
 
         rates = jnp.asarray(self.rates)
         breakpoints = jnp.asarray(self.breakpoints)

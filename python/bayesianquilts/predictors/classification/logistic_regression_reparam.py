@@ -10,7 +10,7 @@ from jax.scipy.special import xlogy
 from tensorflow_probability.substrates.jax import tf2jax as tf
 
 from bayesianquilts.model import BayesianModel
-from bayesianquilts.sampler import nppsis
+from bayesianquilts.metrics import nppsis
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
 
 jax.config.update("jax_enable_x64", True)

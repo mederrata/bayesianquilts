@@ -136,6 +136,7 @@ dmypy.json
 *.pdf
 *.html
 *.gz
+!python/bayesianquilts/data/bouldering_*.csv.gz
 ovarian_data.json
 .env*
 
