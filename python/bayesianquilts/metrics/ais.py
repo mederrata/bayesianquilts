@@ -19,6 +19,7 @@ leave-one-out cross-validation predictions.
 """
 
 import time
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -413,6 +414,11 @@ class SmallStepTransformation(Transformation):
         leaves, treedef = jax.tree_util.tree_flatten(theta)
 
         if not leaves:
+            warnings.warn(
+                f"{self.__class__.__name__}: empty PyTree, returning zero divergence "
+                f"(log Jacobian will be zero)",
+                stacklevel=2,
+            )
             return jnp.zeros(())
 
         # Check if all leaves have consistent shapes for divergence computation
@@ -422,7 +428,11 @@ class SmallStepTransformation(Transformation):
 
         # Determine the batch shape (S, N) from the first two dimensions
         if first_leaf.ndim < 2:
-            # Scalar or 1D - return zero
+            warnings.warn(
+                f"{self.__class__.__name__}: leaf ndim={first_leaf.ndim} < 2, "
+                f"returning zero divergence (log Jacobian will be zero)",
+                stacklevel=2,
+            )
             return jnp.zeros(first_leaf.shape)
 
         batch_shape = first_leaf.shape[:2]  # (S, N)
@@ -438,7 +448,13 @@ class SmallStepTransformation(Transformation):
                 break
 
         if not can_compute_divergence:
-            # Return zero divergence for complex PyTree structures
+            leaf_shapes = [l.shape for l in leaves]
+            warnings.warn(
+                f"{self.__class__.__name__}: cannot compute divergence for PyTree "
+                f"with leaf shapes {leaf_shapes} (need all 3D with consistent batch dims). "
+                f"Returning zero divergence (log Jacobian will be zero).",
+                stacklevel=2,
+            )
             return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         # Simple case: all leaves are (S, N, K_i) - compute divergence
@@ -466,51 +482,42 @@ class SmallStepTransformation(Transformation):
         leaf_indices = jnp.array(leaf_indices)
         feat_indices = jnp.array(feat_indices)
 
-        # Vectorized JVP computation using vmap
-        def single_jvp(flat_idx):
-            leaf_idx = leaf_indices[flat_idx]
-            feat_idx = feat_indices[flat_idx]
-
-            # Create one-hot tangent vector
-            tangents = []
-            for i, L in enumerate(leaves):
-                t = jnp.zeros_like(L)
-                # Use where to conditionally set the tangent
-                mask = jnp.arange(L.shape[-1]) == feat_idx
-                t = jnp.where(
-                    (i == leaf_idx) & mask[jnp.newaxis, jnp.newaxis, :],
-                    1.0, 0.0
-                )
-                tangents.append(t)
-
-            tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
-            _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
-
-            q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
-
-            # Sum contributions from this parameter
-            div_contrib = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
-            for i, q_leaf in enumerate(q_out_leaves):
-                if i == leaf_idx:
-                    if q_leaf.ndim == 2:
-                        div_contrib = q_leaf
-                    else:
-                        div_contrib = q_leaf[..., feat_idx]
-            return div_contrib
-
-        # Try to compute divergence; fall back to zero if JVP fails
+        # Compute trace of Jacobian via JVP with one-hot tangent vectors.
+        # Use a Python loop (not fori_loop) since tangent construction
+        # requires concrete leaf/feature indices.
         try:
-            # Use lax.fori_loop for memory efficiency instead of vmap
-            # (vmap would create total_K copies of all intermediates)
-            def body_fn(i, acc):
-                return acc + single_jvp(i)
+            divergence = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
+            for leaf_i, L in enumerate(leaves):
+                K_i = L.shape[-1]
+                for feat_j in range(K_i):
+                    # One-hot tangent: 1 at (leaf_i, :, :, feat_j), 0 elsewhere
+                    tangents = []
+                    for li, leaf in enumerate(leaves):
+                        if li == leaf_i:
+                            t = jnp.zeros_like(leaf)
+                            # Set [..., feat_j] = 1
+                            idx = [slice(None)] * leaf.ndim
+                            idx[-1] = feat_j
+                            t = t.at[tuple(idx)].set(1.0)
+                        else:
+                            t = jnp.zeros_like(leaf)
+                        tangents.append(t)
 
-            divergence = jax.lax.fori_loop(
-                0, total_K, body_fn,
-                jnp.zeros(batch_shape, dtype=first_leaf.dtype)
-            )
+                    tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
+                    _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
+
+                    q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
+                    q_leaf = q_out_leaves[leaf_i]
+                    if q_leaf.ndim == 2:
+                        divergence = divergence + q_leaf
+                    else:
+                        divergence = divergence + q_leaf[..., feat_j]
         except (ValueError, TypeError) as e:
-            # JVP failed - return zero divergence
+            warnings.warn(
+                f"{self.__class__.__name__}: JVP failed ({e!r}), "
+                f"returning zero divergence (log Jacobian will be zero)",
+                stacklevel=2,
+            )
             return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         return divergence
@@ -717,6 +724,24 @@ class LikelihoodDescent(SmallStepTransformation):
 
         return jax.tree_util.tree_map(lambda x: -x, grad_ll)
 
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Exact divergence: div(Q) = -tr(H) where H is the Hessian of log ℓ."""
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+        # Sum diagonal Hessian across all parameter leaves: -sum_k d²logℓ/dθ_k²
+        leaves = jax.tree_util.tree_leaves(hess_diag)
+        div_Q = jnp.zeros(current_log_ell.shape, dtype=current_log_ell.dtype)
+        for leaf in leaves:
+            if leaf.ndim == 2:  # (S, N)
+                div_Q = div_Q - leaf
+            else:  # (S, N, K...) - sum over parameter dims
+                div_Q = div_Q - jnp.sum(leaf, axis=tuple(range(2, leaf.ndim)))
+        return div_Q
+
 
 class NaturalLikelihoodDescent(SmallStepTransformation):
     """Natural-gradient LL transformation: preconditions LL's Q by the posterior covariance.
@@ -777,6 +802,39 @@ class NaturalLikelihoodDescent(SmallStepTransformation):
                 result_leaves.append(nat_part.reshape(orig_leaf.shape))
 
         return jax.tree_util.tree_unflatten(treedef, result_leaves)
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Exact divergence: div(Q_NLL) = -tr(Σ·H) where H is the Hessian of log ℓ.
+
+        With diagonal Hessian approximation: -Σ_k Σ_kk · H_kk.
+        With full Σ and diagonal H: -tr(Σ · diag(H)) = -Σ_k Σ_kk · H_kk.
+        """
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        # Flatten Hessian diagonal to (S, N, K_total)
+        hess_leaves = jax.tree_util.tree_leaves(hess_diag)
+        S, N = current_log_ell.shape
+
+        flat_hess_parts = []
+        for leaf in hess_leaves:
+            if leaf.ndim == 2:
+                flat_hess_parts.append(leaf[..., jnp.newaxis])
+            else:
+                flat_hess_parts.append(leaf.reshape(S, N, -1))
+
+        hess_flat = jnp.concatenate(flat_hess_parts, axis=-1)  # (S, N, K_total)
+
+        # div(Q) = -tr(Σ·H) = -Σ_{k,j} Σ_{kj} H_{jk}
+        # With diagonal Hessian: = -Σ_k Σ_{kk} H_{kk} = -(diag(Σ) · diag(H))
+        # But Σ is full, so: -tr(Σ·diag(H)) = -Σ_k H_{kk} Σ_{kk}
+        sigma_diag = jnp.diag(self.posterior_cov)  # (K_total,)
+        div_Q = -jnp.sum(hess_flat * sigma_diag[jnp.newaxis, jnp.newaxis, :], axis=-1)
+        return div_Q
 
 
 class KLDivergence(SmallStepTransformation):
@@ -845,6 +903,66 @@ class KLDivergence(SmallStepTransformation):
                 return scaling * g
 
         return jax.tree_util.tree_map(apply_scale, grad_ll)
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Divergence of Q_KL = c_i · g_i where c_i = -exp(log π - log ℓ_i).
+
+        div(Q) = c_i · [-tr(H_i) + (∇log π - ∇log ℓ_i)·∇log ℓ_i]
+
+        ∇log π is computed exactly as Σ_j ∇log ℓ_j (sum of per-obs gradients,
+        ignoring prior which is typically weak).
+        """
+        log_pi = kwargs.get("log_pi")
+        if log_pi is None:
+            return jnp.zeros_like(current_log_ell)
+
+        log_pi_norm = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
+
+        # c_i = -exp(log_pi - log_ell_i), shape (S, N)
+        if log_pi_norm.ndim == 1:
+            c_i = -jnp.exp(log_pi_norm[:, jnp.newaxis] - current_log_ell)
+        else:
+            c_i = -jnp.exp(log_pi_norm - current_log_ell)
+
+        # -tr(H_i)
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        tr_H = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(hess_diag):
+            if leaf.ndim == 2:
+                tr_H = tr_H + leaf
+            else:
+                tr_H = tr_H + jnp.sum(leaf, axis=tuple(range(2, leaf.ndim)))
+
+        # ∇log ℓ_i per obs
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        # (∇log π - ∇log ℓ_i) · ∇log ℓ_i
+        # ∇log π ≈ Σ_j ∇log ℓ_j (sum over obs dim)
+        # dot product per obs: Σ_k (∇log π_k - ∇log ℓ_{i,k}) · ∇log ℓ_{i,k}
+        dot_term = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(grad_ll):
+            if leaf.ndim == 2:
+                # (S, N) - scalar param
+                total_grad = jnp.sum(leaf, axis=1, keepdims=True)  # (S, 1)
+                dot_term = dot_term + (total_grad - leaf) * leaf
+            else:
+                # (S, N, K...) - sum over obs to get total grad (S, 1, K...)
+                total_grad = jnp.sum(leaf, axis=1, keepdims=True)
+                diff = total_grad - leaf  # (S, N, K...)
+                dot_term = dot_term + jnp.sum(
+                    diff * leaf, axis=tuple(range(2, leaf.ndim))
+                )
+
+        return c_i * (-tr_H + dot_term)
 
 
 class NaturalKLDivergence(SmallStepTransformation):
@@ -940,6 +1058,69 @@ class NaturalKLDivergence(SmallStepTransformation):
                 result_leaves.append(nat_part.reshape(orig_leaf.shape))
 
         return jax.tree_util.tree_unflatten(treedef, result_leaves)
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Divergence of Q_NKL = Σ · Q_KL.
+
+        div(Σ·Q_KL) = tr(Σ · ∇Q_KL).
+        Since Q_KL = c_i · g_i with c_i = -exp(log π - log ℓ_i):
+            div(Q_NKL) = c_i · [-tr(Σ·H_i) + (∇log π - ∇log ℓ_i)^T Σ ∇log ℓ_i]
+        where ∇log π ≈ Σ_j ∇log ℓ_j.
+        """
+        log_pi = kwargs.get("log_pi")
+        if log_pi is None:
+            return jnp.zeros_like(current_log_ell)
+
+        log_pi_norm = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
+        if log_pi_norm.ndim == 1:
+            c_i = -jnp.exp(log_pi_norm[:, jnp.newaxis] - current_log_ell)
+        else:
+            c_i = -jnp.exp(log_pi_norm - current_log_ell)
+
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        # Flatten hessian diag to (S, N, K_total)
+        S, N = current_log_ell.shape
+        hess_flat_parts = []
+        for leaf in jax.tree_util.tree_leaves(hess_diag):
+            if leaf.ndim == 2:
+                hess_flat_parts.append(leaf[..., jnp.newaxis])
+            else:
+                hess_flat_parts.append(leaf.reshape(S, N, -1))
+        hess_flat = jnp.concatenate(hess_flat_parts, axis=-1)  # (S, N, K)
+
+        # tr(Σ·diag(H))
+        sigma_diag = jnp.diag(self.posterior_cov)
+        tr_SH = jnp.sum(hess_flat * sigma_diag[jnp.newaxis, jnp.newaxis, :], axis=-1)
+
+        # ∇log ℓ_i flattened
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        grad_flat_parts = []
+        for leaf in jax.tree_util.tree_leaves(grad_ll):
+            if leaf.ndim == 2:
+                grad_flat_parts.append(leaf[..., jnp.newaxis])
+            else:
+                grad_flat_parts.append(leaf.reshape(S, N, -1))
+        g_flat = jnp.concatenate(grad_flat_parts, axis=-1)  # (S, N, K)
+
+        # ∇log π ≈ Σ_j g_j, total grad (S, 1, K)
+        total_g = jnp.sum(g_flat, axis=1, keepdims=True)
+
+        # (∇log π - g_i)^T Σ g_i
+        diff = total_g - g_flat  # (S, N, K)
+        diff_Sigma = jnp.einsum('snk,kj->snj', diff, self.posterior_cov)
+        dot_term = jnp.sum(diff_Sigma * g_flat, axis=-1)  # (S, N)
+
+        return c_i * (-tr_SH + dot_term)
 
 
 class Variance(SmallStepTransformation):
@@ -1044,6 +1225,59 @@ class Variance(SmallStepTransformation):
 
         Q = jax.tree_util.tree_map(compute_q_leaf, grad_log_f, grad_log_ell)
         return Q
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Divergence of Q_Var = w · δg where w = π·(f/ℓ)², δg = ∇log f - ∇log ℓ.
+
+        div(Q) = w · [div(δg) + (∇log w)·δg]
+               = w · [-tr(H_ℓ) + (∇log π + 2∇log f - 2∇log ℓ)·(∇log f - ∇log ℓ)]
+
+        ∇log π ≈ Σ_j ∇log ℓ_j (exact for posterior, ignoring prior).
+        ∇log f ≈ ∇log ℓ for the default target f = ℓ, so δg ≈ 0 and the dot term
+        vanishes. We retain the -tr(H_ℓ) term and the -2||∇log ℓ||² from ∇w.
+        """
+        log_pi = kwargs.get("log_pi")
+        if log_pi is None:
+            return jnp.zeros_like(current_log_ell)
+
+        log_pi_expanded = log_pi[:, jnp.newaxis] if log_pi.ndim == 1 else log_pi
+        log_f = kwargs.get("log_f", None)
+        if log_f is None:
+            log_f = jnp.log(self.f_fn(data, **params))
+
+        w = jnp.exp(log_pi_expanded + 2.0 * log_f - 2.0 * current_log_ell)
+
+        # -tr(H_ℓ)
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        tr_H = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(hess_diag):
+            if leaf.ndim == 2:
+                tr_H = tr_H + leaf
+            else:
+                tr_H = tr_H + jnp.sum(leaf, axis=tuple(range(2, leaf.ndim)))
+
+        # ∇log ℓ per obs and total ∇log π ≈ Σ_j ∇log ℓ_j
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        # For default target f = exp(log_ell), ∇log f = ∇log ℓ, so δg = 0
+        # and dot term = 0. Use the ∇w contribution: -2||∇log ℓ||²
+        grad_sq = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(grad_ll):
+            if leaf.ndim == 2:
+                grad_sq = grad_sq + leaf ** 2
+            else:
+                grad_sq = grad_sq + jnp.sum(leaf ** 2, axis=tuple(range(2, leaf.ndim)))
+
+        return w * (-tr_H - 2.0 * grad_sq)
 
 
 class PMM1(SmallStepTransformation):
