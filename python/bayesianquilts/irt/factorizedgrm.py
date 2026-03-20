@@ -22,16 +22,17 @@ class FactorizedGRModel(IRTModel):
 
     response_type = "polytomous"
 
-    def __init__(self, scale_indices, kappa_scale, *args, **kwargs):
+    def __init__(self, scale_indices, *args, discrimination_prior_scale=2.0, **kwargs):
         """Initialize model based on scale indices.
 
         Args:
             scale_indices (list(list(int))): Indices for the items per scale.
-            kappa_scale (float): Prior scale for discriminations.
+            discrimination_prior_scale (float): HalfNormal scale for the
+                discrimination prior (default 2.0).
         """
         self.scale_indices = scale_indices
         super(FactorizedGRModel, self).__init__(*args, **kwargs)
-        self.kappa_scale = kappa_scale
+        self.discrimination_prior_scale = discrimination_prior_scale
         self.dimensions = len(scale_indices)
         self.create_distributions()
 
@@ -41,8 +42,6 @@ class FactorizedGRModel(IRTModel):
             k: tfb.Identity() for k in ["abilities", "mu", "difficulties0"]
         }
 
-        self.bijectors["kappa"] = tfb.Softplus()
-        self.bijectors["kappa_a"] = tfb.Softplus()
         self.bijectors["discriminations"] = tfb.Softplus()
         self.bijectors["ddifficulties"] = tfb.Softplus()
 
@@ -99,27 +98,127 @@ class FactorizedGRModel(IRTModel):
         difficulties = jnp.cumsum(d0, axis=-1)
         return self.grm_model_prob(abilities, discriminations, difficulties)
 
-    def fit_dim(self, *args, dim: int, **kwargs):
+    def fit_dim(self, batched_data_factory, *, dim: int, **kwargs):
+        """Fit a single dimension as an independent univariate GRModel.
+
+        Creates a 1D GRModel using only the items belonging to
+        ``self.scale_indices[dim]``, fits it, and returns the fitted
+        model along with losses and parameters.
+
+        Args:
+            batched_data_factory: Callable returning data iterator.
+                Batches must contain all item keys (the method filters
+                to the relevant subset).
+            dim: Which dimension (index into ``self.scale_indices``) to fit.
+            **kwargs: Forwarded to ``GRModel.fit`` (e.g. ``batch_size``,
+                ``dataset_size``, ``num_epochs``, ``learning_rate``,
+                ``imputation_model``, ``compute_elpd_loo``, etc.).
+
+        Returns:
+            Tuple of ``(univariate_model, losses, params)``.
+        """
+        from bayesianquilts.irt.grm import GRModel
+
         if dim >= self.dimensions:
-            raise ValueError("Dimension to fit must be less than model dimensions")
-        optimizing_keys = [
-            k
-            for k in self.params.keys()
-            if (
-                not any(
-                    k.startswith(prefix) and not k.startswith(f"{prefix}{dim}")
-                    for prefix in [
-                        "discriminations_",
-                        "ddifficulties_",
-                        "difficulties0_",
-                        "kappa_",
-                        "kappa_a_",
-                        "abilities_",
-                    ]
-                )
+            raise ValueError(
+                f"dim={dim} out of range for model with "
+                f"{self.dimensions} dimensions"
             )
-        ]
-        return self.fit(*args, **kwargs, optimize_keys=optimizing_keys)
+
+        indices = self.scale_indices[dim]
+        dim_item_keys = [self.item_keys[i] for i in indices]
+
+        # Inherit imputation model from kwargs or from self
+        imputation_model = kwargs.pop('imputation_model', self.imputation_model)
+
+        uni_model = GRModel(
+            item_keys=dim_item_keys,
+            num_people=self.num_people,
+            person_key=self.person_key,
+            dim=1,
+            response_cardinality=self.response_cardinality,
+            eta_scale=self.eta_scale,
+            positive_discriminations=self.positive_discriminations,
+            discrimination_prior=getattr(self, 'discrimination_prior', 'half_normal'),
+            discrimination_prior_scale=self.discrimination_prior_scale,
+            dtype=self.dtype,
+            imputation_model=imputation_model,
+        )
+
+        # The data factory may contain all items; GRModel.predictive_distribution
+        # only reads its own item_keys, so no filtering is needed.
+        res = uni_model.fit(batched_data_factory, **kwargs)
+        losses, params = res[0], res[1]
+
+        return uni_model, losses, params
+
+    def assemble_from_dims(self, dim_models, n_samples=64, seed=42):
+        """Reassemble fitted univariate GRModels into this FactorizedGRModel.
+
+        Takes a dict ``{dim: GRModel}`` of fitted univariate models (one per
+        dimension, as returned by ``fit_dim``) and populates this model's
+        ``calibrated_expectations``, ``surrogate_sample``, and surrogate
+        ``params`` from the per-dimension posteriors.
+
+        Args:
+            dim_models: Dict mapping dimension index to a fitted GRModel.
+                Must have one entry per dimension (0..D-1).
+            n_samples: Number of surrogate posterior samples to draw from
+                each univariate model.
+            seed: Random seed for sampling.
+
+        Returns:
+            self (for chaining).
+        """
+        import jax
+
+        if set(dim_models.keys()) != set(range(self.dimensions)):
+            raise ValueError(
+                f"Expected models for dims {list(range(self.dimensions))}, "
+                f"got {list(dim_models.keys())}"
+            )
+
+        # Sample from each univariate model's surrogate
+        dim_samples = {}
+        for d, uni_model in dim_models.items():
+            surrogate = uni_model.surrogate_distribution_generator(uni_model.params)
+            key = jax.random.PRNGKey(seed + d)
+            dim_samples[d] = surrogate.sample(n_samples, seed=key)
+
+        # Map into factorized param names
+        assembled_samples = {}
+        for d in range(self.dimensions):
+            s = dim_samples[d]
+            assembled_samples[f"discriminations_{d}"] = s["discriminations"]
+            assembled_samples[f"difficulties0_{d}"] = s["difficulties0"]
+            assembled_samples[f"ddifficulties_{d}"] = s["ddifficulties"]
+            assembled_samples[f"abilities_{d}"] = s["abilities"]
+
+        self.surrogate_sample = assembled_samples
+        self.calibrated_expectations = {
+            k: jnp.mean(v, axis=0) for k, v in assembled_samples.items()
+        }
+        self.calibrated_sd = {
+            k: jnp.std(v, axis=0) for k, v in assembled_samples.items()
+        }
+
+        # Also update the FactorizedGRM surrogate params from the
+        # shared variables (discriminations, difficulties, abilities).
+        # The surrogate param keys use backslash-delimited paths.
+        shared_vars = ["discriminations", "difficulties0", "ddifficulties", "abilities"]
+        for d, uni_model in dim_models.items():
+            for var in shared_vars:
+                for suffix in list(self.params.keys()):
+                    if not suffix.startswith(f"{var}_{d}\\"):
+                        continue
+                    # e.g. suffix = "discriminations_0\softplus\normal\loc"
+                    # corresponding GRModel key = "discriminations\softplus\normal\loc"
+                    grm_key = var + suffix[len(f"{var}_{d}"):]
+                    if grm_key in uni_model.params:
+                        self.params[suffix] = uni_model.params[grm_key]
+
+        self._dim_models = dim_models
+        return self
 
     def transform(self, params):
         """Reassemble scale-factorized parameters into full tensors."""
@@ -181,7 +280,7 @@ class FactorizedGRModel(IRTModel):
         out = {}
         out[f"discriminations_{j}"] = tfd.Independent(
             tfd.HalfNormal(
-                scale=self.kappa_scale * tf.ones((1, 1, len(indices), 1))
+                scale=self.discrimination_prior_scale * tf.ones((1, 1, len(indices), 1))
             ),
             reinterpreted_batch_ndims=4,
         )

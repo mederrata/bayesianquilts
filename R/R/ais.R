@@ -11,315 +11,255 @@ DEFAULT_TRANSFORMATION_ORDER <- c(
   "pmm2",       # Partial moment matching (shift + scale)
   "ll",         # Likelihood descent (requires gradient)
   "kl",         # KL divergence (requires gradient + posterior weights)
-  "var"         # Variance-based (requires gradient + Hessian + f_fn)
+  "nkl"         # Natural-gradient KL (requires gradient + posterior covariance)
 )
 
 #' Adaptive Importance Sampler
+#'
+#' @description
+#' Generalized Adaptive Importance Sampling for Leave-One-Out Cross-Validation.
+#'
+#' Implements adaptive importance sampling transformations that work with any
+#' likelihood function. Provides several transformation strategies for generating
+#' importance weights, tried in order of computational complexity.
 #'
 #' @export
 AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
   public = list(
     likelihood_fn = NULL,
     prior_log_prob_fn = NULL,
+    surrogate_log_prob_fn = NULL,
 
     #' @description Initialize sampler
     #' @param likelihood_fn LikelihoodFunction object
     #' @param prior_log_prob_fn Optional prior function
-    initialize = function(likelihood_fn, prior_log_prob_fn = NULL) {
+    #' @param surrogate_log_prob_fn Optional surrogate density function (for variational)
+    initialize = function(likelihood_fn, prior_log_prob_fn = NULL,
+                          surrogate_log_prob_fn = NULL) {
       self$likelihood_fn <- likelihood_fn
       self$prior_log_prob_fn <- prior_log_prob_fn
+      self$surrogate_log_prob_fn <- surrogate_log_prob_fn
     },
 
     #' @description Run AIS for LOO-CV
     #'
     #' By default, transformations are tried in order of computational complexity
-
-    #' (identity < mm1/mm2 < pmm1/pmm2 < ll < kl < var). Once a data point achieves
-    #' khat < khat_threshold, it is considered "adapted" and subsequent transformations
-    #' are skipped for that point (unless try_all_transformations=TRUE).
+    #' (identity < mm1/mm2 < pmm1/pmm2 < ll < kl). Once a data point achieves
+    #' khat < khat_threshold, it is considered "adapted" and subsequent
+    #' transformations are skipped for that point (unless
+    #' try_all_transformations=TRUE).
     #'
     #' @param data Data object
     #' @param params List of parameters (S x K)
-    #' @param rhos Vector of step sizes
-    #' @param transformations Vector of transformation names to run, in order.
-    #'        If NULL, uses DEFAULT_TRANSFORMATION_ORDER (filtering unavailable ones).
-    #' @param try_all_transformations If FALSE (default), skip transformations for data
-    #'        points that have already achieved khat < khat_threshold.
-    #'        If TRUE, try all transformations for all points.
-    #' @param khat_threshold Threshold for considering a point "adapted" (default 0.7).
-    #'        Points with khat below this threshold won't be processed by subsequent
-    #'        transformations unless try_all_transformations=TRUE.
+    #' @param rhos Vector of step sizes for gradient-based transforms
+    #' @param transformations Character vector of transformation names to run.
+    #'        If NULL, uses DEFAULT_TRANSFORMATION_ORDER.
+    #' @param try_all_transformations If FALSE (default), skip transformations
+    #'        for data points that already have khat < khat_threshold.
+    #' @param khat_threshold Threshold for considering a point "adapted"
+    #'        (default 0.7).
+    #' @param variational Whether using variational approximation
     #' @param verbose Boolean
-    #' @return List of results
-    adaptive_is_loo = function(data, params, rhos=NULL, transformations=NULL,
-                               try_all_transformations=FALSE, khat_threshold=0.7,
-                               verbose=FALSE) {
-      
+    #' @return List with best results including khat, ll_loo_psis, p_loo_psis, etc.
+    adaptive_is_loo = function(data, params, rhos = NULL,
+                               transformations = NULL,
+                               try_all_transformations = FALSE,
+                               khat_threshold = 0.7,
+                               variational = FALSE,
+                               verbose = FALSE) {
+
       # 1. Initial computations
       log_ell <- self$likelihood_fn$log_likelihood(data, params) # S x N
       S <- nrow(log_ell)
       N <- ncol(log_ell)
 
-      # theta_std
+      # Standard deviation of parameters (for standardization)
       theta_std <- list()
       for (k in names(params)) {
         val <- params[[k]]
         if (is.null(dim(val))) {
-          theta_std[[k]] <- sd(val)
+          s <- sd(val)
+          theta_std[[k]] <- if (s < 1e-6) 1.0 else s
         } else {
-          theta_std[[k]] <- apply(val, 2, sd)
+          s <- apply(val, 2, sd)
+          s[s < 1e-6] <- 1.0
+          theta_std[[k]] <- s
         }
       }
 
-      # Expand params to theta (S x N x K)
+      # Expand params to theta (S x N x K) for per-observation transforms
       theta <- list()
       for (k in names(params)) {
         val <- params[[k]]
         if (is.null(dim(val))) {
-           # S -> S x N
-           theta[[k]] <- matrix(val, nrow=S, ncol=N)
+          theta[[k]] <- matrix(val, nrow = S, ncol = N)
         } else {
-           # S x K -> S x N x K
-           K <- ncol(val)
-           # Create array
-           arr <- array(0, dim=c(S, N, K))
-           for (i in 1:N) {
-             arr[, i, ] <- val
-           }
-           theta[[k]] <- arr
+          K <- ncol(val)
+          arr <- array(0, dim = c(S, N, K))
+          for (i in seq_len(N)) {
+            arr[, i, ] <- val
+          }
+          theta[[k]] <- arr
         }
       }
 
       if (is.null(rhos)) {
-        rhos <- exp(seq(log(0.01), log(10), length.out=7))
+        rhos <- exp(seq(log(0.01), log(10), length.out = 7))
       }
 
-      # Available transformations (those actually implemented)
-      available_transforms <- c("identity", "ll", "mm1", "mm2")
+      # Determine log_pi
+      if (variational && !is.null(self$surrogate_log_prob_fn)) {
+        log_pi <- self$surrogate_log_prob_fn(params)
+      } else if (!is.null(self$prior_log_prob_fn)) {
+        log_prior <- self$prior_log_prob_fn(params)
+        log_pi <- rowSums(log_ell) + log_prior
+      } else {
+        log_pi <- rowSums(log_ell)
+      }
+
+      # Compute posterior covariance for NKL transform
+      flat_parts <- list()
+      for (k in names(params)) {
+        val <- params[[k]]
+        if (is.null(dim(val))) {
+          flat_parts[[length(flat_parts) + 1]] <- matrix(val, ncol = 1)
+        } else {
+          flat_parts[[length(flat_parts) + 1]] <- matrix(val, nrow = nrow(val))
+        }
+      }
+      theta_flat <- do.call(cbind, flat_parts) # S x K_total
+      posterior_cov <- cov(theta_flat) + 1e-6 * diag(ncol(theta_flat))
+
+      # Available transformations
+      all_transforms <- list(
+        ll = LikelihoodDescent$new(self$likelihood_fn),
+        kl = KLDivergence$new(self$likelihood_fn),
+        nkl = NaturalKLDivergence$new(self$likelihood_fn, posterior_cov),
+        pmm1 = PMM1$new(self$likelihood_fn),
+        pmm2 = PMM2$new(self$likelihood_fn),
+        mm1 = MM1$new(self$likelihood_fn),
+        mm2 = MM2$new(self$likelihood_fn)
+      )
 
       # Determine transformation order
       if (is.null(transformations)) {
-        # Default order by computational complexity, filtered to available
-        transform_order <- intersect(DEFAULT_TRANSFORMATION_ORDER, available_transforms)
+        transform_order <- DEFAULT_TRANSFORMATION_ORDER
       } else {
-        # User-specified order, filtered to available
-        transform_order <- intersect(transformations, available_transforms)
+        transform_order <- transformations
       }
+      # Filter to available
+      transform_order <- transform_order[
+        transform_order %in% c(names(all_transforms), "identity")
+      ]
 
       results <- list()
       best_khat <- rep(Inf, N)
       best_res <- list(
         khat = best_khat,
-        ll_loo = rep(-Inf, N),
-        p_loo = rep(0, N)
+        ll_loo_eta = rep(-Inf, N),
+        ll_loo_psis = rep(-Inf, N),
+        p_loo_eta = rep(0, N),
+        p_loo_psis = rep(0, N)
       )
 
-      # Track which points are considered "adapted" (khat < threshold)
       adapted_mask <- rep(FALSE, N)
 
-      # Helper to update best (only for non-adapted points if not try_all)
+      # Helper to update best results
       update_best <- function(res) {
         if (try_all_transformations) {
-          improvement_mask <- res$khat < best_khat
+          improvement <- res$khat < best_khat
         } else {
-          improvement_mask <- (res$khat < best_khat) & (!adapted_mask)
+          improvement <- (res$khat < best_khat) & (!adapted_mask)
         }
 
-        best_khat[improvement_mask] <<- res$khat[improvement_mask]
-
-        # Merge fields
-        for (f in names(res)) {
-           if (is.null(best_res[[f]])) {
-             best_res[[f]] <<- res[[f]]
-           } else {
-             if (is.matrix(res[[f]]) || is.vector(res[[f]])) {
-               # Handle dimensions
-               if (length(res[[f]]) == N) {
-                 best_res[[f]][improvement_mask] <<- res[[f]][improvement_mask]
-               } else if (is.matrix(res[[f]]) && ncol(res[[f]]) == N) {
-                 best_res[[f]][, improvement_mask] <<- res[[f]][, improvement_mask]
-               }
-             }
-           }
-        }
-
-        # Update adapted mask
-        if (!try_all_transformations) {
-          newly_adapted <- best_khat < khat_threshold
-          adapted_mask <<- adapted_mask | newly_adapted
-        }
-      }
-
-      # Helper function to compute log_ell_new from transformed params
-      compute_log_ell_new <- function(theta_new) {
-        log_ell_new <- matrix(0, nrow=S, ncol=N)
-        for (i in 1:N) {
-          # Extract params for i
-          p_i <- list()
-          for (k in names(theta_new)) {
-            val <- theta_new[[k]]
-            if (length(dim(val)) == 3) {
-              p_i[[k]] <- val[, i, ] # S x K
-            } else {
-              p_i[[k]] <- val[, i] # S
-            }
+        best_khat[improvement] <<- res$khat[improvement]
+        for (f in c("ll_loo_eta", "ll_loo_psis", "p_loo_eta", "p_loo_psis")) {
+          if (!is.null(res[[f]]) && length(res[[f]]) == N) {
+            best_res[[f]][improvement] <<- res[[f]][improvement]
           }
-          # Evaluate likelihood (O(N^2) total but correct)
-          ll_full <- self$likelihood_fn$log_likelihood(data, p_i)
-          log_ell_new[, i] <- ll_full[, i]
         }
-        return(log_ell_new)
+        best_res$khat <<- best_khat
+
+        if (!try_all_transformations) {
+          adapted_mask <<- adapted_mask | (best_khat < khat_threshold)
+        }
       }
 
-      # Run transformations in order of computational complexity
+      # Run transformations
       for (trans_name in transform_order) {
-        # Early exit if all points are adapted and we're not forcing all transformations
+        # Early exit
         if (!try_all_transformations && all(adapted_mask)) {
-          if (verbose) message(sprintf("All %d points adapted, skipping remaining transformations", N))
+          if (verbose) message(sprintf("All %d points adapted, stopping", N))
           break
         }
 
-        # Verbose: show remaining points
         if (verbose) {
-          if (!try_all_transformations) {
-            n_remaining <- N - sum(adapted_mask)
-            message(sprintf("Running %s... (%d points remaining)", trans_name, n_remaining))
-          } else {
-            message(sprintf("Running %s...", trans_name))
-          }
+          n_remaining <- if (!try_all_transformations) N - sum(adapted_mask) else N
+          message(sprintf("Running %s... (%d points remaining)", trans_name,
+                          n_remaining))
         }
 
         if (trans_name == "identity") {
           log_eta <- -log_ell
-
-          # PSIS
           psis_res <- psislw(log_eta)
 
-          # Metrics
-          eta_weights <- exp(log_eta - logSumExp(log_eta))
-          psis_weights <- psis_res$weights
-
-          ll_loo <- colSums(psis_weights * exp(log_ell))
+          eta_weights <- exp(log_eta - t(replicate(S, logSumExp(log_eta))))
+          exp_ll <- exp(log_ell)
 
           res_id <- list(
-             khat = psis_res$khat,
-             log_weights = psis_res$log_weights,
-             ll_loo = ll_loo
+            khat = psis_res$khat,
+            ll_loo_eta = colSums(eta_weights * exp_ll),
+            ll_loo_psis = colSums(psis_res$weights * exp_ll),
+            p_loo_eta = colSums(eta_weights * exp_ll),
+            p_loo_psis = colSums(psis_res$weights * exp_ll)
           )
           results[["identity"]] <- res_id
           update_best(res_id)
 
-          if (verbose && !try_all_transformations) {
-            n_adapted <- sum(adapted_mask)
-            message(sprintf("  %d/%d points adapted (khat < %.2f)", n_adapted, N, khat_threshold))
+          if (verbose) {
+            message(sprintf("  %d/%d adapted (khat < %.2f)",
+                            sum(adapted_mask), N, khat_threshold))
           }
 
-        } else if (trans_name == "mm1") {
-          # MM1 transformation (no rho sweep - global transform)
+        } else if (trans_name %in% c("mm1", "mm2")) {
+          # Global transforms (no rho sweep)
           tryCatch({
-            transform <- MM1$new(self$likelihood_fn)
-            step_res <- transform$call(
-              max_iter=1,
-              params=params,
-              theta=theta,
-              data=data,
-              log_ell=log_ell,
-              log_ell_original=log_ell
+            transform <- all_transforms[[trans_name]]
+            res <- transform$call(
+              max_iter = 1, params = params, theta = theta,
+              data = data, log_ell = log_ell,
+              log_ell_original = log_ell, log_pi = log_pi,
+              variational = variational,
+              surrogate_log_prob_fn = self$surrogate_log_prob_fn
             )
-
-            theta_new <- step_res$theta_new
-            log_jac <- step_res$log_jacobian
-
-            log_ell_new <- compute_log_ell_new(theta_new)
-
-            log_eta <- log_ell - log_ell_new + log_jac
-            psis_res <- psislw(log_eta)
-
-            res_mm1 <- list(
-               khat = psis_res$khat,
-               log_weights = psis_res$log_weights,
-               ll_loo = colSums(exp(psis_res$log_weights) * exp(log_ell_new))
-            )
-
-            results[["mm1"]] <- res_mm1
-            update_best(res_mm1)
-
+            results[[trans_name]] <- res
+            update_best(res)
           }, error = function(e) {
-            if (verbose) message("Error in mm1: ", e$message)
+            if (verbose) message(sprintf("Error in %s: %s", trans_name, e$message))
           })
 
-        } else if (trans_name == "mm2") {
-          # MM2 transformation (no rho sweep - global transform)
-          tryCatch({
-            transform <- MM2$new(self$likelihood_fn)
-            step_res <- transform$call(
-              max_iter=1,
-              params=params,
-              theta=theta,
-              data=data,
-              log_ell=log_ell,
-              log_ell_original=log_ell
-            )
-
-            theta_new <- step_res$theta_new
-            log_jac <- step_res$log_jacobian
-
-            log_ell_new <- compute_log_ell_new(theta_new)
-
-            log_eta <- log_ell - log_ell_new + log_jac
-            psis_res <- psislw(log_eta)
-
-            res_mm2 <- list(
-               khat = psis_res$khat,
-               log_weights = psis_res$log_weights,
-               ll_loo = colSums(exp(psis_res$log_weights) * exp(log_ell_new))
-            )
-
-            results[["mm2"]] <- res_mm2
-            update_best(res_mm2)
-
-          }, error = function(e) {
-            if (verbose) message("Error in mm2: ", e$message)
-          })
-
-        } else if (trans_name == "ll") {
-          transform <- LikelihoodDescent$new(self$likelihood_fn)
+        } else if (trans_name %in% c("ll", "kl", "nkl", "pmm1", "pmm2")) {
+          # Small-step transforms with rho sweep
+          transform <- all_transforms[[trans_name]]
 
           for (rho in rhos) {
-            # Call transformation
             tryCatch({
-              step_res <- transform$call(
-                 max_iter=1,
-                 params=params,
-                 theta=theta,
-                 data=data,
-                 log_ell=log_ell,
-                 hbar=rho,
-                 theta_std=theta_std
+              res <- transform$call(
+                max_iter = 1, params = params, theta = theta,
+                data = data, log_ell = log_ell,
+                hbar = rho, theta_std = theta_std,
+                log_ell_original = log_ell, log_pi = log_pi,
+                variational = variational,
+                surrogate_log_prob_fn = self$surrogate_log_prob_fn
               )
-
-              theta_new <- step_res$theta_new
-              log_jac <- step_res$log_jacobian
-
-              log_ell_new <- compute_log_ell_new(theta_new)
-
-              # Weights
-              log_eta <- log_ell - log_ell_new + log_jac
-
-              psis_res <- psislw(log_eta)
-
-              res_ll <- list(
-                 khat = psis_res$khat,
-                 log_weights = psis_res$log_weights,
-                 ll_loo = colSums(exp(psis_res$log_weights) * exp(log_ell_new))
-              )
-
-              key <- paste0("ll_rho", sprintf("%.2e", rho))
-              results[[key]] <- res_ll
-              update_best(res_ll)
-
+              key <- sprintf("%s_rho%.2e", trans_name, rho)
+              results[[key]] <- res
+              update_best(res)
             }, error = function(e) {
-              if (verbose) message(sprintf("Error in ll rho=%.2e: %s", rho, e$message))
+              if (verbose) {
+                message(sprintf("Error in %s rho=%.2e: %s",
+                                trans_name, rho, e$message))
+              }
             })
           }
         }
