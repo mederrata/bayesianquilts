@@ -33,7 +33,7 @@ def data_factory():
 
 model = GRModel(
     item_keys=item_keys, num_people=SUBSAMPLE_N, dim=1,
-    kappa_scale=0.1, response_cardinality=response_cardinality,
+    response_cardinality=response_cardinality,
     dtype=jnp.float64,
 )
 res = model.fit(

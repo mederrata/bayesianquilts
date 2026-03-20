@@ -163,7 +163,7 @@ def fit_neural_grm(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     dim=1, batch_size=256,
     num_epochs=500, learning_rate=1e-3, patience=10,
-    kappa_scale=0.5, eta_scale=0.1,
+    eta_scale=0.1,
     lr_decay_factor=0.9, clip_norm=1.0,
     reload=False,
     noisy_dim=False,
@@ -225,7 +225,6 @@ def fit_neural_grm(
             item_keys=item_keys,
             num_people=num_people,
             dim=dim,
-            kappa_scale=kappa_scale,
             eta_scale=eta_scale,
             response_cardinality=response_cardinality,
             dtype=jnp.float64,
@@ -270,7 +269,7 @@ def fit_neural_grm(
 def fit_grm_baseline(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     dim=1, batch_size=256, num_epochs=500, learning_rate=1e-3,
-    patience=10, kappa_scale=0.1,
+    patience=10,
     lr_decay_factor=0.9, clip_norm=1.0,
     snapshot_epoch=None, sample_size=32,
     seed=42,
@@ -279,7 +278,6 @@ def fit_grm_baseline(
     qmc=False,
     kl_anneal_epochs=0,
     compute_elpd_loo=False,
-    discrimination_prior="horseshoe",
     discrimination_prior_scale=None,
 ):
     """Fit a standard GRM (no imputation) and save to disk.
@@ -294,11 +292,9 @@ def fit_grm_baseline(
         item_keys=item_keys,
         num_people=num_people,
         dim=dim,
-        kappa_scale=kappa_scale,
         response_cardinality=response_cardinality,
         dtype=jnp.float64,
         parameterization=parameterization,
-        discrimination_prior=discrimination_prior,
         discrimination_prior_scale=discrimination_prior_scale,
     )
 
@@ -344,7 +340,7 @@ def fit_grm_baseline(
 def fit_grm_imputed(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     imputation_model, dim=1, batch_size=256, num_epochs=500,
-    learning_rate=1e-3, patience=10, kappa_scale=0.1,
+    learning_rate=1e-3, patience=10,
     lr_decay_factor=0.9, clip_norm=1.0,
     initial_values=None, sample_size=32,
     seed=42,
@@ -353,7 +349,6 @@ def fit_grm_imputed(
     qmc=False,
     kl_anneal_epochs=0,
     compute_elpd_loo=False,
-    discrimination_prior="horseshoe",
     discrimination_prior_scale=None,
 ):
     """Fit a GRM with MICEBayesianLOO imputation and save to disk.
@@ -371,12 +366,10 @@ def fit_grm_imputed(
         item_keys=item_keys,
         num_people=num_people,
         dim=dim,
-        kappa_scale=kappa_scale,
         response_cardinality=response_cardinality,
         dtype=jnp.float64,
         imputation_model=imputation_model,
         parameterization=parameterization,
-        discrimination_prior=discrimination_prior,
         discrimination_prior_scale=discrimination_prior_scale,
     )
     steps_per_epoch = int(np.ceil(num_people / batch_size))
