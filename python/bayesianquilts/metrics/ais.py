@@ -19,6 +19,7 @@ leave-one-out cross-validation predictions.
 """
 
 import time
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -413,6 +414,11 @@ class SmallStepTransformation(Transformation):
         leaves, treedef = jax.tree_util.tree_flatten(theta)
 
         if not leaves:
+            warnings.warn(
+                f"{self.__class__.__name__}: empty PyTree, returning zero divergence "
+                f"(log Jacobian will be zero)",
+                stacklevel=2,
+            )
             return jnp.zeros(())
 
         # Check if all leaves have consistent shapes for divergence computation
@@ -422,7 +428,11 @@ class SmallStepTransformation(Transformation):
 
         # Determine the batch shape (S, N) from the first two dimensions
         if first_leaf.ndim < 2:
-            # Scalar or 1D - return zero
+            warnings.warn(
+                f"{self.__class__.__name__}: leaf ndim={first_leaf.ndim} < 2, "
+                f"returning zero divergence (log Jacobian will be zero)",
+                stacklevel=2,
+            )
             return jnp.zeros(first_leaf.shape)
 
         batch_shape = first_leaf.shape[:2]  # (S, N)
@@ -438,7 +448,13 @@ class SmallStepTransformation(Transformation):
                 break
 
         if not can_compute_divergence:
-            # Return zero divergence for complex PyTree structures
+            leaf_shapes = [l.shape for l in leaves]
+            warnings.warn(
+                f"{self.__class__.__name__}: cannot compute divergence for PyTree "
+                f"with leaf shapes {leaf_shapes} (need all 3D with consistent batch dims). "
+                f"Returning zero divergence (log Jacobian will be zero).",
+                stacklevel=2,
+            )
             return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         # Simple case: all leaves are (S, N, K_i) - compute divergence
@@ -466,51 +482,42 @@ class SmallStepTransformation(Transformation):
         leaf_indices = jnp.array(leaf_indices)
         feat_indices = jnp.array(feat_indices)
 
-        # Vectorized JVP computation using vmap
-        def single_jvp(flat_idx):
-            leaf_idx = leaf_indices[flat_idx]
-            feat_idx = feat_indices[flat_idx]
-
-            # Create one-hot tangent vector
-            tangents = []
-            for i, L in enumerate(leaves):
-                t = jnp.zeros_like(L)
-                # Use where to conditionally set the tangent
-                mask = jnp.arange(L.shape[-1]) == feat_idx
-                t = jnp.where(
-                    (i == leaf_idx) & mask[jnp.newaxis, jnp.newaxis, :],
-                    1.0, 0.0
-                )
-                tangents.append(t)
-
-            tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
-            _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
-
-            q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
-
-            # Sum contributions from this parameter
-            div_contrib = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
-            for i, q_leaf in enumerate(q_out_leaves):
-                if i == leaf_idx:
-                    if q_leaf.ndim == 2:
-                        div_contrib = q_leaf
-                    else:
-                        div_contrib = q_leaf[..., feat_idx]
-            return div_contrib
-
-        # Try to compute divergence; fall back to zero if JVP fails
+        # Compute trace of Jacobian via JVP with one-hot tangent vectors.
+        # Use a Python loop (not fori_loop) since tangent construction
+        # requires concrete leaf/feature indices.
         try:
-            # Use lax.fori_loop for memory efficiency instead of vmap
-            # (vmap would create total_K copies of all intermediates)
-            def body_fn(i, acc):
-                return acc + single_jvp(i)
+            divergence = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
+            for leaf_i, L in enumerate(leaves):
+                K_i = L.shape[-1]
+                for feat_j in range(K_i):
+                    # One-hot tangent: 1 at (leaf_i, :, :, feat_j), 0 elsewhere
+                    tangents = []
+                    for li, leaf in enumerate(leaves):
+                        if li == leaf_i:
+                            t = jnp.zeros_like(leaf)
+                            # Set [..., feat_j] = 1
+                            idx = [slice(None)] * leaf.ndim
+                            idx[-1] = feat_j
+                            t = t.at[tuple(idx)].set(1.0)
+                        else:
+                            t = jnp.zeros_like(leaf)
+                        tangents.append(t)
 
-            divergence = jax.lax.fori_loop(
-                0, total_K, body_fn,
-                jnp.zeros(batch_shape, dtype=first_leaf.dtype)
-            )
+                    tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
+                    _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
+
+                    q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
+                    q_leaf = q_out_leaves[leaf_i]
+                    if q_leaf.ndim == 2:
+                        divergence = divergence + q_leaf
+                    else:
+                        divergence = divergence + q_leaf[..., feat_j]
         except (ValueError, TypeError) as e:
-            # JVP failed - return zero divergence
+            warnings.warn(
+                f"{self.__class__.__name__}: JVP failed ({e!r}), "
+                f"returning zero divergence (log Jacobian will be zero)",
+                stacklevel=2,
+            )
             return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
 
         return divergence
@@ -717,6 +724,118 @@ class LikelihoodDescent(SmallStepTransformation):
 
         return jax.tree_util.tree_map(lambda x: -x, grad_ll)
 
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Exact divergence: div(Q) = -tr(H) where H is the Hessian of log ℓ."""
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+        # Sum diagonal Hessian across all parameter leaves: -sum_k d²logℓ/dθ_k²
+        leaves = jax.tree_util.tree_leaves(hess_diag)
+        div_Q = jnp.zeros(current_log_ell.shape, dtype=current_log_ell.dtype)
+        for leaf in leaves:
+            if leaf.ndim == 2:  # (S, N)
+                div_Q = div_Q - leaf
+            else:  # (S, N, K...) - sum over parameter dims
+                div_Q = div_Q - jnp.sum(leaf, axis=tuple(range(2, leaf.ndim)))
+        return div_Q
+
+
+class NaturalLikelihoodDescent(SmallStepTransformation):
+    """Natural-gradient LL transformation: preconditions LL's Q by the posterior covariance.
+
+    T_NLL(theta) = theta + h * Sigma @ (-grad log ell_i)
+
+    This approximates the influence function J^{-1} grad log ell_i without
+    the pi(theta|D) prefactor of the KL flow, making it cheaper (no posterior
+    evaluation) and more directly aligned with the optimal LOO shift.
+    """
+
+    def __init__(self, likelihood_fn: LikelihoodFunction, posterior_cov: jnp.ndarray):
+        super().__init__(likelihood_fn)
+        self.posterior_cov = posterior_cov  # (K_total, K_total)
+
+    def compute_Q(
+        self,
+        theta: Any,
+        data: Any,
+        params: Dict[str, Any],
+        current_log_ell: jnp.ndarray,
+        **kwargs,
+    ) -> Any:
+        # Get LL gradient: -grad(log ell)
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        Q_ll = jax.tree_util.tree_map(lambda x: -x, grad_ll)
+
+        # Flatten Q_ll leaves to (S, N, K_total), multiply by Sigma, unflatten
+        Q_leaves, treedef = jax.tree_util.tree_flatten(Q_ll)
+        S, N = current_log_ell.shape
+
+        flat_parts = []
+        split_sizes = []
+        for leaf in Q_leaves:
+            if leaf.ndim == 2:
+                flat_parts.append(leaf[..., jnp.newaxis])
+                split_sizes.append(1)
+            else:
+                trailing = leaf.shape[2:]
+                flat_parts.append(leaf.reshape(S, N, -1))
+                split_sizes.append(int(jnp.prod(jnp.array(trailing))))
+
+        Q_flat = jnp.concatenate(flat_parts, axis=-1)  # (S, N, K_total)
+        Q_nat_flat = jnp.einsum('snk,kj->snj', Q_flat, self.posterior_cov)
+
+        splits = jnp.cumsum(jnp.array(split_sizes[:-1]))
+        Q_nat_parts = jnp.split(Q_nat_flat, splits, axis=-1)
+
+        result_leaves = []
+        for orig_leaf, nat_part in zip(Q_leaves, Q_nat_parts):
+            if orig_leaf.ndim == 2:
+                result_leaves.append(nat_part[..., 0])
+            else:
+                result_leaves.append(nat_part.reshape(orig_leaf.shape))
+
+        return jax.tree_util.tree_unflatten(treedef, result_leaves)
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Exact divergence: div(Q_NLL) = -tr(Σ·H) where H is the Hessian of log ℓ.
+
+        With diagonal Hessian approximation: -Σ_k Σ_kk · H_kk.
+        With full Σ and diagonal H: -tr(Σ · diag(H)) = -Σ_k Σ_kk · H_kk.
+        """
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        # Flatten Hessian diagonal to (S, N, K_total)
+        hess_leaves = jax.tree_util.tree_leaves(hess_diag)
+        S, N = current_log_ell.shape
+
+        flat_hess_parts = []
+        for leaf in hess_leaves:
+            if leaf.ndim == 2:
+                flat_hess_parts.append(leaf[..., jnp.newaxis])
+            else:
+                flat_hess_parts.append(leaf.reshape(S, N, -1))
+
+        hess_flat = jnp.concatenate(flat_hess_parts, axis=-1)  # (S, N, K_total)
+
+        # div(Q) = -tr(Σ·H) = -Σ_{k,j} Σ_{kj} H_{jk}
+        # With diagonal Hessian: = -Σ_k Σ_{kk} H_{kk} = -(diag(Σ) · diag(H))
+        # But Σ is full, so: -tr(Σ·diag(H)) = -Σ_k H_{kk} Σ_{kk}
+        sigma_diag = jnp.diag(self.posterior_cov)  # (K_total,)
+        div_Q = -jnp.sum(hess_flat * sigma_diag[jnp.newaxis, jnp.newaxis, :], axis=-1)
+        return div_Q
+
 
 class KLDivergence(SmallStepTransformation):
     """KL Divergence transformation."""
@@ -784,6 +903,66 @@ class KLDivergence(SmallStepTransformation):
                 return scaling * g
 
         return jax.tree_util.tree_map(apply_scale, grad_ll)
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Divergence of Q_KL = c_i · g_i where c_i = -exp(log π - log ℓ_i).
+
+        div(Q) = c_i · [-tr(H_i) + (∇log π - ∇log ℓ_i)·∇log ℓ_i]
+
+        ∇log π is computed exactly as Σ_j ∇log ℓ_j (sum of per-obs gradients,
+        ignoring prior which is typically weak).
+        """
+        log_pi = kwargs.get("log_pi")
+        if log_pi is None:
+            return jnp.zeros_like(current_log_ell)
+
+        log_pi_norm = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
+
+        # c_i = -exp(log_pi - log_ell_i), shape (S, N)
+        if log_pi_norm.ndim == 1:
+            c_i = -jnp.exp(log_pi_norm[:, jnp.newaxis] - current_log_ell)
+        else:
+            c_i = -jnp.exp(log_pi_norm - current_log_ell)
+
+        # -tr(H_i)
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        tr_H = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(hess_diag):
+            if leaf.ndim == 2:
+                tr_H = tr_H + leaf
+            else:
+                tr_H = tr_H + jnp.sum(leaf, axis=tuple(range(2, leaf.ndim)))
+
+        # ∇log ℓ_i per obs
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        # (∇log π - ∇log ℓ_i) · ∇log ℓ_i
+        # ∇log π ≈ Σ_j ∇log ℓ_j (sum over obs dim)
+        # dot product per obs: Σ_k (∇log π_k - ∇log ℓ_{i,k}) · ∇log ℓ_{i,k}
+        dot_term = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(grad_ll):
+            if leaf.ndim == 2:
+                # (S, N) - scalar param
+                total_grad = jnp.sum(leaf, axis=1, keepdims=True)  # (S, 1)
+                dot_term = dot_term + (total_grad - leaf) * leaf
+            else:
+                # (S, N, K...) - sum over obs to get total grad (S, 1, K...)
+                total_grad = jnp.sum(leaf, axis=1, keepdims=True)
+                diff = total_grad - leaf  # (S, N, K...)
+                dot_term = dot_term + jnp.sum(
+                    diff * leaf, axis=tuple(range(2, leaf.ndim))
+                )
+
+        return c_i * (-tr_H + dot_term)
 
 
 class NaturalKLDivergence(SmallStepTransformation):
@@ -879,6 +1058,69 @@ class NaturalKLDivergence(SmallStepTransformation):
                 result_leaves.append(nat_part.reshape(orig_leaf.shape))
 
         return jax.tree_util.tree_unflatten(treedef, result_leaves)
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Divergence of Q_NKL = Σ · Q_KL.
+
+        div(Σ·Q_KL) = tr(Σ · ∇Q_KL).
+        Since Q_KL = c_i · g_i with c_i = -exp(log π - log ℓ_i):
+            div(Q_NKL) = c_i · [-tr(Σ·H_i) + (∇log π - ∇log ℓ_i)^T Σ ∇log ℓ_i]
+        where ∇log π ≈ Σ_j ∇log ℓ_j.
+        """
+        log_pi = kwargs.get("log_pi")
+        if log_pi is None:
+            return jnp.zeros_like(current_log_ell)
+
+        log_pi_norm = log_pi - jnp.max(log_pi, axis=0, keepdims=True)
+        if log_pi_norm.ndim == 1:
+            c_i = -jnp.exp(log_pi_norm[:, jnp.newaxis] - current_log_ell)
+        else:
+            c_i = -jnp.exp(log_pi_norm - current_log_ell)
+
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        # Flatten hessian diag to (S, N, K_total)
+        S, N = current_log_ell.shape
+        hess_flat_parts = []
+        for leaf in jax.tree_util.tree_leaves(hess_diag):
+            if leaf.ndim == 2:
+                hess_flat_parts.append(leaf[..., jnp.newaxis])
+            else:
+                hess_flat_parts.append(leaf.reshape(S, N, -1))
+        hess_flat = jnp.concatenate(hess_flat_parts, axis=-1)  # (S, N, K)
+
+        # tr(Σ·diag(H))
+        sigma_diag = jnp.diag(self.posterior_cov)
+        tr_SH = jnp.sum(hess_flat * sigma_diag[jnp.newaxis, jnp.newaxis, :], axis=-1)
+
+        # ∇log ℓ_i flattened
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        grad_flat_parts = []
+        for leaf in jax.tree_util.tree_leaves(grad_ll):
+            if leaf.ndim == 2:
+                grad_flat_parts.append(leaf[..., jnp.newaxis])
+            else:
+                grad_flat_parts.append(leaf.reshape(S, N, -1))
+        g_flat = jnp.concatenate(grad_flat_parts, axis=-1)  # (S, N, K)
+
+        # ∇log π ≈ Σ_j g_j, total grad (S, 1, K)
+        total_g = jnp.sum(g_flat, axis=1, keepdims=True)
+
+        # (∇log π - g_i)^T Σ g_i
+        diff = total_g - g_flat  # (S, N, K)
+        diff_Sigma = jnp.einsum('snk,kj->snj', diff, self.posterior_cov)
+        dot_term = jnp.sum(diff_Sigma * g_flat, axis=-1)  # (S, N)
+
+        return c_i * (-tr_SH + dot_term)
 
 
 class Variance(SmallStepTransformation):
@@ -984,6 +1226,59 @@ class Variance(SmallStepTransformation):
         Q = jax.tree_util.tree_map(compute_q_leaf, grad_log_f, grad_log_ell)
         return Q
 
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Divergence of Q_Var = w · δg where w = π·(f/ℓ)², δg = ∇log f - ∇log ℓ.
+
+        div(Q) = w · [div(δg) + (∇log w)·δg]
+               = w · [-tr(H_ℓ) + (∇log π + 2∇log f - 2∇log ℓ)·(∇log f - ∇log ℓ)]
+
+        ∇log π ≈ Σ_j ∇log ℓ_j (exact for posterior, ignoring prior).
+        ∇log f ≈ ∇log ℓ for the default target f = ℓ, so δg ≈ 0 and the dot term
+        vanishes. We retain the -tr(H_ℓ) term and the -2||∇log ℓ||² from ∇w.
+        """
+        log_pi = kwargs.get("log_pi")
+        if log_pi is None:
+            return jnp.zeros_like(current_log_ell)
+
+        log_pi_expanded = log_pi[:, jnp.newaxis] if log_pi.ndim == 1 else log_pi
+        log_f = kwargs.get("log_f", None)
+        if log_f is None:
+            log_f = jnp.log(self.f_fn(data, **params))
+
+        w = jnp.exp(log_pi_expanded + 2.0 * log_f - 2.0 * current_log_ell)
+
+        # -tr(H_ℓ)
+        if "log_ell_doubleprime" in kwargs and kwargs["log_ell_doubleprime"] is not None:
+            hess_diag = kwargs["log_ell_doubleprime"]
+        else:
+            hess_diag = self.likelihood_fn.log_likelihood_hessian_diag(data, params)
+
+        tr_H = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(hess_diag):
+            if leaf.ndim == 2:
+                tr_H = tr_H + leaf
+            else:
+                tr_H = tr_H + jnp.sum(leaf, axis=tuple(range(2, leaf.ndim)))
+
+        # ∇log ℓ per obs and total ∇log π ≈ Σ_j ∇log ℓ_j
+        if "log_ell_prime" in kwargs and kwargs["log_ell_prime"] is not None:
+            grad_ll = kwargs["log_ell_prime"]
+        else:
+            grad_ll = self.likelihood_fn.log_likelihood_gradient(data, params)
+
+        # For default target f = exp(log_ell), ∇log f = ∇log ℓ, so δg = 0
+        # and dot term = 0. Use the ∇w contribution: -2||∇log ℓ||²
+        grad_sq = jnp.zeros_like(current_log_ell)
+        for leaf in jax.tree_util.tree_leaves(grad_ll):
+            if leaf.ndim == 2:
+                grad_sq = grad_sq + leaf ** 2
+            else:
+                grad_sq = grad_sq + jnp.sum(leaf ** 2, axis=tuple(range(2, leaf.ndim)))
+
+        return w * (-tr_H - 2.0 * grad_sq)
+
 
 class PMM1(SmallStepTransformation):
     """Partial Moment Matching 1 (Shift based)."""
@@ -1078,6 +1373,108 @@ class PMM2(SmallStepTransformation):
 
         Q = Q_dict
         return Q
+
+
+class PMM3(SmallStepTransformation):
+    """Partial Moment Matching 3 (Full-rank affine, step-size parameterized).
+
+    Our generalization of MM3 from Paananen et al. (2021) with tunable step
+    size h. The vector field is:
+
+        Q(θ) = (L_w @ L^{-1} - I) @ (θ - μ) + (μ_w - μ)
+
+    so T(θ) = θ + h*Q(θ) interpolates between identity (h=0) and full
+    MM3 (h=1). The Jacobian is exact: log|J| = log|det(I + h*(L_w L^{-1} - I))|.
+    """
+
+    def compute_Q(
+        self,
+        theta: Any,
+        data: Any,
+        params: Dict[str, Any],
+        current_log_ell: jnp.ndarray,
+        log_ell_original: jnp.ndarray = None,
+        **kwargs,
+    ) -> Any:
+        if log_ell_original is None:
+            raise ValueError("log_ell_original required for PMM3")
+
+        log_w = -log_ell_original  # (S, N)
+        log_w = jax.lax.stop_gradient(log_w)
+        weights = jnp.exp(log_w)
+        S, N = log_w.shape
+
+        # Flatten all params to (S, D)
+        sorted_names = sorted(params.keys())
+        flat_parts = []
+        shapes_info = []
+        for name in sorted_names:
+            v = params[name]
+            if v.ndim == 1:
+                flat_parts.append(v[:, jnp.newaxis])
+                shapes_info.append((name, (), 1))
+            else:
+                k = int(jnp.prod(jnp.array(v.shape[1:])))
+                flat_parts.append(v.reshape(S, k))
+                shapes_info.append((name, v.shape[1:], k))
+        theta_flat = jnp.concatenate(flat_parts, axis=-1)  # (S, D)
+        D = theta_flat.shape[1]
+
+        # Unweighted mean and covariance
+        mu = jnp.mean(theta_flat, axis=0)  # (D,)
+        centered = theta_flat - mu[jnp.newaxis, :]
+        cov = jnp.dot(centered.T, centered) / S + 1e-8 * jnp.eye(D)
+        L = jnp.linalg.cholesky(cov)
+        L_inv = jnp.linalg.inv(L)
+
+        # Weighted statistics per observation
+        w_norm = weights / (jnp.sum(weights, axis=0, keepdims=True) + 1e-10)
+        mu_w = jnp.einsum('sn,sd->nd', w_norm, theta_flat)  # (N, D)
+        diff_w = theta_flat[:, jnp.newaxis, :] - mu_w[jnp.newaxis, :, :]
+        cov_w = jnp.einsum('sn,snd,sne->nde', w_norm, diff_w, diff_w)
+        cov_w = cov_w + 1e-8 * jnp.eye(D)[jnp.newaxis, :, :]
+        L_w = jnp.linalg.cholesky(cov_w)  # (N, D, D)
+
+        # A[n] = L_w[n] @ L_inv - I,  shape (N, D, D)
+        A = jnp.einsum('nde,ef->ndf', L_w, L_inv) - jnp.eye(D)[jnp.newaxis, :, :]
+
+        # Q(θ) = A @ (θ - μ) + (μ_w - μ)
+        # A: (N, D, D), centered: (S, D), mu_shift: (N, D)
+        mu_shift = mu_w - mu[jnp.newaxis, :]  # (N, D)
+        Q_flat = jnp.einsum('nde,se->snd', A, centered) + mu_shift[jnp.newaxis, :, :]  # (S, N, D)
+
+        # Store A for divergence computation
+        self._pmm3_A = A
+
+        # Unflatten Q back to param dict
+        Q_dict = {}
+        offset = 0
+        for name, trailing_shape, n_elems in shapes_info:
+            chunk = Q_flat[..., offset:offset + n_elems]  # (S, N, n_elems)
+            if trailing_shape == ():
+                Q_dict[name] = chunk.squeeze(-1)  # (S, N)
+            else:
+                Q_dict[name] = chunk.reshape(chunk.shape[:2] + trailing_shape)
+            offset += n_elems
+
+        return Q_dict
+
+    def compute_divergence_Q(
+        self,
+        theta: Any,
+        data: Any,
+        params: Dict[str, Any],
+        current_log_ell: jnp.ndarray,
+        **kwargs,
+    ) -> jnp.ndarray:
+        """Exact divergence: div(Q) = trace(A) where A = L_w @ L^{-1} - I.
+
+        This is constant w.r.t. θ, so the divergence is exact (no approximation).
+        """
+        A = self._pmm3_A  # (N, D, D)
+        trace_A = jnp.trace(A, axis1=-2, axis2=-1)  # (N,)
+        S = list(params.values())[0].shape[0]
+        return jnp.broadcast_to(trace_A[jnp.newaxis, :], (S, trace_A.shape[0]))
 
 
 class GlobalTransformation(Transformation):
@@ -1235,6 +1632,149 @@ class MM2(GlobalTransformation):
         return {
             "theta_new": theta_new,
             "log_jacobian": log_det_jac,
+            "eta_weights": eta_weights,
+            "psis_weights": psis_weights,
+            "khat": khat,
+            "predictions": predictions,
+            "log_ell_new": log_ell_new,
+            "weight_entropy": weight_entropy,
+            "psis_entropy": psis_entropy,
+            "p_loo_eta": p_loo_eta,
+            "p_loo_psis": p_loo_psis,
+            "ll_loo_eta": ll_loo_eta,
+            "ll_loo_psis": ll_loo_psis,
+        }
+
+
+class MM3(GlobalTransformation):
+    """Moment Matching 3 transformation - full-rank affine (shift + rotation).
+
+    From Paananen et al. (2021). Matches the full covariance structure
+    (not just marginal variances like MM2) by applying:
+
+        T_i(θ) = L_w_i @ L^{-1} @ (θ - μ) + μ_w_i
+
+    where L, L_w_i are Cholesky factors of the unweighted and weighted
+    covariance matrices respectively.
+
+    log|J| = log|det(L_w_i)| - log|det(L)|
+           = sum(log(diag(L_w_i))) - sum(log(diag(L)))
+    """
+
+    def __call__(
+        self,
+        max_iter,
+        params,
+        theta,
+        data,
+        log_ell,
+        log_pi=None,
+        log_ell_original=None,
+        **kwargs,
+    ):
+        """Apply MM3 (full-rank moment matching) transformation."""
+        if log_ell_original is None:
+            raise ValueError("log_ell_original is required for MM3")
+
+        log_w = -log_ell_original  # (S, N)
+        weights = jnp.exp(log_w)
+        S, N = log_w.shape
+
+        # Flatten all params to (S, D)
+        sorted_names = sorted(params.keys())
+        flat_parts = []
+        shapes_info = []  # (name, trailing_shape, n_elems)
+        for name in sorted_names:
+            v = params[name]
+            if v.ndim == 1:
+                flat_parts.append(v[:, jnp.newaxis])
+                shapes_info.append((name, (), 1))
+            else:
+                k = int(jnp.prod(jnp.array(v.shape[1:])))
+                flat_parts.append(v.reshape(S, k))
+                shapes_info.append((name, v.shape[1:], k))
+        theta_flat = jnp.concatenate(flat_parts, axis=-1)  # (S, D)
+        D = theta_flat.shape[1]
+
+        # Unweighted mean and covariance
+        mu = jnp.mean(theta_flat, axis=0)  # (D,)
+        centered = theta_flat - mu[jnp.newaxis, :]  # (S, D)
+        cov = jnp.dot(centered.T, centered) / S  # (D, D)
+        cov = cov + 1e-8 * jnp.eye(D)
+        L = jnp.linalg.cholesky(cov)  # (D, D)
+        L_inv = jnp.linalg.inv(L)  # (D, D)
+        log_det_L = jnp.sum(jnp.log(jnp.diag(L)))
+
+        # Pre-compute L_inv @ (theta - mu) for all samples: (S, D)
+        z = (centered @ L_inv.T)  # (S, D): standardized samples
+
+        # Weighted statistics per observation
+        # Normalize weights: (S, N)
+        w_norm = weights / (jnp.sum(weights, axis=0, keepdims=True) + 1e-10)
+
+        # Weighted mean: (N, D)
+        mu_w = jnp.einsum('sn,sd->nd', w_norm, theta_flat)
+
+        # Weighted covariance: (N, D, D)
+        diff_w = theta_flat[:, jnp.newaxis, :] - mu_w[jnp.newaxis, :, :]  # (S, N, D)
+        # cov_w[n] = sum_s w_norm[s,n] * diff_w[s,n,:] @ diff_w[s,n,:].T
+        cov_w = jnp.einsum('sn,snd,sne->nde', w_norm, diff_w, diff_w)  # (N, D, D)
+        cov_w = cov_w + 1e-8 * jnp.eye(D)[jnp.newaxis, :, :]
+
+        # Cholesky of weighted covariance: (N, D, D)
+        L_w = jnp.linalg.cholesky(cov_w)
+
+        # Transform: theta_new[s, n, :] = L_w[n] @ z[s, :] + mu_w[n, :]
+        # z: (S, D), L_w: (N, D, D), mu_w: (N, D)
+        theta_new_flat = jnp.einsum('nde,se->snd', L_w, z) + mu_w[jnp.newaxis, :, :]  # (S, N, D)
+
+        # Log Jacobian: log|det(L_w[n])| - log|det(L)|
+        # = sum(log(diag(L_w[n]))) - log_det_L
+        log_det_L_w = jnp.sum(jnp.log(jnp.diagonal(L_w, axis1=-2, axis2=-1)), axis=-1)  # (N,)
+        log_jac = (log_det_L_w[jnp.newaxis, :] - log_det_L)  # (1, N) -> broadcasts to (S, N)
+
+        # Unflatten theta_new_flat (S, N, D) back to param dict
+        new_params = {}
+        offset = 0
+        for name, trailing_shape, n_elems in shapes_info:
+            chunk = theta_new_flat[..., offset:offset + n_elems]  # (S, N, n_elems)
+            if trailing_shape == ():
+                new_params[name] = chunk.squeeze(-1)  # (S, N)
+            else:
+                new_params[name] = chunk.reshape(chunk.shape[:2] + trailing_shape)
+            offset += n_elems
+
+        theta_new = new_params
+
+        eta_weights, psis_weights, khat, log_ell_new = (
+            self.compute_importance_weights_helper(
+                self.likelihood_fn,
+                data,
+                params,
+                new_params,
+                log_jac,
+                False,
+                log_pi,
+                log_ell_original=log_ell_original,
+            )
+        )
+
+        predictions = self.likelihood_fn.log_likelihood(data, new_params)
+        exp_predictions = jnp.exp(predictions)
+        exp_log_ell_new = jnp.exp(log_ell_new)
+
+        weight_entropy = _compute_entropy(eta_weights)
+        psis_entropy = _compute_entropy(psis_weights)
+
+        p_loo_eta = _weighted_sum(eta_weights, exp_predictions)
+        p_loo_psis = _weighted_sum(psis_weights, exp_predictions)
+
+        ll_loo_eta = _weighted_sum(eta_weights, exp_log_ell_new)
+        ll_loo_psis = _weighted_sum(psis_weights, exp_log_ell_new)
+
+        return {
+            "theta_new": theta_new,
+            "log_jacobian": log_jac,
             "eta_weights": eta_weights,
             "psis_weights": psis_weights,
             "khat": khat,
@@ -1548,10 +2088,13 @@ class AdaptiveImportanceSampler:
         'identity',   # No computation - just standard PSIS-LOO
         'mm1',        # Global moment matching (shift only)
         'mm2',        # Global moment matching (shift + scale)
+        'mm3',        # Global moment matching (full-rank affine)
         'mixis',      # Mixture importance sampling (resampling-based)
         'pmm1',       # Partial moment matching (shift)
         'pmm2',       # Partial moment matching (shift + scale)
+        'pmm3',       # Partial moment matching (full-rank, step-size)
         'll',         # Likelihood descent (requires gradient)
+        'nll',        # Natural-gradient LL (requires gradient + posterior covariance)
         'kl',         # KL divergence (requires gradient + posterior weights)
         'nkl',        # Natural-gradient KL (requires gradient + posterior covariance)
         'var',        # Variance-based (requires gradient + Hessian + f_fn)
@@ -1850,14 +2393,18 @@ class AdaptiveImportanceSampler:
         all_transforms = {
             "ll": LikelihoodDescent(_lik),
             "likelihood_descent": LikelihoodDescent(_lik),
+            "nll": NaturalLikelihoodDescent(_lik, _posterior_cov),
+            "natural_ll": NaturalLikelihoodDescent(_lik, _posterior_cov),
             "kl": KLDivergence(_lik),
             "kl_divergence": KLDivergence(_lik),
             "nkl": NaturalKLDivergence(_lik, _posterior_cov),
             "natural_kl": NaturalKLDivergence(_lik, _posterior_cov),
             "pmm1": PMM1(_lik),
             "pmm2": PMM2(_lik),
+            "pmm3": PMM3(_lik),
             "mm1": MM1(_lik),
             "mm2": MM2(_lik),
+            "mm3": MM3(_lik),
             "mixis": MixIS(_lik),
         }
 
@@ -2087,6 +2634,7 @@ class AdaptiveImportanceSampler:
 
                     shorthand_map = {
                         "likelihood_descent": "ll",
+                        "natural_ll": "nll",
                         "kl_divergence": "kl",
                         "natural_kl": "nkl",
                         "variance_based": "var",
