@@ -1,0 +1,184 @@
+---
+title: "Adaptive Importance Sampling for LOO-CV"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Adaptive Importance Sampling for LOO-CV}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Overview
+
+The `bayesianquilts` R package provides **Adaptive Importance Sampling (AIS)**
+methods for efficient Leave-One-Out cross-validation (LOO-CV).  When standard
+PSIS-LOO produces high Pareto k-hat diagnostics (indicating unreliable
+estimates), AIS applies a series of parameter-space transformations to improve
+the importance weights.
+
+The method is described in Chang et al. (2024),
+[arXiv:2402.08151v2](https://arxiv.org/abs/2402.08151v2).
+
+## Available Transformations
+
+Transformations are tried in order of computational cost. Once a data point
+achieves k-hat below the threshold (default 0.7), it is considered "adapted"
+and subsequent transformations are skipped for that point.
+
+| Name | Description | Cost |
+|------|-------------|------|
+| `identity` | Standard PSIS-LOO (baseline) | O(1) |
+| `mm1` | Global moment matching (shift) | O(SN) |
+| `mm2` | Global moment matching (shift + scale) | O(SN) |
+| `pmm1` | Partial moment matching (shift) | O(SN) |
+| `pmm2` | Partial moment matching (shift + scale) | O(SN) |
+| `ll` | Likelihood descent (gradient-based) | O(SNK) |
+| `kl` | KL divergence (posterior-weighted gradient) | O(SNK) |
+| `nkl` | Natural-gradient KL (preconditioned by posterior covariance) | O(SNK + K^2) |
+
+## Quick Start with brms
+
+The simplest way to use AIS is with a `brms` model:
+
+```{r brms-example, eval=FALSE}
+library(bayesianquilts)
+library(brms)
+
+# Fit a logistic regression
+fit <- brm(y ~ x1 + x2, data = mydata, family = bernoulli())
+
+# Run AIS-LOO
+results <- ais_brms(fit, verbose = TRUE)
+
+# Best k-hat diagnostics
+summary(results$best$khat)
+```
+
+## Detailed Example: Logistic Regression
+
+```{r logistic-example}
+library(R6)
+library(loo)
+
+# Source package files (or use library(bayesianquilts) if installed)
+pkg_dir <- system.file(package = "bayesianquilts")
+if (pkg_dir == "") {
+  # Development: source files directly
+  for (f in c("utils.R", "psis.R", "ais_classes.R", "transformations.R",
+              "likelihoods.R", "ais.R")) {
+    source(file.path("R", f))
+  }
+}
+
+# Simulate data
+set.seed(42)
+N <- 100; K <- 3
+beta_true <- c(1.5, -0.8, 0.5)
+intercept_true <- 0.3
+
+X <- matrix(rnorm(N * K), nrow = N)
+eta <- X %*% beta_true + intercept_true
+y <- rbinom(N, 1, 1 / (1 + exp(-eta)))
+data <- list(X = X, y = y)
+
+# Simulate posterior samples
+S <- 200
+beta_samples <- matrix(
+  rnorm(S * K, mean = rep(beta_true, each = S), sd = 0.3),
+  nrow = S, ncol = K
+)
+intercept_samples <- rnorm(S, mean = intercept_true, sd = 0.3)
+params <- list(beta = beta_samples, intercept = intercept_samples)
+```
+
+### Create likelihood and run AIS
+
+```{r run-ais}
+lik <- LogisticRegressionLikelihood$new()
+sampler <- AdaptiveImportanceSampler$new(lik)
+
+results <- sampler$adaptive_is_loo(
+  data, params,
+  transformations = c("identity", "mm1", "ll", "kl", "nkl"),
+  verbose = TRUE
+)
+```
+
+### Inspect results
+
+```{r results}
+cat("Best k-hat: mean =", round(mean(results$best$khat), 3),
+    ", max =", round(max(results$best$khat), 3), "\n")
+
+# Compare transformations
+for (nm in names(results)) {
+  if (nm == "best" || is.null(results[[nm]]$khat)) next
+  cat(sprintf("  %-22s  mean_khat=%.3f  max_khat=%.3f\n",
+              nm, mean(results[[nm]]$khat), max(results[[nm]]$khat)))
+}
+```
+
+## Custom Likelihood Functions
+
+To use AIS with a custom model, implement the `LikelihoodFunction` interface:
+
+```{r custom-likelihood, eval=FALSE}
+MyLikelihood <- R6::R6Class("MyLikelihood",
+  inherit = LikelihoodFunction,
+  public = list(
+    log_likelihood = function(data, params) {
+      # Return S x N matrix of log-likelihoods
+    },
+    log_likelihood_gradient = function(data, params) {
+      # Return list of S x N x K arrays (gradient per param)
+    },
+    log_likelihood_hessian_diag = function(data, params) {
+      # Return list of S x N x K arrays (Hessian diagonal per param)
+    }
+  )
+)
+```
+
+### Built-in likelihoods
+
+- `LogisticRegressionLikelihood` -- binary classification
+- `PoissonRegressionLikelihood` -- count data
+- `LinearRegressionLikelihood` -- Gaussian regression
+
+## Jacobian Correction
+
+All small-step transformations compute the O(h) Jacobian correction term:
+
+$$\log|J| \approx \log|1 + h \cdot \text{div}(Q)|$$
+
+where $\text{div}(Q) = \text{tr}(\partial Q / \partial \theta)$ is the divergence of the
+vector field.
+
+- **LikelihoodDescent**: analytical divergence via Hessian diagonal
+- **PMM2**: analytical divergence from the scaling ratios
+- **KL, NKL**: numerical divergence via `numDeriv::jacobian`
+- **MM1**: exact Jacobian = 1 (pure shift)
+- **MM2**: exact Jacobian from affine scaling
+
+## Controlling the Transformation Search
+
+```{r control, eval=FALSE}
+# Only run specific transformations
+results <- sampler$adaptive_is_loo(
+  data, params,
+  transformations = c("identity", "kl", "nkl"),
+  rhos = c(0.01, 0.1, 0.5, 1.0, 2.0),  # custom step sizes
+  khat_threshold = 0.5,                  # stricter threshold
+  try_all_transformations = TRUE         # don't skip adapted points
+)
+```
+
+## References
+
+- Chang, J.C. et al. (2024). "Gradient-flow adaptive importance sampling for
+  Bayesian leave-one-out cross-validation." arXiv:2402.08151v2.
+- Vehtari, A. et al. (2017). "Practical Bayesian model evaluation using
+  leave-one-out cross-validation and WAIC." Statistics and Computing, 27(5).

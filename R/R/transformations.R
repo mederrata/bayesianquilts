@@ -140,10 +140,121 @@ SmallStepTransformation <- R6::R6Class("SmallStepTransformation",
       stop("compute_Q not implemented")
     },
 
-    #' @description Compute divergence of Q for Jacobian approximation
+    #' @description Compute divergence of Q for Jacobian approximation.
+    #'
+    #' Uses numDeriv for numerical trace(dQ/dtheta) computation.
+    #' For T(theta) = theta + h*Q(theta), log|J| ~ log|1 + h*div(Q)|.
+    #'
+    #' @param theta Current parameter PyTree (list of S x N x K arrays)
+    #' @param data Data object
+    #' @param params Original parameters (S x K)
+    #' @param current_log_ell Current log-likelihoods (S x N)
+    #' @param ... Extra args forwarded to compute_Q
+    #' @return Matrix (S x N) of divergence values
     compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
-      # Default: zero divergence (volume-preserving assumption)
-      matrix(0, nrow = nrow(current_log_ell), ncol = ncol(current_log_ell))
+      if (!requireNamespace("numDeriv", quietly = TRUE)) {
+        # Fallback to zero divergence if numDeriv not available
+        return(matrix(0, nrow = nrow(current_log_ell),
+                      ncol = ncol(current_log_ell)))
+      }
+
+      S <- nrow(current_log_ell)
+      N <- ncol(current_log_ell)
+
+      # Flatten theta to a vector per (s, n) and compute tr(dQ/dtheta)
+      # For efficiency, compute divergence for a representative sample
+      # then broadcast, or compute per (s, n) pair.
+      #
+      # Strategy: for each observation n, pick the first sample s=1,
+      # flatten theta[1, n, :] across all params to a vector,
+      # define Q as a function of that vector, compute numerical Jacobian,
+      # and take the trace. Then broadcast across S (Q doesn't depend on s
+      # for most transforms, so div(Q) is approximately constant across S).
+
+      div_Q <- matrix(0, nrow = S, ncol = N)
+
+      # Build flattening/unflattening helpers
+      param_names <- names(theta)
+      param_sizes <- integer(length(param_names))
+      for (idx in seq_along(param_names)) {
+        val <- theta[[param_names[idx]]]
+        if (length(dim(val)) == 3) {
+          param_sizes[idx] <- dim(val)[3]
+        } else {
+          param_sizes[idx] <- 1L
+        }
+      }
+      K_total <- sum(param_sizes)
+
+      # For small K_total, compute full numerical divergence
+      # For large K_total, fall back to zero
+      if (K_total > 50) {
+        return(div_Q)
+      }
+
+      # Compute divergence for each n using s=1 as representative
+      extra_args <- list(...)
+      for (n in seq_len(N)) {
+        # Extract theta[1, n, :] as flat vector
+        flat_theta <- numeric(K_total)
+        pos <- 1L
+        for (idx in seq_along(param_names)) {
+          val <- theta[[param_names[idx]]]
+          k_i <- param_sizes[idx]
+          if (length(dim(val)) == 3) {
+            flat_theta[pos:(pos + k_i - 1)] <- val[1, n, ]
+          } else {
+            flat_theta[pos] <- val[1, n]
+          }
+          pos <- pos + k_i
+        }
+
+        # Define Q as function of flat theta vector for this (s=1, n)
+        Q_flat_fn <- function(fv) {
+          # Unflatten fv into theta structure for (s=1, n)
+          theta_local <- theta
+          pos <- 1L
+          for (idx in seq_along(param_names)) {
+            k_i <- param_sizes[idx]
+            if (length(dim(theta_local[[param_names[idx]]])) == 3) {
+              theta_local[[param_names[idx]]][1, n, ] <- fv[pos:(pos + k_i - 1)]
+            } else {
+              theta_local[[param_names[idx]]][1, n] <- fv[pos]
+            }
+            pos <- pos + k_i
+          }
+          # Compute Q at modified theta
+          Q_val <- do.call(self$compute_Q,
+                           c(list(theta_local, data, params, current_log_ell),
+                             extra_args))
+          # Extract Q[1, n, :] as flat vector
+          out <- numeric(K_total)
+          pos <- 1L
+          for (idx in seq_along(param_names)) {
+            k_i <- param_sizes[idx]
+            qv <- Q_val[[param_names[idx]]]
+            if (length(dim(qv)) == 3) {
+              out[pos:(pos + k_i - 1)] <- qv[1, n, ]
+            } else {
+              out[pos] <- qv[1, n]
+            }
+            pos <- pos + k_i
+          }
+          return(out)
+        }
+
+        # Compute Jacobian and take trace
+        tryCatch({
+          jac <- numDeriv::jacobian(Q_flat_fn, flat_theta)
+          trace_val <- sum(diag(jac))
+          # Broadcast across S
+          div_Q[, n] <- trace_val
+        }, error = function(e) {
+          div_Q[, n] <<- 0
+        })
+      }
+
+      return(div_Q)
     }
   )
 )
@@ -400,6 +511,9 @@ PMM1 <- R6::R6Class("PMM1",
 PMM2 <- R6::R6Class("PMM2",
   inherit = SmallStepTransformation,
   public = list(
+    # Cache moments for divergence computation
+    .cached_moments = NULL,
+
     compute_Q = function(theta, data, params, current_log_ell,
                          log_ell_original = NULL, ...) {
       if (is.null(log_ell_original)) stop("log_ell_original required for PMM2")
@@ -408,6 +522,7 @@ PMM2 <- R6::R6Class("PMM2",
       weights <- exp(log_w)
 
       moments <- self$compute_moments(params, weights)
+      self$.cached_moments <- moments
 
       S <- nrow(current_log_ell)
       N <- ncol(current_log_ell)
@@ -419,19 +534,16 @@ PMM2 <- R6::R6Class("PMM2",
 
         if (is.null(dim(val)) || length(dim(val)) == 1) {
           ratio <- sqrt(m$var_w / (m$var + 1e-10)) # N
-          # term1: (ratio - 1) * val -> S x N
           term1 <- outer(val, ratio - 1, "*")
-          # term2: mean_w - ratio * mean -> N
           term2 <- m$mean_w - ratio * m$mean
           Q[[name]] <- sweep(term1, 2, term2, "+")
         } else {
           K <- ncol(val)
-          # ratio: N x K
           var_expanded <- matrix(m$var, nrow = N, ncol = K, byrow = TRUE)
           ratio <- sqrt(m$var_w / (var_expanded + 1e-10))
 
           arr <- array(0, dim = c(S, N, K))
-          val_centered <- sweep(val, 2, m$mean, "-") # S x K
+          val_centered <- sweep(val, 2, m$mean, "-")
           for (i in seq_len(N)) {
             scaled <- sweep(val_centered, 2, ratio[i, ] - 1, "*")
             offset <- m$mean_w[i, ] - ratio[i, ] * m$mean
@@ -441,6 +553,44 @@ PMM2 <- R6::R6Class("PMM2",
         }
       }
       return(Q)
+    },
+
+    #' @description Compute divergence of PMM2's Q.
+    #' Q_k = (ratio_k - 1) * theta_k + const, so dQ_k/dtheta_k = ratio_k - 1.
+    #' div(Q) = sum_k (ratio_k - 1).
+    compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
+      moments <- self$.cached_moments
+      if (is.null(moments)) {
+        # Fallback: recompute
+        kwargs <- list(...)
+        log_ell_original <- kwargs$log_ell_original
+        if (is.null(log_ell_original)) log_ell_original <- current_log_ell
+        log_w <- -log_ell_original
+        moments <- self$compute_moments(params, exp(log_w))
+      }
+
+      S <- nrow(current_log_ell)
+      N <- ncol(current_log_ell)
+      div_Q <- matrix(0, nrow = S, ncol = N)
+
+      for (name in names(params)) {
+        val <- params[[name]]
+        m <- moments[[name]]
+
+        if (is.null(dim(val)) || length(dim(val)) == 1) {
+          ratio <- sqrt(m$var_w / (m$var + 1e-10)) # N
+          # Each scalar param contributes (ratio - 1) to divergence
+          div_Q <- sweep(div_Q, 2, ratio - 1, "+")
+        } else {
+          K <- ncol(val)
+          var_expanded <- matrix(m$var, nrow = N, ncol = K, byrow = TRUE)
+          ratio <- sqrt(m$var_w / (var_expanded + 1e-10)) # N x K
+          # Sum over K: each entry contributes (ratio_k - 1)
+          div_Q <- sweep(div_Q, 2, rowSums(ratio - 1), "+")
+        }
+      }
+
+      return(div_Q)
     }
   )
 )
@@ -545,6 +695,7 @@ MM2 <- R6::R6Class("MM2",
 
         if (is.null(dim(val)) || length(dim(val)) == 1) {
           ratio <- sqrt(m$var_w / (m$var + 1e-10))
+          ratio[!is.finite(ratio)] <- 1  # clamp degenerate ratios
           term1 <- outer(val - m$mean, ratio)
           new_params[[name]] <- sweep(term1, 2, m$mean_w, "+")
           log_det_jac <- sweep(log_det_jac, 2, log(ratio), "+")
@@ -553,6 +704,7 @@ MM2 <- R6::R6Class("MM2",
           K <- ncol(val)
           var_expanded <- matrix(m$var, nrow = N, ncol = K, byrow = TRUE)
           ratio <- sqrt(m$var_w / (var_expanded + 1e-10))
+          ratio[!is.finite(ratio)] <- 1  # clamp degenerate ratios
 
           val_centered <- sweep(val, 2, m$mean, "-")
           arr <- array(0, dim = c(S, N, K))

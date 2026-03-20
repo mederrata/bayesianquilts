@@ -20,6 +20,7 @@ export(MM2)
 export(LogisticRegressionLikelihood)
 export(PoissonRegressionLikelihood)
 export(LinearRegressionLikelihood)
+export(BrmsLikelihood)
 
 # Exported constants
 export(DEFAULT_TRANSFORMATION_ORDER)
