@@ -220,6 +220,85 @@ class FactorizedGRModel(IRTModel):
         self._dim_models = dim_models
         return self
 
+    def standardize_abilities(self, weights=None):
+        """Rescale per-scale parameters so abilities are N(0, 1) per dimension.
+
+        Operates on the scale-factorized parameter names
+        (``abilities_j``, ``discriminations_j``, etc.).
+
+        Args:
+            weights: Optional (N,) per-person weights for weighted mean/std.
+
+        Returns:
+            dict with ``mu`` and ``sigma`` arrays of shape (D,).
+        """
+        if self.surrogate_sample is None:
+            raise ValueError("No surrogate_sample — fit or assemble the model first")
+
+        D = self.dimensions
+        mu = jnp.zeros(D, dtype=self.dtype)
+        sigma = jnp.ones(D, dtype=self.dtype)
+
+        for d in range(D):
+            ab_key = f"abilities_{d}"
+            if ab_key not in self.surrogate_sample:
+                continue
+
+            ab = self.surrogate_sample[ab_key]  # (S, N, 1, 1, 1) or (N, 1, 1, 1)
+            ab_flat = ab.reshape(-1) if ab.ndim <= 4 else ab[:, :, 0, 0, 0].reshape(-1)
+
+            if weights is not None:
+                w = jnp.asarray(weights, dtype=self.dtype)
+                w = w / jnp.sum(w)
+                if ab.ndim == 5:
+                    ab_2d = ab[:, :, 0, 0, 0]  # (S, N)
+                    m = jnp.sum(ab_2d * w[jnp.newaxis, :], axis=1)
+                    mu = mu.at[d].set(jnp.mean(m))
+                    v = jnp.sum(w[jnp.newaxis, :] * (ab_2d - jnp.mean(m))**2, axis=1)
+                    sigma = sigma.at[d].set(jnp.sqrt(jnp.mean(v)))
+                else:
+                    ab_1d = ab[:, 0, 0, 0]
+                    mu = mu.at[d].set(jnp.sum(w * ab_1d))
+                    sigma = sigma.at[d].set(jnp.sqrt(jnp.sum(w * (ab_1d - mu[d])**2)))
+            else:
+                mu = mu.at[d].set(jnp.mean(ab_flat))
+                sigma = sigma.at[d].set(jnp.std(ab_flat))
+
+        sigma = jnp.where(sigma < 1e-8, 1.0, sigma)
+
+        # Apply rescaling to each dimension's parameters
+        for d in range(D):
+            mu_d = mu[d]
+            sigma_d = sigma[d]
+
+            for store in [self.surrogate_sample, self.calibrated_expectations, self.calibrated_sd]:
+                if store is None:
+                    continue
+
+                ab_key = f"abilities_{d}"
+                disc_key = f"discriminations_{d}"
+                diff0_key = f"difficulties0_{d}"
+                ddiff_key = f"ddifficulties_{d}"
+
+                is_sd = (store is self.calibrated_sd)
+
+                if ab_key in store:
+                    if is_sd:
+                        store[ab_key] = store[ab_key] / sigma_d
+                    else:
+                        store[ab_key] = (store[ab_key] - mu_d) / sigma_d
+                if disc_key in store:
+                    store[disc_key] = store[disc_key] * sigma_d
+                if diff0_key in store:
+                    if is_sd:
+                        store[diff0_key] = store[diff0_key] / sigma_d
+                    else:
+                        store[diff0_key] = (store[diff0_key] - mu_d) / sigma_d
+                if ddiff_key in store:
+                    store[ddiff_key] = store[ddiff_key] / sigma_d
+
+        return {'mu': mu, 'sigma': sigma}
+
     def transform(self, params):
         """Reassemble scale-factorized parameters into full tensors."""
         discriminations = []
