@@ -13,3 +13,4 @@ from .util import factorized_distribution_moments
 
 from .generalized_gamma import GeneralizedGamma
 from .piecewise_exponential import PiecewiseExponential
+from .gdr2 import GDR2Prior

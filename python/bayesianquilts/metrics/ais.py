@@ -387,20 +387,9 @@ class SmallStepTransformation(Transformation):
         The divergence div(Q) is used to compute the log Jacobian determinant:
             log|J| ≈ log(1 + h * div(Q))
 
-        **Zero Divergence Fallback**: Returns zero divergence when:
-        - PyTree is empty
-        - Leaves have fewer than 2 dimensions
-        - Leaves have inconsistent batch shapes
-        - Any leaf has more than 3 dimensions (complex structure)
-
-        This approximation is reasonable because:
-        1. The Jacobian correction term is often small relative to other terms
-        2. Many LOO implementations (e.g., standard PSIS-LOO) ignore this term
-        3. Computing exact divergence for complex PyTrees is O(K) expensive
-        4. Zero divergence corresponds to assuming volume-preserving transformation
-
-        For simple 3D PyTrees (all leaves shape (S, N, K)), exact divergence
-        is computed via JVP-based trace estimation.
+        All subclasses must either override this method with an exact analytical
+        formula or rely on this generic JVP-based implementation. No zero-fallback
+        is used — if divergence cannot be computed, an error is raised.
 
         Args:
             theta: Current parameter PyTree
@@ -409,56 +398,49 @@ class SmallStepTransformation(Transformation):
             current_log_ell: Current log-likelihood values (S, N)
 
         Returns:
-            Divergence array of shape (S, N), or zeros if fallback is used.
+            Divergence array of shape (S, N).
+
+        Raises:
+            ValueError: If the PyTree structure prevents divergence computation.
         """
         leaves, treedef = jax.tree_util.tree_flatten(theta)
 
         if not leaves:
-            warnings.warn(
-                f"{self.__class__.__name__}: empty PyTree, returning zero divergence "
-                f"(log Jacobian will be zero)",
-                stacklevel=2,
+            raise ValueError(
+                f"{self.__class__.__name__}: empty PyTree — cannot compute "
+                f"divergence. Override compute_divergence_Q in your subclass."
             )
-            return jnp.zeros(())
 
-        # Check if all leaves have consistent shapes for divergence computation
-        # We need all leaves to have shape (S, N, K) where the last dim is the parameter dim
-        # If any leaf has more than 3 dimensions, we can't compute divergence simply
         first_leaf = leaves[0]
 
-        # Determine the batch shape (S, N) from the first two dimensions
         if first_leaf.ndim < 2:
-            warnings.warn(
-                f"{self.__class__.__name__}: leaf ndim={first_leaf.ndim} < 2, "
-                f"returning zero divergence (log Jacobian will be zero)",
-                stacklevel=2,
+            raise ValueError(
+                f"{self.__class__.__name__}: leaf ndim={first_leaf.ndim} < 2 — "
+                f"cannot compute divergence. Override compute_divergence_Q in "
+                f"your subclass."
             )
-            return jnp.zeros(first_leaf.shape)
 
         batch_shape = first_leaf.shape[:2]  # (S, N)
 
         # Check if all leaves have consistent batch shapes and are 3D (S, N, K)
-        can_compute_divergence = True
         for leaf in leaves:
             if leaf.ndim != 3:
-                can_compute_divergence = False
-                break
+                leaf_shapes = [l.shape for l in leaves]
+                raise ValueError(
+                    f"{self.__class__.__name__}: cannot compute divergence for "
+                    f"PyTree with leaf shapes {leaf_shapes} (need all 3D with "
+                    f"consistent batch dims). Override compute_divergence_Q in "
+                    f"your subclass with an analytical formula."
+                )
             if leaf.shape[:2] != batch_shape:
-                can_compute_divergence = False
-                break
+                leaf_shapes = [l.shape for l in leaves]
+                raise ValueError(
+                    f"{self.__class__.__name__}: inconsistent batch shapes in "
+                    f"PyTree leaves {leaf_shapes}. Override compute_divergence_Q "
+                    f"in your subclass with an analytical formula."
+                )
 
-        if not can_compute_divergence:
-            leaf_shapes = [l.shape for l in leaves]
-            warnings.warn(
-                f"{self.__class__.__name__}: cannot compute divergence for PyTree "
-                f"with leaf shapes {leaf_shapes} (need all 3D with consistent batch dims). "
-                f"Returning zero divergence (log Jacobian will be zero).",
-                stacklevel=2,
-            )
-            return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
-
-        # Simple case: all leaves are (S, N, K_i) - compute divergence
-        # Note: We don't pass pre-computed gradients (log_ell_prime) to allow JVP to work.
+        # Simple case: all leaves are (S, N, K_i) - compute divergence via JVP
         # Filter out pre-computed values that would make Q constant w.r.t. theta.
         kwargs_for_jvp = {
             k: v for k, v in kwargs.items()
@@ -468,57 +450,31 @@ class SmallStepTransformation(Transformation):
         def func(t):
             return self.compute_Q(t, data, params, current_log_ell, **kwargs_for_jvp)
 
-        # Compute total number of parameters
-        total_K = sum(L.shape[-1] for L in leaves)
-
-        # Build index mapping: flat_idx -> (leaf_idx, feature_idx)
-        leaf_indices = []
-        feat_indices = []
-        for i, L in enumerate(leaves):
+        divergence = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
+        for leaf_i, L in enumerate(leaves):
             K_i = L.shape[-1]
-            leaf_indices.extend([i] * K_i)
-            feat_indices.extend(range(K_i))
-
-        leaf_indices = jnp.array(leaf_indices)
-        feat_indices = jnp.array(feat_indices)
-
-        # Compute trace of Jacobian via JVP with one-hot tangent vectors.
-        # Use a Python loop (not fori_loop) since tangent construction
-        # requires concrete leaf/feature indices.
-        try:
-            divergence = jnp.zeros(batch_shape, dtype=first_leaf.dtype)
-            for leaf_i, L in enumerate(leaves):
-                K_i = L.shape[-1]
-                for feat_j in range(K_i):
-                    # One-hot tangent: 1 at (leaf_i, :, :, feat_j), 0 elsewhere
-                    tangents = []
-                    for li, leaf in enumerate(leaves):
-                        if li == leaf_i:
-                            t = jnp.zeros_like(leaf)
-                            # Set [..., feat_j] = 1
-                            idx = [slice(None)] * leaf.ndim
-                            idx[-1] = feat_j
-                            t = t.at[tuple(idx)].set(1.0)
-                        else:
-                            t = jnp.zeros_like(leaf)
-                        tangents.append(t)
-
-                    tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
-                    _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
-
-                    q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
-                    q_leaf = q_out_leaves[leaf_i]
-                    if q_leaf.ndim == 2:
-                        divergence = divergence + q_leaf
+            for feat_j in range(K_i):
+                # One-hot tangent: 1 at (leaf_i, :, :, feat_j), 0 elsewhere
+                tangents = []
+                for li, leaf in enumerate(leaves):
+                    if li == leaf_i:
+                        t = jnp.zeros_like(leaf)
+                        idx = [slice(None)] * leaf.ndim
+                        idx[-1] = feat_j
+                        t = t.at[tuple(idx)].set(1.0)
                     else:
-                        divergence = divergence + q_leaf[..., feat_j]
-        except (ValueError, TypeError) as e:
-            warnings.warn(
-                f"{self.__class__.__name__}: JVP failed ({e!r}), "
-                f"returning zero divergence (log Jacobian will be zero)",
-                stacklevel=2,
-            )
-            return jnp.zeros(batch_shape, dtype=first_leaf.dtype)
+                        t = jnp.zeros_like(leaf)
+                    tangents.append(t)
+
+                tangent_tree = jax.tree_util.tree_unflatten(treedef, tangents)
+                _, tangent_out = jax.jvp(func, (theta,), (tangent_tree,))
+
+                q_out_leaves = jax.tree_util.tree_leaves(tangent_out)
+                q_leaf = q_out_leaves[leaf_i]
+                if q_leaf.ndim == 2:
+                    divergence = divergence + q_leaf
+                else:
+                    divergence = divergence + q_leaf[..., feat_j]
 
         return divergence
 
@@ -1283,6 +1239,13 @@ class Variance(SmallStepTransformation):
 class PMM1(SmallStepTransformation):
     """Partial Moment Matching 1 (Shift based)."""
 
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Exact divergence: Q is constant w.r.t. theta, so div(Q) = 0."""
+        S, N = current_log_ell.shape
+        return jnp.zeros((S, N), dtype=current_log_ell.dtype)
+
     def compute_Q(
         self,
         theta: jnp.ndarray,
@@ -1327,6 +1290,38 @@ class PMM1(SmallStepTransformation):
 
 class PMM2(SmallStepTransformation):
     """Partial Moment Matching 2 (Scale + Shift)."""
+
+    def compute_divergence_Q(
+        self, theta, data, params, current_log_ell, **kwargs
+    ) -> jnp.ndarray:
+        """Exact divergence: Q_k = (ratio_k - 1)*theta_k + const.
+
+        div(Q) = sum_k (ratio_k - 1) per observation, constant w.r.t. theta.
+        """
+        log_ell_original = kwargs.get("log_ell_original")
+        if log_ell_original is None:
+            raise ValueError("log_ell_original required for PMM2 divergence")
+
+        log_w = -log_ell_original
+        log_w = jax.lax.stop_gradient(log_w)
+        weights = jnp.exp(log_w)
+        moments = Transformation.compute_moments(params, weights)
+
+        S, N = current_log_ell.shape
+        div_total = jnp.zeros(N, dtype=current_log_ell.dtype)
+
+        for name, value in params.items():
+            m = moments[name]
+            if value.ndim == 1:
+                ratio = jnp.sqrt(m["var_w"] / (m["var"] + 1e-10))  # (N,)
+                div_total = div_total + (ratio - 1.0)
+            else:
+                ratio = jnp.sqrt(
+                    m["var_w"] / (m["var"][jnp.newaxis, :] + 1e-10)
+                )  # (N, K)
+                div_total = div_total + jnp.sum(ratio - 1.0, axis=-1)
+
+        return jnp.broadcast_to(div_total[jnp.newaxis, :], (S, N))
 
     def compute_Q(
         self,
@@ -2615,10 +2610,14 @@ class AdaptiveImportanceSampler:
 
             # Determine rhos for this transform
             current_rhos = rhos
-            if name in ["mm1", "mm2"]:
+            if name in ["mm1", "mm2", "mm3"]:
                 current_rhos = [
                     1.0
                 ]  # These don't use step size in the same way (or are global)
+            elif name in ["pmm1", "pmm2", "pmm3"]:
+                # Skip h=1 for PMM transforms — at h=1 PMM reduces to the
+                # corresponding MM transform (full moment-matching step).
+                current_rhos = [r for r in current_rhos if r != 1.0]
 
             # For each rho
             for rho in current_rhos:
