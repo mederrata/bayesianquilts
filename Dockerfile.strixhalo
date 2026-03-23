@@ -1,0 +1,27 @@
+FROM rocm/jax-training:latest
+
+# Suppress TPU warnings
+ENV TPU_ACCELERATOR_TYPE=none
+ENV TPU_WORKER_HOSTNAMES=localhost
+
+# Required for AMD Strix Halo (gfx1151) — prebuilt ROCm targets gfx1100
+ENV HSA_OVERRIDE_GFX_VERSION=11.0.0
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    tfp-nightly \
+    arviz \
+    'optax>=0.2.4' \
+    'flax>=0.12.4' \
+    orbax-checkpoint \
+    grain \
+    tqdm \
+    polars \
+    blackjax \
+    scikit-learn
+
+# Install bayesianquilts
+COPY python/ /opt/bayesianquilts/
+ENV PYTHONPATH="/opt/bayesianquilts:${PYTHONPATH}"
+
+WORKDIR /workspace

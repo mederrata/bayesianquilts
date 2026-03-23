@@ -9,6 +9,7 @@ import numpy as np
 import tensorflow_probability.substrates.jax as tfp
 from tensorflow_probability.substrates.jax import distributions as tfd
 
+from bayesianquilts.distributions.gdr2 import GDR2Prior
 from bayesianquilts.jax.parameter import Decomposed
 from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
 from bayesianquilts.model import QuiltedBayesianModel
@@ -67,7 +68,7 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
     """Quilted piecewise exponential survival model.
 
     Additive decomposition in log-rate space (multiplicative on hazard)
-    with horseshoe priors for shrinkage of higher-order interactions.
+    with configurable shrinkage priors (horseshoe or GDR2).
     """
 
     def __init__(
@@ -79,6 +80,10 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
         time_scale=1.0,
         dtype=jnp.float64,
         initialize_distributions=True,
+        prior_type="horseshoe",
+        mu_R2=0.5,
+        phi_R2=2.0,
+        gdr2_concentration=1.0,
     ):
         super().__init__(dtype=dtype)
         self.time_scale = float(time_scale)
@@ -87,6 +92,10 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
         self.shrinkage_scale = shrinkage_scale
         self.dim_decay_factor = dim_decay_factor
         self.rate_interact = rate_interact
+        self.prior_type = prior_type
+        self.mu_R2 = mu_R2
+        self.phi_R2 = phi_R2
+        self.gdr2_concentration = gdr2_concentration
 
         self.rate_decomposition = Decomposed(
             interactions=rate_interact,
@@ -106,13 +115,19 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
             rate_shapes,
         ) = self.rate_decomposition.generate_tensors(dtype=self.dtype)
 
+        self.rate_vars = rate_vars
+        self.rate_var_list = list(rate_vars.keys())
+
+        if self.prior_type in ("gdr2", "r2d2"):
+            self._create_distributions_gdr2(rate_tensors, rate_shapes)
+        else:
+            self._create_distributions_horseshoe(rate_tensors, rate_shapes)
+
+    def _create_distributions_horseshoe(self, rate_tensors, rate_shapes):
         rate_scales = {
             k: 2 * self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
             for k, v in rate_shapes.items()
         }
-
-        self.rate_vars = rate_vars
-        self.rate_var_list = list(rate_vars.keys())
 
         rate_dict = {}
         for label, tensor in rate_tensors.items():
@@ -145,6 +160,91 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
 
         bijectors = defaultdict(tfp.bijectors.Identity)
         bijectors["tau"] = tfp.bijectors.Softplus()
+
+        rate_surrogate_gen, rate_param_init = (
+            build_factored_surrogate_posterior_generator(
+                rate_model, bijectors=bijectors
+            )
+        )
+
+        self.prior_distribution = tfd.JointDistributionNamed(
+            {"rate_model": rate_model}
+        )
+
+        self.surrogate_distribution_generator = (
+            lambda params: tfd.JointDistributionNamed(
+                {**rate_surrogate_gen(params).model}
+            )
+        )
+        self.surrogate_parameter_initializer = lambda: {**rate_param_init()}
+
+        self.params = self.surrogate_parameter_initializer()
+        self.var_list = list(self.params.keys())
+
+    def _create_distributions_gdr2(self, rate_tensors, rate_shapes):
+        # Build GDR2 prior: one component per interaction term
+        component_names = sorted(rate_tensors.keys())
+        n_components = len(component_names)
+        component_sizes = []
+        component_weights = []
+
+        for name in component_names:
+            tensor = rate_tensors[name]
+            component_sizes.append(int(np.prod(tensor.shape)))
+            order = self.rate_decomposition.component_order(name)
+            component_weights.append(
+                self.dim_decay_factor ** max(order - 1, 0)
+            )
+
+        self.gdr2_prior = GDR2Prior(
+            n_components=n_components,
+            component_sizes=component_sizes,
+            mu_R2=self.mu_R2,
+            phi_R2=self.phi_R2,
+            concentration=self.gdr2_concentration,
+            component_weights=np.array(component_weights),
+            prior_type=self.prior_type,
+            dtype=self.dtype,
+        )
+        self._gdr2_component_names = component_names
+
+        # Normal priors on rate components (wider — GDR2 provides shrinkage)
+        rate_dict = {}
+        for label, tensor in rate_tensors.items():
+            rate_dict[label] = tfd.Independent(
+                tfd.Normal(
+                    loc=jnp.zeros_like(jnp.asarray(tensor, self.dtype)),
+                    scale=2.0 * jnp.ones_like(jnp.asarray(tensor, self.dtype)),
+                ),
+                reinterpreted_batch_ndims=len(tensor.shape),
+            )
+
+        # R2 and phi in unconstrained space — sigmoid/softmax applied in log-prior
+        # R2: scalar logit (sigmoid maps to (0,1))
+        rate_dict["R2_logit"] = tfd.Independent(
+            tfd.Normal(
+                loc=jnp.zeros([1], dtype=self.dtype),
+                scale=2.0 * jnp.ones([1], dtype=self.dtype),
+            ),
+            reinterpreted_batch_ndims=1,
+        )
+        rate_tensors["R2_logit"] = jnp.zeros([1], dtype=self.dtype)
+
+        # phi: K-dim logits (softmax maps to simplex)
+        rate_dict["phi_logit"] = tfd.Independent(
+            tfd.Normal(
+                loc=jnp.zeros([n_components], dtype=self.dtype),
+                scale=jnp.ones([n_components], dtype=self.dtype),
+            ),
+            reinterpreted_batch_ndims=1,
+        )
+        rate_tensors["phi_logit"] = jnp.zeros(
+            [n_components], dtype=self.dtype
+        )
+
+        rate_model = tfd.JointDistributionNamed(rate_dict)
+
+        bijectors = defaultdict(tfp.bijectors.Identity)
 
         rate_surrogate_gen, rate_param_init = (
             build_factored_surrogate_posterior_generator(
@@ -214,39 +314,76 @@ class PiecewiseExponentialQuilt(QuiltedBayesianModel):
             jnp.ones_like(log_likelihood) * min_val,
         )
 
+        prior_weight = jnp.asarray(prior_weight, self.dtype)
+
+        if self.prior_type in ("gdr2", "r2d2"):
+            shrinkage_lp = self._gdr2_log_prior(params)
+        else:
+            shrinkage_lp = self._horseshoe_log_prior(params)
+
+        # Component Normal priors from JointDistribution
         rate_prior_params = {
             k: jnp.asarray(params[k], self.dtype)
             for k in self.rate_var_list
         }
-        rate_prior_params["tau"] = jnp.asarray(params["tau"], self.dtype)
+        if self.prior_type in ("gdr2", "r2d2"):
+            rate_prior_params["R2_logit"] = jnp.asarray(
+                params["R2_logit"], self.dtype
+            )
+            rate_prior_params["phi_logit"] = jnp.asarray(
+                params["phi_logit"], self.dtype
+            )
+        else:
+            rate_prior_params["tau"] = jnp.asarray(params["tau"], self.dtype)
         prior = self.prior_distribution.log_prob(
             {"rate_model": rate_prior_params}
         )
 
-        # Horseshoe effective prior on summed log-rate coefficients
-        # Use TFP Horseshoe (marginalizes out local scales) with global tau
+        energy = (
+            jnp.sum(log_likelihood, axis=-1)
+            + prior_weight * prior
+            + prior_weight * shrinkage_lp
+        )
+
+        return energy
+
+    def _horseshoe_log_prior(self, params):
+        """Horseshoe effective prior on summed log-rate coefficients."""
         rate_coefs = self.rate_decomposition.sum_parts(params)
         # sum_parts applies post_fn=exp; undo to get log-rates
         rate_coefs = jnp.log(jnp.maximum(rate_coefs, _RATE_FLOOR))
         rate_coefs = jnp.asarray(rate_coefs, self.dtype)
-        # rate_coefs: (S, n_groups, n_intervals), tau: (S, n_intervals) or (n_intervals,)
         tau = jnp.maximum(params["tau"], 1e-8)
-        # Broadcast tau to match rate_coefs: (S, 1, n_intervals)
         if tau.ndim == 1:
             tau = tau[jnp.newaxis, :]
         tau = tau[:, jnp.newaxis, :]  # (S, 1, n_intervals)
         horseshoe = tfd.Horseshoe(scale=tau)
-        horseshoe_lp = jnp.sum(horseshoe.log_prob(rate_coefs), axis=(-2, -1))
+        return jnp.sum(horseshoe.log_prob(rate_coefs), axis=(-2, -1))
 
-        prior_weight = jnp.asarray(prior_weight, self.dtype)
+    def _gdr2_log_prior(self, params):
+        """GDR2/R2D2 effective prior on rate coefficients."""
+        R2_logit = jnp.asarray(params["R2_logit"], self.dtype)
+        phi_logit = jnp.asarray(params["phi_logit"], self.dtype)
 
-        energy = (
-            jnp.sum(log_likelihood, axis=-1)
-            + prior_weight * prior
-            + prior_weight * horseshoe_lp
-        )
+        # Map to constrained space
+        R2 = jax.nn.sigmoid(R2_logit).squeeze(-1)
+        phi = jax.nn.softmax(phi_logit, axis=-1)
 
-        return energy
+        scales = self.gdr2_prior.compute_scales(R2, phi)
+
+        # GDR2 prior on R2 and phi (includes Jacobian implicitly via log_prob)
+        lp_R2 = self.gdr2_prior.log_prob_R2(R2)
+        lp_phi = self.gdr2_prior.log_prob_phi(phi)
+
+        # Collect coefficient groups in component order
+        coefficients = []
+        for name in self._gdr2_component_names:
+            coef = jnp.asarray(params[name], self.dtype)
+            coefficients.append(coef)
+
+        lp_coef = self.gdr2_prior.log_prob_coefficients(coefficients, scales)
+
+        return lp_R2 + lp_phi + lp_coef
 
     def expand(self, interaction):
         raise NotImplementedError("expand() not yet implemented")
