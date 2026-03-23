@@ -136,6 +136,111 @@ class IRTModel(BayesianModel):
         responses = response_rv.sample(seed=jax.random.PRNGKey(seed))
         return responses
 
+    def standardize_abilities(self, weights=None):
+        """Rescale all model parameters so that abilities are N(0, 1) per dimension.
+
+        The GRM response model is invariant under the affine transform
+        ``theta -> (theta - mu) / sigma`` provided we also rescale:
+
+        - ``discriminations *= sigma``
+        - ``difficulties0 = (difficulties0 - mu) / sigma``
+        - ``ddifficulties /= sigma``
+
+        This modifies ``surrogate_sample`` and ``calibrated_expectations``
+        in place.
+
+        Args:
+            weights: Optional (N,) array of per-person weights for computing
+                the weighted mean and std.  If None, uses uniform weights
+                (simple mean/std).
+
+        Returns:
+            dict with ``mu`` (D,) and ``sigma`` (D,) used for rescaling.
+        """
+        if self.surrogate_sample is None or 'abilities' not in self.surrogate_sample:
+            raise ValueError("No surrogate_sample with abilities — fit the model first")
+
+        abilities = self.surrogate_sample['abilities']  # (S, N, D, 1, 1)
+        # Compute mean/std over people (axis=1) and samples (axis=0)
+        # abilities[:, :, d, 0, 0] is (S, N) for dimension d
+        D = abilities.shape[2] if abilities.ndim >= 3 else 1
+
+        mu = jnp.zeros(D, dtype=abilities.dtype)
+        sigma = jnp.ones(D, dtype=abilities.dtype)
+
+        for d in range(D):
+            if abilities.ndim == 5:
+                # (S, N, D, 1, 1) — posterior samples
+                ab_d = abilities[:, :, d, 0, 0]  # (S, N)
+            elif abilities.ndim == 4:
+                # (N, D, 1, 1) — point estimate
+                ab_d = abilities[:, d, 0, 0]  # (N,)
+            else:
+                ab_d = abilities
+
+            if weights is not None:
+                # Weighted mean/std over people
+                w = jnp.asarray(weights, dtype=abilities.dtype)
+                w = w / jnp.sum(w)
+                if ab_d.ndim == 2:
+                    # (S, N): weighted mean/std per sample, then average
+                    m = jnp.sum(ab_d * w[jnp.newaxis, :], axis=1)  # (S,)
+                    v = jnp.sum(w[jnp.newaxis, :] * (ab_d - m[:, jnp.newaxis])**2, axis=1)
+                    mu = mu.at[d].set(jnp.mean(m))
+                    sigma = sigma.at[d].set(jnp.sqrt(jnp.mean(v)))
+                else:
+                    mu = mu.at[d].set(jnp.sum(w * ab_d))
+                    sigma = sigma.at[d].set(jnp.sqrt(jnp.sum(w * (ab_d - mu[d])**2)))
+            else:
+                mu = mu.at[d].set(jnp.mean(ab_d))
+                sigma = sigma.at[d].set(jnp.std(ab_d))
+
+            # Clamp sigma
+            sigma = jnp.where(sigma < 1e-8, 1.0, sigma)
+
+        # Build rescaling arrays with proper shapes for broadcasting
+        # mu_bc, sigma_bc: (1, 1, D, 1, 1) for 5D or (1, D, 1, 1) for 4D
+        if abilities.ndim == 5:
+            mu_bc = mu[jnp.newaxis, jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+            sigma_bc = sigma[jnp.newaxis, jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+        else:
+            mu_bc = mu[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+            sigma_bc = sigma[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+
+        # Discriminations shape: (S, 1, D, I, 1) or (1, D, I, 1)
+        disc_ndim = self.surrogate_sample['discriminations'].ndim
+        if disc_ndim == 5:
+            mu_disc = mu[jnp.newaxis, jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+            sigma_disc = sigma[jnp.newaxis, jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+        else:
+            mu_disc = mu[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+            sigma_disc = sigma[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]
+
+        def rescale_dict(d):
+            d['abilities'] = (d['abilities'] - mu_bc) / sigma_bc
+            d['discriminations'] = d['discriminations'] * sigma_disc
+            d['difficulties0'] = (d['difficulties0'] - mu_disc) / sigma_disc
+            if 'ddifficulties' in d:
+                d['ddifficulties'] = d['ddifficulties'] / sigma_disc
+            if 'difficulties' in d:
+                d['difficulties'] = (d['difficulties'] - mu_disc) / sigma_disc
+
+        rescale_dict(self.surrogate_sample)
+
+        if self.calibrated_expectations is not None:
+            rescale_dict(self.calibrated_expectations)
+
+        if self.calibrated_sd is not None:
+            # Standard deviations scale by 1/sigma for abilities/difficulties
+            # and by sigma for discriminations
+            self.calibrated_sd['abilities'] = self.calibrated_sd['abilities'] / sigma_bc
+            self.calibrated_sd['discriminations'] = self.calibrated_sd['discriminations'] * sigma_disc
+            self.calibrated_sd['difficulties0'] = self.calibrated_sd['difficulties0'] / sigma_disc
+            if 'ddifficulties' in self.calibrated_sd:
+                self.calibrated_sd['ddifficulties'] = self.calibrated_sd['ddifficulties'] / sigma_disc
+
+        return {'mu': mu, 'sigma': sigma}
+
     def project_discriminations(self, steps=1000):
         pass
 
