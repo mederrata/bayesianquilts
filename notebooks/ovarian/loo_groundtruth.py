@@ -75,10 +75,10 @@ with open("/tmp/ovarian/ovarian_model.stan", 'w') as f:
   f.writelines(logistic_horseshoe_code)
 
 
-with importlib.resources.path('bayesianquilts.data',   "overianx.csv") as xpath:
-  X = pd.read_csv(xpath, header=None)
-with importlib.resources.path('bayesianquilts.data',   "overiany.csv") as ypath:
-  y = pd.read_csv(ypath, header=None)
+xpath = importlib.resources.files('bayesianquilts.data').joinpath("overianx.csv")
+X = pd.read_csv(xpath, header=None)
+ypath = importlib.resources.files('bayesianquilts.data').joinpath("overiany.csv")
+y = pd.read_csv(ypath, header=None)
 
 batch_size = 6
 

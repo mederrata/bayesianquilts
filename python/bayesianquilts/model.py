@@ -2,7 +2,7 @@ import gzip
 import inspect
 import pathlib
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 import os
 import yaml
 import h5py
@@ -54,23 +54,23 @@ def FactorizedDistributionMoments(dist, samples=100):
 
 
 class BayesianModel(nnx.Module, ABC):
-    surrogate_distribution: Any = nnx.data(None)
-    surrogate_sample: Any = nnx.data(None)
-    prior_distribution: Any = nnx.data(None)
-    data: Any = nnx.data(None)
-    data_cardinality: Any = nnx.data(None)
-    params: Any = nnx.data(None)
-    point_estimate_vars: Any = nnx.data(None)
-    calibrated_expectations: Any = nnx.data(None)
-    calibrated_sd: Any = nnx.data(None)
-    calibrated_expectations_is: Any = nnx.data(None)
-    elpd_loo: Any = nnx.data(None)
-    elpd_loo_se: Any = nnx.data(None)
-    elpd_loo_per_obs: Any = nnx.data(None)
-    elpd_loo_se_per_obs: Any = nnx.data(None)
-    elpd_loo_pointwise: Any = nnx.data(None)
-    elpd_loo_khat: Any = nnx.data(None)
-    elpd_loo_n_obs: Any = nnx.data(None)
+    surrogate_distribution: Optional[Any] = nnx.data(None)
+    surrogate_sample: Optional[Dict[str, Any]] = nnx.data(None)
+    prior_distribution: Optional[Any] = nnx.data(None)
+    data: Optional[Dict[str, Any]] = nnx.data(None)
+    data_cardinality: Optional[int] = nnx.data(None)
+    params: Optional[Dict[str, Any]] = nnx.data(None)
+    point_estimate_vars: Optional[Dict[str, Any]] = nnx.data(None)
+    calibrated_expectations: Optional[Dict[str, Any]] = nnx.data(None)
+    calibrated_sd: Optional[Dict[str, Any]] = nnx.data(None)
+    calibrated_expectations_is: Optional[Dict[str, Any]] = nnx.data(None)
+    elpd_loo: Optional[Any] = nnx.data(None)
+    elpd_loo_se: Optional[Any] = nnx.data(None)
+    elpd_loo_per_obs: Optional[Any] = nnx.data(None)
+    elpd_loo_se_per_obs: Optional[Any] = nnx.data(None)
+    elpd_loo_pointwise: Optional[Any] = nnx.data(None)
+    elpd_loo_khat: Optional[Any] = nnx.data(None)
+    elpd_loo_n_obs: Optional[int] = nnx.data(None)
     var_list: list = []
     bijectors: list = []
 
@@ -95,6 +95,22 @@ class BayesianModel(nnx.Module, ABC):
         self.dtype = dtype
         self.params = None
         self.mcmc_samples = None
+        self.surrogate_sample = None
+        self.surrogate_distribution = None
+        self.prior_distribution = None
+        self.point_estimate_vars = None
+        self.calibrated_expectations = None
+        self.calibrated_sd = None
+        self.calibrated_expectations_is = None
+        self.elpd_loo = None
+        self.elpd_loo_se = None
+        self.elpd_loo_per_obs = None
+        self.elpd_loo_se_per_obs = None
+        self.elpd_loo_pointwise = None
+        self.elpd_loo_khat = None
+        self.elpd_loo_n_obs = None
+        self.data = None
+        self.data_cardinality = None
 
     def fit(
         self,
@@ -325,7 +341,7 @@ class BayesianModel(nnx.Module, ABC):
             }
 
         # Point-estimate vars have zero variance by definition
-        if self.point_estimate_vars:
+        if isinstance(self.point_estimate_vars, dict) and self.point_estimate_vars:
             for k, v in self.point_estimate_vars.items():
                 self.calibrated_expectations[k] = v
                 self.calibrated_sd[k] = jnp.zeros_like(v)
@@ -818,7 +834,7 @@ class BayesianModel(nnx.Module, ABC):
             params = surrogate.sample(batch_shape, seed=sample_key)
         params = self.transform(params)
         # Merge point-estimate values (no sampling, just broadcast)
-        if self.point_estimate_vars and not prior:
+        if isinstance(self.point_estimate_vars, dict) and self.point_estimate_vars and not prior:
             for k, v in self.point_estimate_vars.items():
                 if batch_shape is not None:
                     params[k] = jnp.broadcast_to(v, batch_shape + v.shape)
