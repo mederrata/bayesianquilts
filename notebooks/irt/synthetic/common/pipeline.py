@@ -37,12 +37,15 @@ DATASET_MODULES = {
 }
 
 
-def load_dataset(dataset_name: str, cache_dir=None):
+def load_dataset(dataset_name: str, cache_dir=None, gender=None):
     """Load a psychometric dataset by name.
 
     Args:
-        dataset_name: One of 'grit', 'rwa', 'eqsq', 'npi', 'wpi', 'tma'.
+        dataset_name: One of 'grit', 'rwa', 'eqsq', 'npi', 'wpi', 'tma',
+            'bouldering'.
         cache_dir: Optional directory for caching downloaded data.
+        gender: Gender filter for datasets that support it (e.g. 'men', 'women'
+            for bouldering). Ignored for datasets without a gender parameter.
 
     Returns:
         (data_dict, item_keys, response_cardinality, num_people)
@@ -63,6 +66,9 @@ def load_dataset(dataset_name: str, cache_dir=None):
     import inspect
     if 'reorient' in inspect.signature(mod.get_data).parameters:
         kwargs['reorient'] = True
+    # Pass gender if the loader supports it (e.g. bouldering)
+    if gender is not None and 'gender' in inspect.signature(mod.get_data).parameters:
+        kwargs['gender'] = gender
     df, num_people = mod.get_data(**kwargs)
 
     # Convert to numpy data dict

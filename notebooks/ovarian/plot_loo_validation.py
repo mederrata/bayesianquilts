@@ -29,8 +29,8 @@ gt_total = comp["gt_total_elpd"]
 is_loo = comp["is_loo"]
 
 import importlib.resources, pandas as pd
-with importlib.resources.path("bayesianquilts.data", "overiany.csv") as ypath:
-    y_np = pd.read_csv(ypath, header=None).to_numpy().flatten().astype(int)
+ypath = importlib.resources.files("bayesianquilts.data").joinpath("overiany.csv")
+y_np = pd.read_csv(ypath, header=None).to_numpy().flatten().astype(int)
 
 # Observations needing adaptation
 identity_khat = is_loo["identity"]["khat"]
