@@ -232,7 +232,7 @@ class FactorizedGRModel(IRTModel):
         Returns:
             dict with ``mu`` and ``sigma`` arrays of shape (D,).
         """
-        if self.surrogate_sample is None:
+        if not isinstance(self.surrogate_sample, dict) or self.surrogate_sample is None:
             raise ValueError("No surrogate_sample — fit or assemble the model first")
 
         D = self.dimensions
