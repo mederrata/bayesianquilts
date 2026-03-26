@@ -487,13 +487,13 @@ class FactorizedGRModel(IRTModel):
         # JointDistributionNamed resolves parents by inspecting argument
         # names, so the conditional must have a parameter named mu_{j}.
         # Build the function dynamically so the signature matches.
-        _globs = {"tfd": tfd, "jnp": jnp, "n_items": n_items, "dtype": dtype}
+        _globs = {"tfd": tfd, "jnp": jnp, "_n": n_items, "_d": dtype}
         _code = (
-            f"def _d0_prior(mu_{j}, _ni=n_items, _dt=dtype):\n"
+            f"def _d0_prior(mu_{j}):\n"
             f"    return tfd.Independent(\n"
             f"        tfd.Normal(\n"
-            f"            loc=jnp.asarray(mu_{j}, dtype=_dt),\n"
-            f"            scale=jnp.ones((1, 1, _ni, 1), dtype=_dt),\n"
+            f"            loc=jnp.asarray(mu_{j}, dtype=_d),\n"
+            f"            scale=jnp.ones((1, 1, _n, 1), dtype=_d),\n"
             f"        ),\n"
             f"        reinterpreted_batch_ndims=4,\n"
             f"    )\n"
