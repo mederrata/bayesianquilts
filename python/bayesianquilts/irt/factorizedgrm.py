@@ -52,6 +52,7 @@ class FactorizedGRModel(IRTModel):
         for j, indices in enumerate(self.scale_indices):
             self.bijectors[f"discriminations_{j}"] = tfb.Softplus()
             self.bijectors[f"ddifficulties_{j}"] = tfb.Softplus()
+            self.bijectors[f"mu_{j}"] = tfb.Identity()
             grm_joint_distribution_dict = {
                 **grm_joint_distribution_dict,
                 **self.gen_discrim_prior(j, indices),
@@ -192,6 +193,7 @@ class FactorizedGRModel(IRTModel):
         for d in range(self.dimensions):
             s = dim_samples[d]
             assembled_samples[f"discriminations_{d}"] = s["discriminations"]
+            assembled_samples[f"mu_{d}"] = s["mu"]
             assembled_samples[f"difficulties0_{d}"] = s["difficulties0"]
             assembled_samples[f"ddifficulties_{d}"] = s["ddifficulties"]
             assembled_samples[f"abilities_{d}"] = s["abilities"]
@@ -207,7 +209,7 @@ class FactorizedGRModel(IRTModel):
         # Also update the FactorizedGRM surrogate params from the
         # shared variables (discriminations, difficulties, abilities).
         # The surrogate param keys use backslash-delimited paths.
-        shared_vars = ["discriminations", "difficulties0", "ddifficulties", "abilities"]
+        shared_vars = ["discriminations", "mu", "difficulties0", "ddifficulties", "abilities"]
         for d, uni_model in dim_models.items():
             for var in shared_vars:
                 for suffix in list(self.params.keys()):
@@ -322,6 +324,7 @@ class FactorizedGRModel(IRTModel):
             var_transforms = [
                 (f"abilities_{d}",       lambda x: (x - mu_d) / sigma_d),
                 (f"discriminations_{d}", lambda x: x * sigma_d),
+                (f"mu_{d}",             lambda x: (x - mu_d) / sigma_d),
                 (f"difficulties0_{d}",   lambda x: (x - mu_d) / sigma_d),
                 (f"ddifficulties_{d}",   lambda x: x / sigma_d),
             ]
@@ -465,19 +468,28 @@ class FactorizedGRModel(IRTModel):
         return out
 
     def gen_difficulty_prior(self, j, indices):
-        # Center first threshold so median threshold ≈ 0.
-        # With K-1 thresholds and ddifficulties ~ HalfNormal(1) (mode ≈ 1),
-        # median threshold ≈ difficulties0 + (K-2)/2, so set
-        # difficulties0 = -(K-2)/2.
+        # Hierarchical prior: mu_{j} ~ N(-(K-2)/2, 5) sets the per-scale
+        # difficulty center, with difficulties0_{j} | mu_{j} ~ N(mu_{j}, 1).
+        # The mu prior is centered at -(K-2)/2 so the median threshold
+        # starts near 0 after cumsum with ddifficulties ~ HalfNormal(1).
         K = self.response_cardinality
         d0_loc = -(K - 2) / 2.0
+        n_items = len(indices)
+        dtype = self.dtype
         out = {}
-        out[f"difficulties0_{j}"] = tfd.Independent(
+        out[f"mu_{j}"] = tfd.Independent(
             tfd.Normal(
-                loc=jnp.full(
-                    (1, 1, len(indices), 1), d0_loc, dtype=self.dtype
-                ),
-                scale=jnp.ones((1, 1, len(indices), 1), dtype=self.dtype),
+                loc=jnp.full((1, 1, n_items, 1), d0_loc, dtype=dtype),
+                scale=5.0 * jnp.ones((1, 1, n_items, 1), dtype=dtype),
+            ),
+            reinterpreted_batch_ndims=4,
+        )
+        # Use **kwargs to capture the parent mu_{j} by name
+        mu_key = f"mu_{j}"
+        out[f"difficulties0_{j}"] = lambda _mk=mu_key, _ni=n_items, _dt=dtype, **kwargs: tfd.Independent(
+            tfd.Normal(
+                loc=jnp.asarray(kwargs[_mk], dtype=_dt),
+                scale=jnp.ones((1, 1, _ni, 1), dtype=_dt),
             ),
             reinterpreted_batch_ndims=4,
         )
