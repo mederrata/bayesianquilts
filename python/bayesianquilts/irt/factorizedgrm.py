@@ -465,14 +465,19 @@ class FactorizedGRModel(IRTModel):
         return out
 
     def gen_difficulty_prior(self, j, indices):
+        # Center first threshold so median threshold ≈ 0.
+        # With K-1 thresholds and ddifficulties ~ HalfNormal(1) (mode ≈ 1),
+        # median threshold ≈ difficulties0 + (K-2)/2, so set
+        # difficulties0 = -(K-2)/2.
+        K = self.response_cardinality
+        d0_loc = -(K - 2) / 2.0
         out = {}
         out[f"difficulties0_{j}"] = tfd.Independent(
             tfd.Normal(
-                loc=3
-                * tf.ones(
-                    (1, 1, len(indices), 1), dtype=self.dtype
+                loc=jnp.full(
+                    (1, 1, len(indices), 1), d0_loc, dtype=self.dtype
                 ),
-                scale=tf.ones((1, 1, len(indices), 1), dtype=self.dtype),
+                scale=jnp.ones((1, 1, len(indices), 1), dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=4,
         )
