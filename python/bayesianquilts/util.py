@@ -441,6 +441,12 @@ def training_loop(
             avg_epoch_loss = epoch_loss / max(valid_steps, 1) if valid_steps > 0 else float("inf")
             epoch_losses += [avg_epoch_loss]
 
+            # Periodically clear JIT caches to prevent memory growth
+            if (epoch + 1) % 10 == 0:
+                jax.clear_caches()
+                import gc as _gc
+                _gc.collect()
+
             if snapshot_epoch is not None and epoch + 1 == snapshot_epoch:
                 snapshot_params = jax.tree_util.tree_map(
                     lambda x: jnp.array(x) if hasattr(x, 'shape') else x,
