@@ -628,7 +628,7 @@ referencing==0.37.0
     #   jupyter-events
 regex==2026.2.19
     # via transformers
-requests==2.32.5
+requests==2.33.0
     # via
     #   docling
     #   huggingface-hub
