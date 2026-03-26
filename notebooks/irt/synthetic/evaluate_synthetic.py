@@ -194,6 +194,17 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     mice_loo.save(str(output_dir / "mice_loo_model.yaml"))
     print(f"  Imputation model saved ({len(mice_loo.univariate_results)} univariate models)")
 
+    # Reload MICE from disk to shed JIT traces accumulated during fitting
+    import jax, gc
+    del mice_loo, synth_df
+    jax.clear_caches()
+    gc.collect()
+    mice_loo = MICEBayesianLOO.load(str(output_dir / "mice_loo_model.yaml"))
+    for idx in range(len(item_keys)):
+        vtype = 'binary' if response_cardinality == 2 else 'ordinal'
+        mice_loo.variable_types[idx] = vtype
+    print(f"  Reloaded MICE from disk ({len(mice_loo.univariate_results)} univariate models)")
+
     # 7. Fit baseline GRM on all data (no imputation — missing responses
     #    are marginalized out, contributing 0 to the log-likelihood)
     snapshot_epoch = 50  # save early checkpoint for warm-starting imputed model
@@ -216,6 +227,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     else:
         print(f"  Warning: no snapshot at epoch {snapshot_epoch} (baseline may have stopped earlier)")
 
+    jax.clear_caches()
+    gc.collect()
+
     # 8. Fit MICE-only GRM (imputation from MICE alone, no IRT blending)
     print(f"\n--- Fitting MICE-only GRM on all data ({num_people} people) ---")
     mice_only_model = fit_grm_imputed(
@@ -233,6 +247,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         discrimination_prior_scale=discrimination_prior_scale,
     )
 
+    jax.clear_caches()
+    gc.collect()
+
     # 9. Build mixed imputation model (blends MICE + IRT baseline via per-item WAIC)
     print(f"\n--- Building IrtMixedImputationModel ---")
     factory = make_data_factory(synth_data, batch_size, num_people)
@@ -248,6 +265,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     mixed_imputation.save_diagnostics(str(output_dir / "mixed_diagnostics.h5"))
     mixed_imputation._irt_elpd_loo_per_obs = {}
     print(f"  Diagnostics saved to {output_dir / 'mixed_diagnostics.h5'}")
+
+    jax.clear_caches()
+    gc.collect()
 
     # 10. Fit mixed-imputed GRM on all data
     #     Uses weighted Rao-Blackwellization: each missing cell

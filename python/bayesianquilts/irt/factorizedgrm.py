@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from typing import Any, Dict, Optional
+
 import jax
 import jax.numpy as jnp
 from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
@@ -220,8 +222,28 @@ class FactorizedGRModel(IRTModel):
         self._dim_models = dim_models
         return self
 
+    def _find_surrogate_param(self, var_name: str, param_type: str) -> Optional[str]:
+        """Find the surrogate parameter key for a given variable and param type.
+
+        Searches ``self.params`` for keys matching the pattern
+        ``<var_name>\\...\\<param_type>`` (e.g. ``abilities_0\\identity\\normal\\loc``).
+
+        Returns the full key, or ``None`` if not found.
+        """
+        if not isinstance(self.params, dict):
+            return None
+        suffix = f"\\{param_type}"
+        for key in self.params:
+            parts = key.split("\\")
+            if parts[0] == var_name and key.endswith(suffix):
+                return key
+        return None
+
     def standardize_abilities(self, weights=None):
         """Rescale per-scale parameters so abilities are N(0, 1) per dimension.
+
+        Uses the surrogate distribution's loc/scale parameters directly
+        to compute per-dimension mean and standard deviation.
 
         Operates on the scale-factorized parameter names
         (``abilities_j``, ``discriminations_j``, etc.).
@@ -232,70 +254,136 @@ class FactorizedGRModel(IRTModel):
         Returns:
             dict with ``mu`` and ``sigma`` arrays of shape (D,).
         """
-        if not isinstance(self.surrogate_sample, dict) or self.surrogate_sample is None:
-            raise ValueError("No surrogate_sample — fit or assemble the model first")
+        if not isinstance(self.params, dict):
+            raise ValueError("No params — fit or load the model first")
 
         D = self.dimensions
         mu = jnp.zeros(D, dtype=self.dtype)
         sigma = jnp.ones(D, dtype=self.dtype)
 
         for d in range(D):
-            ab_key = f"abilities_{d}"
-            if ab_key not in self.surrogate_sample:
+            loc_key = self._find_surrogate_param(f"abilities_{d}", "loc")
+            scale_key = (
+                self._find_surrogate_param(f"abilities_{d}", "scale")
+                or self._find_surrogate_param(f"abilities_{d}", "log_scale")
+            )
+            if loc_key is None:
                 continue
 
-            ab = self.surrogate_sample[ab_key]  # (S, N, 1, 1, 1) or (N, 1, 1, 1)
-            ab_flat = ab.reshape(-1) if ab.ndim <= 4 else ab[:, :, 0, 0, 0].reshape(-1)
+            ab_loc = self.params[loc_key]  # (N, 1, 1, 1)
+            ab_loc_flat = ab_loc.reshape(-1)
 
             if weights is not None:
                 w = jnp.asarray(weights, dtype=self.dtype)
                 w = w / jnp.sum(w)
-                if ab.ndim == 5:
-                    ab_2d = ab[:, :, 0, 0, 0]  # (S, N)
-                    m = jnp.sum(ab_2d * w[jnp.newaxis, :], axis=1)
-                    mu = mu.at[d].set(jnp.mean(m))
-                    v = jnp.sum(w[jnp.newaxis, :] * (ab_2d - jnp.mean(m))**2, axis=1)
-                    sigma = sigma.at[d].set(jnp.sqrt(jnp.mean(v)))
-                else:
-                    ab_1d = ab[:, 0, 0, 0]
-                    mu = mu.at[d].set(jnp.sum(w * ab_1d))
-                    sigma = sigma.at[d].set(jnp.sqrt(jnp.sum(w * (ab_1d - mu[d])**2)))
+                ab_1d = ab_loc[:, 0, 0, 0] if ab_loc.ndim >= 4 else ab_loc.reshape(-1)
+                mu = mu.at[d].set(jnp.sum(w * ab_1d))
+                sigma_val = jnp.sqrt(jnp.sum(w * (ab_1d - mu[d])**2))
+                # Add surrogate scale contribution
+                if scale_key is not None:
+                    s = self.params[scale_key]
+                    if "log_scale" in scale_key:
+                        s = jnp.exp(s)
+                    s_1d = s[:, 0, 0, 0] if s.ndim >= 4 else s.reshape(-1)
+                    sigma_val = jnp.sqrt(sigma_val**2 + jnp.sum(w * s_1d**2))
+                sigma = sigma.at[d].set(sigma_val)
             else:
-                mu = mu.at[d].set(jnp.mean(ab_flat))
-                sigma = sigma.at[d].set(jnp.std(ab_flat))
+                mu = mu.at[d].set(jnp.mean(ab_loc_flat))
+                var_loc = jnp.var(ab_loc_flat)
+                if scale_key is not None:
+                    s = self.params[scale_key]
+                    if "log_scale" in scale_key:
+                        s = jnp.exp(s)
+                    var_scale = jnp.mean(s.reshape(-1)**2)
+                    sigma = sigma.at[d].set(jnp.sqrt(var_loc + var_scale))
+                else:
+                    sigma = sigma.at[d].set(jnp.sqrt(var_loc))
 
         sigma = jnp.where(sigma < 1e-8, 1.0, sigma)
 
-        # Apply rescaling to each dimension's parameters
+        # Apply rescaling to surrogate distribution parameters (loc/scale)
+        # in unconstrained space, accounting for bijectors.
+        #
+        # Constrained-space transforms (all scalar-affine):
+        #   abilities:       a  -> (a - mu) / sigma
+        #   discriminations: disc -> disc * sigma
+        #   difficulties0:   d0 -> (d0 - mu) / sigma
+        #   ddifficulties:   dd -> dd / sigma
+        #
+        # For each variable we:
+        #   1. Map loc to constrained space via bijector.forward
+        #   2. Apply the affine transform
+        #   3. Map back via bijector.inverse
+        #   4. Adjust scale using the Jacobian ratio at old/new loc
         for d in range(D):
             mu_d = mu[d]
             sigma_d = sigma[d]
 
-            for store in [self.surrogate_sample, self.calibrated_expectations, self.calibrated_sd]:
-                if store is None:
+            var_transforms = [
+                (f"abilities_{d}",       lambda x: (x - mu_d) / sigma_d),
+                (f"discriminations_{d}", lambda x: x * sigma_d),
+                (f"difficulties0_{d}",   lambda x: (x - mu_d) / sigma_d),
+                (f"ddifficulties_{d}",   lambda x: x / sigma_d),
+            ]
+
+            for var_name, constrained_fn in var_transforms:
+                loc_key = self._find_surrogate_param(var_name, "loc")
+                if loc_key is None:
                     continue
 
-                ab_key = f"abilities_{d}"
-                disc_key = f"discriminations_{d}"
-                diff0_key = f"difficulties0_{d}"
-                ddiff_key = f"ddifficulties_{d}"
+                bijector = self.bijectors.get(var_name, tfb.Identity())
 
-                is_sd = (store is self.calibrated_sd)
+                # Transform loc
+                old_loc = self.params[loc_key]
+                old_constrained = bijector.forward(old_loc)
+                new_constrained = constrained_fn(old_constrained)
+                new_loc = bijector.inverse(new_constrained)
+                self.params[loc_key] = new_loc
 
-                if ab_key in store:
-                    if is_sd:
-                        store[ab_key] = store[ab_key] / sigma_d
+                # Transform scale: in unconstrained space, the scale changes by
+                # the ratio of the inverse-bijector Jacobians at new vs old loc,
+                # times the constrained-space scale factor.
+                # Since all transforms are scalar-affine, the constrained scale
+                # factor is constant (1/sigma, sigma, etc.).
+                for scale_type in ("scale", "log_scale"):
+                    scale_key = self._find_surrogate_param(var_name, scale_type)
+                    if scale_key is None:
+                        continue
+
+                    # Jacobian of bijector.forward at the unconstrained loc
+                    # For identity: 1. For softplus: sigmoid(x).
+                    fwd_log_jac_old = bijector.forward_log_det_jacobian(old_loc)
+                    fwd_log_jac_new = bijector.forward_log_det_jacobian(new_loc)
+
+                    # unconstrained_scale_new / unconstrained_scale_old =
+                    #   (constrained_scale_ratio) * exp(fwd_log_jac_old) / exp(fwd_log_jac_new)
+                    # because d(unconstrained)/d(constrained) = 1/fwd_jac
+                    #
+                    # The constrained scale ratio for scalar-affine f(x)=ax+b is |a|.
+                    # We compute it numerically for generality.
+                    eps = jnp.where(
+                        jnp.abs(old_constrained) > 1e-6,
+                        1e-6 * jnp.abs(old_constrained),
+                        1e-6 * jnp.ones_like(old_constrained),
+                    )
+                    constrained_ratio = jnp.abs(
+                        (constrained_fn(old_constrained + eps) - new_constrained) / eps
+                    )
+
+                    log_scale_ratio = (
+                        jnp.log(constrained_ratio + 1e-30)
+                        + fwd_log_jac_old - fwd_log_jac_new
+                    )
+
+                    if scale_type == "log_scale":
+                        self.params[scale_key] = self.params[scale_key] + log_scale_ratio
                     else:
-                        store[ab_key] = (store[ab_key] - mu_d) / sigma_d
-                if disc_key in store:
-                    store[disc_key] = store[disc_key] * sigma_d
-                if diff0_key in store:
-                    if is_sd:
-                        store[diff0_key] = store[diff0_key] / sigma_d
-                    else:
-                        store[diff0_key] = (store[diff0_key] - mu_d) / sigma_d
-                if ddiff_key in store:
-                    store[ddiff_key] = store[ddiff_key] / sigma_d
+                        self.params[scale_key] = self.params[scale_key] * jnp.exp(log_scale_ratio)
+
+        # Invalidate cached samples/expectations since params changed
+        self.surrogate_sample = None
+        self.calibrated_expectations = None
+        self.calibrated_sd = None
 
         return {'mu': mu, 'sigma': sigma}
 
@@ -377,14 +465,19 @@ class FactorizedGRModel(IRTModel):
         return out
 
     def gen_difficulty_prior(self, j, indices):
+        # Center first threshold so median threshold ≈ 0.
+        # With K-1 thresholds and ddifficulties ~ HalfNormal(1) (mode ≈ 1),
+        # median threshold ≈ difficulties0 + (K-2)/2, so set
+        # difficulties0 = -(K-2)/2.
+        K = self.response_cardinality
+        d0_loc = -(K - 2) / 2.0
         out = {}
         out[f"difficulties0_{j}"] = tfd.Independent(
             tfd.Normal(
-                loc=3
-                * tf.ones(
-                    (1, 1, len(indices), 1), dtype=self.dtype
+                loc=jnp.full(
+                    (1, 1, len(indices), 1), d0_loc, dtype=self.dtype
                 ),
-                scale=tf.ones((1, 1, len(indices), 1), dtype=self.dtype),
+                scale=jnp.ones((1, 1, len(indices), 1), dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=4,
         )
