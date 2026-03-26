@@ -450,11 +450,15 @@ class NeuralGRModel(IRTModel):
         # The NeuralGRM is a data generator, not a sparse model.
         # Use simple HalfNormal priors for discriminations instead of
         # the Horseshoe (AbsHorseshoe + SqrtInverseGamma) which causes NaN.
+        # Center mu prior at -(K-2)/2 so the median threshold starts
+        # near 0 after cumsum with ddifficulties ~ HalfNormal(1).
+        K = self.response_cardinality
+        d0_loc = -(K - 2) / 2.0
         grm_joint_distribution_dict = dict(
             mu=tfd.Independent(
                 tfd.Normal(
-                    loc=jnp.zeros(
-                        (1, self.dimensions, self.num_items, 1), dtype=self.dtype
+                    loc=jnp.full(
+                        (1, self.dimensions, self.num_items, 1), d0_loc, dtype=self.dtype
                     ),
                     scale=jnp.ones(
                         (1, self.dimensions, self.num_items, 1), dtype=self.dtype
