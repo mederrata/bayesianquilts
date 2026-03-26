@@ -484,15 +484,23 @@ class FactorizedGRModel(IRTModel):
             ),
             reinterpreted_batch_ndims=4,
         )
-        # Use **kwargs to capture the parent mu_{j} by name
-        mu_key = f"mu_{j}"
-        out[f"difficulties0_{j}"] = lambda _mk=mu_key, _ni=n_items, _dt=dtype, **kwargs: tfd.Independent(
-            tfd.Normal(
-                loc=jnp.asarray(kwargs[_mk], dtype=_dt),
-                scale=jnp.ones((1, 1, _ni, 1), dtype=_dt),
-            ),
-            reinterpreted_batch_ndims=4,
+        # JointDistributionNamed resolves parents by inspecting argument
+        # names, so the conditional must have a parameter named mu_{j}.
+        # Build the function dynamically so the signature matches.
+        _globs = {"tfd": tfd, "jnp": jnp, "n_items": n_items, "dtype": dtype}
+        _code = (
+            f"def _d0_prior(mu_{j}, _ni=n_items, _dt=dtype):\n"
+            f"    return tfd.Independent(\n"
+            f"        tfd.Normal(\n"
+            f"            loc=jnp.asarray(mu_{j}, dtype=_dt),\n"
+            f"            scale=jnp.ones((1, 1, _ni, 1), dtype=_dt),\n"
+            f"        ),\n"
+            f"        reinterpreted_batch_ndims=4,\n"
+            f"    )\n"
         )
+        _ns = {}
+        exec(_code, _globs, _ns)  # noqa: S102 - dynamic signature for JointDistributionNamed
+        out[f"difficulties0_{j}"] = _ns["_d0_prior"]
         out[f"ddifficulties_{j}"] = tfd.Independent(
             tfd.HalfNormal(
                 scale=tf.ones(
