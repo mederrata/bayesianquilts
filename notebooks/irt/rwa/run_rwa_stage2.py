@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.getcwd()))
 import numpy as np
 import polars as pl
 from bayesianquilts.data.rwa import get_data, item_keys
-from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
 
 df, num_people = get_data(polars_out=True)
 print(f"Loaded: {num_people} people, {len(item_keys)} items", flush=True)
@@ -15,13 +15,12 @@ imputation_df = df.select(item_keys).to_pandas()
 imputation_df = imputation_df.replace(-1, float('nan'))
 print(f"Missing values: {imputation_df.isna().sum().sum()}", flush=True)
 
-mice_loo = MICEBayesianLOO(
+pairwise_model = PairwiseOrdinalStackingModel(
     prior_scale=1.0, pathfinder_num_samples=100,
     pathfinder_maxiter=50, batch_size=256, verbose=True,
 )
-mice_loo.fit_loo_models(
+pairwise_model.fit(
     imputation_df, n_top_features=22, n_jobs=1,
-    fit_zero_predictors=True,
 )
-mice_loo.save('mice_loo_model.yaml')
-print('MICE LOO saved', flush=True)
+pairwise_model.save('pairwise_stacking_model.yaml')
+print('Pairwise stacking model saved', flush=True)

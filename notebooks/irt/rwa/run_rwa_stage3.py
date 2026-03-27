@@ -16,7 +16,7 @@ from plot_helpers import (plot_loss_comparison, plot_forest_discriminations,
 
 from bayesianquilts.data.rwa import get_data, item_keys
 from bayesianquilts.irt.grm import GRModel
-from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
 from bayesianquilts.imputation.mixed import IrtMixedImputationModel
 
 response_cardinality = 9
@@ -80,18 +80,14 @@ def calibrate_manually(model, n_samples=32, seed=42):
 
 calibrate_manually(model_baseline, n_samples=32, seed=101)
 
-# Load MICE LOO
-print("Loading MICE LOO...")
-mice_loo = MICEBayesianLOO(
-    prior_scale=1.0, pathfinder_num_samples=100,
-    pathfinder_maxiter=50, batch_size=256, verbose=True,
-)
-mice_loo.load('mice_loo_model.yaml')
+# Load pairwise stacking model
+print("Loading pairwise stacking model...")
+pairwise_model = PairwiseOrdinalStackingModel.load('pairwise_stacking_model.yaml')
 
 # Build mixed imputation
 print("Building mixed imputation model...")
 mixed_imputation = IrtMixedImputationModel(
-    irt_model=model_baseline, mice_model=mice_loo,
+    irt_model=model_baseline, mice_model=pairwise_model,
     data_factory=data_factory, irt_elpd_batch_size=4,
 )
 print(mixed_imputation.summary())
@@ -158,7 +154,7 @@ fig = plot_individual_abilities(item_keys, model_baseline, model_imputed)
 fig.savefig('individual_abilities.pdf', bbox_inches='tight', dpi=150)
 plt.close(fig)
 
-fig = plot_imputation_weights_pcolormesh(mice_loo, mixed_imputation, item_keys,
+fig = plot_imputation_weights_pcolormesh(pairwise_model, mixed_imputation, item_keys,
                                           title='RWA — Imputation Weights')
 fig.savefig('imputation_weights.pdf', bbox_inches='tight', dpi=150)
 plt.close(fig)

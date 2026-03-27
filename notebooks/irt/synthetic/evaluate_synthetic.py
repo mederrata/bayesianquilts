@@ -50,7 +50,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         2. Fit NeuralGRM on real data
         3. Extract true abilities
         4. Generate synthetic data with MCAR missingness
-        5. Fit MICEBayesianLOO imputation model on synthetic data
+        5. Fit PairwiseOrdinalStackingModel imputation model on synthetic data
         6. Fit baseline GRM on synthetic data
         7. Fit imputed GRM on synthetic data
         8. Compare ability ordering
@@ -72,7 +72,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         make_comparison_plots,
         make_data_factory,
     )
-    from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+    from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
 
     output_dir = Path(output_dir) / dataset_name
@@ -168,42 +168,33 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
           f"({n_fully_observed/num_people*100:.1f}%)")
 
     # 6. Fit imputation model on full synthetic data (all respondents)
-    print(f"\n--- Fitting MICEBayesianLOO on synthetic data ---")
+    print(f"\n--- Fitting PairwiseOrdinalStackingModel on synthetic data ---")
     synth_df = pd.DataFrame({k: synth_data[k] for k in item_keys})
     synth_df = synth_df.replace(-1, np.nan)
 
-    mice_loo = MICEBayesianLOO(
-        random_state=42,
+    pairwise_model = PairwiseOrdinalStackingModel(
         prior_scale=1.0,
         pathfinder_num_samples=100,
         pathfinder_maxiter=50,
         batch_size=512,
         verbose=True,
     )
-    mice_loo.fit_loo_models(
+    pairwise_model.fit(
         X_df=synth_df,
         n_top_features=min(len(item_keys), 40),
         n_jobs=1,
-        fit_zero_predictors=True,
         seed=42,
     )
-    # Override variable types: IRT items are binary (K=2) or ordinal (K>2)
-    for idx in range(len(item_keys)):
-        vtype = 'binary' if response_cardinality == 2 else 'ordinal'
-        mice_loo.variable_types[idx] = vtype
-    mice_loo.save(str(output_dir / "mice_loo_model.yaml"))
-    print(f"  Imputation model saved ({len(mice_loo.univariate_results)} univariate models)")
+    pairwise_model.save(str(output_dir / "pairwise_stacking_model.yaml"))
+    print(f"  Imputation model saved ({len(pairwise_model.univariate_results)} univariate models)")
 
-    # Reload MICE from disk to shed JIT traces accumulated during fitting
+    # Reload from disk to shed JIT traces accumulated during fitting
     import jax, gc
-    del mice_loo, synth_df
+    del pairwise_model, synth_df
     jax.clear_caches()
     gc.collect()
-    mice_loo = MICEBayesianLOO.load(str(output_dir / "mice_loo_model.yaml"))
-    for idx in range(len(item_keys)):
-        vtype = 'binary' if response_cardinality == 2 else 'ordinal'
-        mice_loo.variable_types[idx] = vtype
-    print(f"  Reloaded MICE from disk ({len(mice_loo.univariate_results)} univariate models)")
+    pairwise_model = PairwiseOrdinalStackingModel.load(str(output_dir / "pairwise_stacking_model.yaml"))
+    print(f"  Reloaded from disk ({len(pairwise_model.univariate_results)} univariate models)")
 
     # 7. Fit baseline GRM on all data (no imputation — missing responses
     #    are marginalized out, contributing 0 to the log-likelihood)
@@ -235,7 +226,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     mice_only_model = fit_grm_imputed(
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_mice_only",
-        imputation_model=mice_loo,
+        imputation_model=pairwise_model,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
@@ -255,7 +246,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     factory = make_data_factory(synth_data, batch_size, num_people)
     mixed_imputation = IrtMixedImputationModel(
         irt_model=baseline_model,
-        mice_model=mice_loo,
+        mice_model=pairwise_model,
         data_factory=factory,
         irt_elpd_batch_size=4,
     )

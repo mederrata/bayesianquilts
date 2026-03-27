@@ -3,7 +3,7 @@
 
 Runs the same four-stage pipeline as the psychometric notebooks:
   1. Baseline GRM (ignorable missingness)
-  2. MICEBayesianLOO imputation model
+  2. PairwiseOrdinalStackingModel imputation model
   3. IrtMixedImputationModel (blends MICE + IRT baseline)
   4. Imputed GRM (warm-started from baseline)
 
@@ -139,41 +139,39 @@ def run_bouldering(work_dir, gender='men', skip_baseline=False, skip_mice=False,
 
     gc.collect()
 
-    # ---- Stage 2: MICE LOO ----
-    from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+    # ---- Stage 2: Pairwise Ordinal Stacking ----
+    from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
 
-    mice_path = work_dir / 'mice_loo_model.yaml'
+    mice_path = work_dir / 'pairwise_stacking_model.yaml'
     # Limit top features given the large item count
     n_top_features = min(n_items, 40)
 
     if skip_mice and mice_path.exists():
-        print("\n--- Loading existing MICE LOO model ---")
-        mice_loo = MICEBayesianLOO.load(str(mice_path))
-        print("MICE LOO loaded.")
+        print("\n--- Loading existing pairwise stacking model ---")
+        pairwise_model = PairwiseOrdinalStackingModel.load(str(mice_path))
+        print("Pairwise stacking model loaded.")
     else:
-        print(f"\n--- Fitting MICE LOO (n_top_features={n_top_features}) ---")
+        print(f"\n--- Fitting pairwise stacking model (n_top_features={n_top_features}) ---")
         pandas_df = df.select(item_keys).to_pandas()
         pandas_df = pandas_df.replace(-1, np.nan)
         n_missing = pandas_df.isna().sum().sum()
         print(f"Total missing values: {n_missing}")
 
-        mice_loo = MICEBayesianLOO(
-            random_state=42,
+        pairwise_model = PairwiseOrdinalStackingModel(
             prior_scale=1.0,
             pathfinder_num_samples=100,
             pathfinder_maxiter=50,
             batch_size=512,
             verbose=True,
         )
-        mice_loo.fit_loo_models(
+        pairwise_model.fit(
             pandas_df,
             n_top_features=n_top_features,
             n_jobs=1,
-            fit_zero_predictors=True,
             seed=42,
         )
-        mice_loo.save(str(mice_path))
-        print(f"MICE LOO saved to {mice_path}")
+        pairwise_model.save(str(mice_path))
+        print(f"Pairwise stacking model saved to {mice_path}")
 
     gc.collect()
 
@@ -183,7 +181,7 @@ def run_bouldering(work_dir, gender='men', skip_baseline=False, skip_mice=False,
     print("\n--- Building mixed imputation model ---")
     mixed_imputation = IrtMixedImputationModel(
         irt_model=model_baseline,
-        mice_model=mice_loo,
+        mice_model=pairwise_model,
         data_factory=data_factory,
         irt_elpd_batch_size=4,
     )
@@ -233,7 +231,7 @@ def run_bouldering(work_dir, gender='men', skip_baseline=False, skip_mice=False,
 
     print(f"\n{'='*60}")
     print(f"DONE: Bouldering ({gender})")
-    print(f"Artifacts: grm_baseline/, mice_loo_model.yaml, grm_imputed/")
+    print(f"Artifacts: grm_baseline/, pairwise_stacking_model.yaml, grm_imputed/")
     print(f"{'='*60}")
 
 

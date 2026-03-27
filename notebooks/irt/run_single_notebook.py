@@ -221,7 +221,40 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
             idx_batch = indices[start:start + batch_size]
             yield {k: v[idx_batch] for k, v in batch.items()}
 
-    # ---- Stage 1: Baseline GRM ----
+    # ---- Stage 1: Pairwise Ordinal Stacking imputation ----
+    # Fit imputation model first (independent of GRM, lets us fail fast)
+    from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
+
+    mice_path = work_dir / 'pairwise_stacking_model.yaml'
+    if skip_mice and mice_path.exists():
+        print("\n--- Loading existing pairwise stacking model ---")
+        pairwise_model = PairwiseOrdinalStackingModel.load(str(mice_path))
+        print("Pairwise stacking model loaded.")
+    else:
+        print("\n--- Fitting pairwise stacking imputation model ---")
+        pandas_df = df.select(item_keys).to_pandas()
+        pandas_df = pandas_df.replace(-1, np.nan)
+        print(f"Missing values per item:\n{pandas_df.isna().sum()}")
+
+        pairwise_model = PairwiseOrdinalStackingModel(
+            prior_scale=1.0,
+            pathfinder_num_samples=100,
+            pathfinder_maxiter=50,
+            batch_size=512,
+            verbose=True,
+        )
+        pairwise_model.fit(
+            pandas_df,
+            n_top_features=config['n_top_features'],
+            n_jobs=1,
+            seed=42,
+        )
+        pairwise_model.save(str(mice_path))
+        print(f"Pairwise stacking model saved to {mice_path}")
+
+    gc.collect()
+
+    # ---- Stage 2: Baseline GRM ----
     from bayesianquilts.irt.grm import GRModel
 
     snapshot_params = None
@@ -237,7 +270,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
             num_people=SUBSAMPLE_N,
             dim=1,
             response_cardinality=response_cardinality,
-            dtype=jnp.float64,
+            dtype=jnp.float32,
             parameterization=parameterization,
             discrimination_prior_scale=discrimination_prior_scale,
             expected_sparsity=expected_sparsity,
@@ -268,8 +301,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         model_baseline.save_to_disk('grm_baseline')
         calibrate_manually(model_baseline, n_samples=32, seed=101)
 
-    # Compute ELPD-LOO for baseline
-    # Count observed responses per person for per-response ELPD
+    # Count observed responses for per-response ELPD
     n_items = len(item_keys)
     n_observed_responses = sum(
         np.sum((batch[k] >= 0) & (batch[k] < response_cardinality) & ~np.isnan(batch[k]))
@@ -278,64 +310,17 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     print(f"  Total observed responses: {n_observed_responses} "
           f"({n_observed_responses / SUBSAMPLE_N:.1f} per person, {n_items} items)")
 
-    print("\n--- Computing ELPD-LOO for baseline ---")
-    try:
-        model_baseline._compute_elpd_loo(data_factory, n_samples=100, seed=101, use_ais=True)
-        elpd_val = model_baseline.elpd_loo
-        elpd_se = model_baseline.elpd_loo_se
-        elpd_per_response = elpd_val / n_observed_responses
-        se_per_response = elpd_se / n_observed_responses
-        n_obs = getattr(model_baseline, 'elpd_loo_n_obs', SUBSAMPLE_N)
-        print(f"    ELPD/person: {elpd_val/n_obs:.4f} ± {elpd_se/n_obs:.4f}")
-        print(f"    ELPD/response: {elpd_per_response:.4f} ± {se_per_response:.4f}")
-    except Exception as e:
-        print(f"  ELPD-LOO failed: {e}")
-
     gc.collect()
 
-    # ---- Stage 2: MICE LOO ----
-    from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
-
-    mice_path = work_dir / 'mice_loo_model.yaml'
-    if skip_mice and mice_path.exists():
-        print("\n--- Loading existing MICE LOO model ---")
-        mice_loo = MICEBayesianLOO.load(str(mice_path))
-        print("MICE LOO loaded.")
-    else:
-        print("\n--- Fitting MICE LOO ---")
-        pandas_df = df.select(item_keys).to_pandas()
-        pandas_df = pandas_df.replace(-1, np.nan)
-        print(f"Missing values per item:\n{pandas_df.isna().sum()}")
-
-        mice_loo = MICEBayesianLOO(
-            random_state=42,
-            prior_scale=1.0,
-            pathfinder_num_samples=100,
-            pathfinder_maxiter=50,
-            batch_size=512,
-            verbose=True,
-        )
-        mice_loo.fit_loo_models(
-            pandas_df,
-            n_top_features=config['n_top_features'],
-            n_jobs=1,
-            fit_zero_predictors=True,
-            seed=42,
-        )
-        mice_loo.save(str(mice_path))
-        print(f"MICE LOO saved to {mice_path}")
-
-    gc.collect()
-
-    # ---- Stage 3: MICE-only GRM ----
-    print("\n--- Fitting MICE-only GRM ---")
+    # ---- Stage 3: Pairwise-only GRM ----
+    print("\n--- Fitting pairwise-only GRM ---")
     model_mice_only = GRModel(
         item_keys=item_keys,
         num_people=SUBSAMPLE_N,
         dim=1,
         response_cardinality=response_cardinality,
-        dtype=jnp.float64,
-        imputation_model=mice_loo,
+        dtype=jnp.float32,
+        imputation_model=pairwise_model,
         parameterization=parameterization,
         discrimination_prior_scale=discrimination_prior_scale,
         expected_sparsity=expected_sparsity,
@@ -358,23 +343,11 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     )
     losses_mice = res_mice[0]
     if losses_mice:
-        print(f"MICE-only final loss: {losses_mice[-1]:.2f} ({len(losses_mice)} epochs)")
+        print(f"Pairwise-only final loss: {losses_mice[-1]:.2f} ({len(losses_mice)} epochs)")
     else:
-        print("WARNING: MICE-only training returned no epochs")
+        print("WARNING: Pairwise-only training returned no epochs")
     model_mice_only.save_to_disk('grm_mice_only')
     calibrate_manually(model_mice_only, n_samples=32, seed=103)
-
-    # Compute ELPD-LOO for MICE-only
-    print("\n--- Computing ELPD-LOO for MICE-only ---")
-    try:
-        model_mice_only._compute_elpd_loo(data_factory, n_samples=100, seed=103, use_ais=True)
-        elpd_val_mice = model_mice_only.elpd_loo
-        elpd_se_mice = model_mice_only.elpd_loo_se
-        n_obs_mice = getattr(model_mice_only, 'elpd_loo_n_obs', SUBSAMPLE_N)
-        print(f"    ELPD/person: {elpd_val_mice/n_obs_mice:.4f} ± {elpd_se_mice/n_obs_mice:.4f}")
-        print(f"    ELPD/response: {elpd_val_mice/n_observed_responses:.4f} ± {elpd_se_mice/n_observed_responses:.4f}")
-    except Exception as e:
-        print(f"  ELPD-LOO failed: {e}")
 
     gc.collect()
 
@@ -384,7 +357,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     print("\n--- Building mixed imputation model ---")
     mixed_imputation = IrtMixedImputationModel(
         irt_model=model_baseline,
-        mice_model=mice_loo,
+        mice_model=pairwise_model,
         data_factory=data_factory,
         irt_elpd_batch_size=4,
     )
@@ -406,7 +379,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         num_people=SUBSAMPLE_N,
         dim=1,
         response_cardinality=response_cardinality,
-        dtype=jnp.float64,
+        dtype=jnp.float32,
         imputation_model=mixed_imputation,
         parameterization=parameterization,
         discrimination_prior_scale=discrimination_prior_scale,
@@ -439,19 +412,23 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
     model_imputed.save_to_disk('grm_imputed')
     calibrate_manually(model_imputed, n_samples=32, seed=102)
 
-    # Compute ELPD-LOO for imputed
-    print("\n--- Computing ELPD-LOO for imputed ---")
-    try:
-        model_imputed._compute_elpd_loo(data_factory, n_samples=100, seed=102, use_ais=True)
-        elpd_val_imp = model_imputed.elpd_loo
-        elpd_se_imp = model_imputed.elpd_loo_se
-        elpd_per_response_imp = elpd_val_imp / n_observed_responses
-        se_per_response_imp = elpd_se_imp / n_observed_responses
-        n_obs_imp = getattr(model_imputed, 'elpd_loo_n_obs', SUBSAMPLE_N)
-        print(f"    ELPD/person: {elpd_val_imp/n_obs_imp:.4f} ± {elpd_se_imp/n_obs_imp:.4f}")
-        print(f"    ELPD/response: {elpd_per_response_imp:.4f} ± {se_per_response_imp:.4f}")
-    except Exception as e:
-        print(f"  ELPD-LOO failed: {e}")
+    gc.collect()
+
+    # ---- ELPD-LOO for all models (after all fitting is done) ----
+    for label, mdl, seed_val in [('Baseline', model_baseline, 101),
+                                  ('Pairwise-only', model_mice_only, 103),
+                                  ('Mixed', model_imputed, 102)]:
+        print(f"\n--- Computing ELPD-LOO for {label} ---")
+        try:
+            mdl._compute_elpd_loo(data_factory, n_samples=100, seed=seed_val, use_ais=True)
+            elpd_val = mdl.elpd_loo
+            elpd_se = mdl.elpd_loo_se
+            n_obs = getattr(mdl, 'elpd_loo_n_obs', SUBSAMPLE_N)
+            print(f"    ELPD/person: {elpd_val/n_obs:.4f} ± {elpd_se/n_obs:.4f}")
+            print(f"    ELPD/response: {elpd_val/n_observed_responses:.4f} ± {elpd_se/n_observed_responses:.4f}")
+        except Exception as e:
+            print(f"  ELPD-LOO failed for {label}: {e}")
+        gc.collect()
 
     # ---- Summary ----
     print(f"\n{'='*100}")

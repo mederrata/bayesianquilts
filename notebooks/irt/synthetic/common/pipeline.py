@@ -357,7 +357,7 @@ def fit_grm_imputed(
     compute_elpd_loo=False,
     discrimination_prior_scale=None,
 ):
-    """Fit a GRM with MICEBayesianLOO imputation and save to disk.
+    """Fit a GRM with pairwise stacking imputation and save to disk.
 
     Args:
         initial_values: Optional initial variational parameters (e.g. from

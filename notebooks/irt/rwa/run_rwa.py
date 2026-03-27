@@ -18,7 +18,7 @@ from plot_helpers import (plot_loss_comparison, plot_forest_discriminations,
 
 from bayesianquilts.data.rwa import get_data, item_keys
 from bayesianquilts.irt.grm import GRModel
-from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
 from bayesianquilts.imputation.mixed import IrtMixedImputationModel
 
 response_cardinality = 9
@@ -93,21 +93,20 @@ imputation_df = sub_df.select(item_keys).to_pandas()
 imputation_df = imputation_df.replace(-1, float('nan'))
 print(f"Missing values per item:\n{imputation_df.isna().sum()}")
 
-mice_loo = MICEBayesianLOO(
+pairwise_model = PairwiseOrdinalStackingModel(
     prior_scale=1.0, pathfinder_num_samples=100,
     pathfinder_maxiter=50, batch_size=512, verbose=True,
 )
-mice_loo.fit_loo_models(
+pairwise_model.fit(
     imputation_df, n_top_features=22, n_jobs=1,
-    fit_zero_predictors=True,
 )
-mice_loo.save('mice_loo_model.yaml')
-print("MICE LOO saved")
+pairwise_model.save('pairwise_stacking_model.yaml')
+print("Pairwise stacking model saved")
 
 # 5. Build mixed imputation
 print("Building mixed imputation model...")
 mixed_imputation = IrtMixedImputationModel(
-    irt_model=model_baseline, mice_model=mice_loo,
+    irt_model=model_baseline, mice_model=pairwise_model,
     data_factory=data_factory, irt_elpd_batch_size=4,
 )
 print(mixed_imputation.summary())
@@ -166,7 +165,7 @@ fig = plot_individual_abilities(item_keys, model_baseline, model_imputed)
 fig.savefig('individual_abilities.pdf', bbox_inches='tight', dpi=150)
 plt.close(fig)
 
-fig = plot_imputation_weights_pcolormesh(mice_loo, mixed_imputation, item_keys,
+fig = plot_imputation_weights_pcolormesh(pairwise_model, mixed_imputation, item_keys,
                                           title='RWA — Imputation Weights')
 fig.savefig('imputation_weights.pdf', bbox_inches='tight', dpi=150)
 plt.close(fig)

@@ -146,6 +146,7 @@ grm_imputed/
 grm_mice_only/
 neural_grm/
 mice_loo_model.yaml
+pairwise_stacking_model.yaml
 mixed_diagnostics.h5
 *.npz
 *.npy

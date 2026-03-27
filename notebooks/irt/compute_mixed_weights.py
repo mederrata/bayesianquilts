@@ -75,7 +75,7 @@ def compute_weights(dataset_name, batch_size=256):
 
     work_dir = Path(__file__).parent / dataset_name
     baseline_dir = work_dir / 'grm_baseline'
-    mice_path = work_dir / 'mice_loo_model.yaml'
+    mice_path = work_dir / 'pairwise_stacking_model.yaml'
 
     if not baseline_dir.exists():
         print(f"SKIP {dataset_name}: {baseline_dir} not found")
@@ -117,17 +117,17 @@ def compute_weights(dataset_name, batch_size=256):
     model_baseline = GRModel.load_from_disk(baseline_dir)
     calibrate_manually(model_baseline, n_samples=32, seed=101)
 
-    # Load MICE model
-    from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
-    print(f"Loading MICE model for {dataset_name}...")
-    mice_loo = MICEBayesianLOO.load(str(mice_path))
+    # Load pairwise stacking model
+    from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
+    print(f"Loading pairwise stacking model for {dataset_name}...")
+    pairwise_model = PairwiseOrdinalStackingModel.load(str(mice_path))
 
     # Compute mixed weights
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
     print(f"Computing mixed weights for {dataset_name}...")
     mixed = IrtMixedImputationModel(
         irt_model=model_baseline,
-        mice_model=mice_loo,
+        mice_model=pairwise_model,
         data_factory=data_factory,
         irt_elpd_batch_size=4,
     )

@@ -123,7 +123,7 @@ def run_real_data(gender, work_dir, skip_baseline=False, skip_mice=False,
     if imputed_epochs is None:
         imputed_epochs = num_epochs
     from bayesianquilts.irt.grm import GRModel
-    from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+    from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
 
     work_dir = Path(work_dir)
@@ -182,24 +182,23 @@ def run_real_data(gender, work_dir, skip_baseline=False, skip_mice=False,
     gc.collect()
 
     # --- Stage 2: MICE LOO ---
-    mice_path = work_dir / 'mice_loo_model.yaml'
+    mice_path = work_dir / 'pairwise_stacking_model.yaml'
     n_top = min(n_items, 40)
     if skip_mice and mice_path.exists():
         print("\n--- Loading MICE LOO ---")
-        mice_loo = MICEBayesianLOO.load(str(mice_path))
+        pairwise_model = PairwiseOrdinalStackingModel.load(str(mice_path))
     else:
         print(f"\n--- Fitting MICE LOO (n_top_features={n_top}) ---")
         pandas_df = df.select(item_keys).to_pandas().replace(-1, np.nan)
-        mice_loo = MICEBayesianLOO(
-            random_state=42, prior_scale=1.0,
+        pairwise_model = PairwiseOrdinalStackingModel(
+            prior_scale=1.0,
             pathfinder_num_samples=100, pathfinder_maxiter=50,
             batch_size=512, verbose=True,
         )
-        mice_loo.fit_loo_models(
-            pandas_df, n_top_features=n_top, n_jobs=1,
-            fit_zero_predictors=True, seed=42,
+        pairwise_model.fit(
+            pandas_df, n_top_features=n_top, n_jobs=1, seed=42,
         )
-        mice_loo.save(str(mice_path))
+        pairwise_model.save(str(mice_path))
     gc.collect()
 
     # Warm-start: use early snapshot if available, otherwise final baseline params
@@ -223,7 +222,7 @@ def run_real_data(gender, work_dir, skip_baseline=False, skip_mice=False,
         model_mice_only = GRModel(
             item_keys=item_keys, num_people=N, dim=1,
             response_cardinality=K, dtype=jnp.float64,
-            imputation_model=mice_loo,
+            imputation_model=pairwise_model,
         )
         res = model_mice_only.fit(
             factory_fn, batch_size=batch_size, dataset_size=N,
@@ -241,7 +240,7 @@ def run_real_data(gender, work_dir, skip_baseline=False, skip_mice=False,
     # --- Stage 4: Mixed imputation + GRM ---
     print("\n--- Building mixed imputation model ---")
     mixed_imputation = IrtMixedImputationModel(
-        irt_model=model_baseline, mice_model=mice_loo,
+        irt_model=model_baseline, mice_model=pairwise_model,
         data_factory=factory_fn, irt_elpd_batch_size=4,
     )
     print(mixed_imputation.summary())
@@ -383,7 +382,7 @@ def run_synthetic(gender, work_dir, epochs=500, lr=1e-3, batch_size=256):
         compare_ability_ordering, make_comparison_plots,
         make_data_factory as make_factory,
     )
-    from bayesianquilts.imputation.mice_loo import MICEBayesianLOO
+    from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
 
     work_dir = Path(work_dir)
@@ -423,18 +422,18 @@ def run_synthetic(gender, work_dir, epochs=500, lr=1e-3, batch_size=256):
         missingness_stats=miss_stats, seed=42,
     )
 
-    # 5. Fit MICE on synthetic
+    # 5. Fit pairwise stacking on synthetic
     synth_df = pd.DataFrame({k: synth_data[k] for k in item_keys}).replace(-1, np.nan)
-    mice_loo = MICEBayesianLOO(
-        random_state=42, prior_scale=1.0,
+    pairwise_model = PairwiseOrdinalStackingModel(
+        prior_scale=1.0,
         pathfinder_num_samples=100, pathfinder_maxiter=50,
         batch_size=512, verbose=True,
     )
-    mice_loo.fit_loo_models(
+    pairwise_model.fit(
         synth_df, n_top_features=min(len(item_keys), 40),
-        n_jobs=1, fit_zero_predictors=True, seed=42,
+        n_jobs=1, seed=42,
     )
-    mice_loo.save(str(synth_dir / 'mice_loo_model.yaml'))
+    pairwise_model.save(str(synth_dir / 'pairwise_stacking_model.yaml'))
     gc.collect()
 
     # 6. Fit baseline GRM on synthetic
@@ -452,7 +451,7 @@ def run_synthetic(gender, work_dir, epochs=500, lr=1e-3, batch_size=256):
     mice_only_model = fit_grm_imputed(
         synth_data, item_keys, K, N,
         save_dir=synth_dir / 'grm_mice_only',
-        imputation_model=mice_loo,
+        imputation_model=pairwise_model,
         batch_size=batch_size, num_epochs=epochs, learning_rate=lr,
         patience=20, lr_decay_factor=0.975, clip_norm=1.0,
         initial_values=snapshot, sample_size=32, seed=43,
@@ -463,7 +462,7 @@ def run_synthetic(gender, work_dir, epochs=500, lr=1e-3, batch_size=256):
     # 8. Build mixed imputation and fit mixed GRM
     factory = make_factory(synth_data, batch_size, N)
     mixed_imp = IrtMixedImputationModel(
-        irt_model=baseline_model, mice_model=mice_loo,
+        irt_model=baseline_model, mice_model=pairwise_model,
         data_factory=factory, irt_elpd_batch_size=4,
     )
     print(mixed_imp.summary())

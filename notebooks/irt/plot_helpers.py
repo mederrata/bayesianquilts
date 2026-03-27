@@ -270,7 +270,7 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
     by w_mice, and the IRT column gets (1 - w_mice).
 
     Args:
-        mice_model: Fitted MICEBayesianLOO model
+        mice_model: Fitted PairwiseOrdinalStackingModel (or MICEBayesianLOO) model
         mixed_model: IrtMixedImputationModel with computed weights
         item_keys: List of item names
     """
