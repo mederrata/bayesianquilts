@@ -47,6 +47,303 @@ tfd = tfp.distributions
 
 
 # ---------------------------------------------------------------------------
+# Frozen config for serialization-safe parallel workers
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _FitConfig:
+    """Immutable config snapshot passed to module-level worker functions.
+
+    By extracting these from ``self`` before the parallel loop, we avoid
+    serializing the mutable ``PairwiseOrdinalStackingModel`` instance (whose
+    result dicts change size as results are collected).
+    """
+    variable_types: tuple  # tuple of (idx, type_str) pairs
+    prior_scale: float
+    noise_scale: float
+    pathfinder_num_samples: int
+    pathfinder_maxiter: int
+    min_obs: int
+    batch_size: Optional[int]
+    inference_method: str
+    verbose: bool
+    dtype: Any  # jnp dtype
+    global_ordinal_values: Optional[tuple]  # None or tuple of floats
+    n_global_classes: int
+
+    def get_var_type(self, idx: int) -> Optional[str]:
+        for i, t in self.variable_types:
+            if i == idx:
+                return t
+        return None
+
+
+def _make_fit_config(model: "PairwiseOrdinalStackingModel") -> _FitConfig:
+    return _FitConfig(
+        variable_types=tuple(model.variable_types.items()),
+        prior_scale=model.prior_scale,
+        noise_scale=model.noise_scale,
+        pathfinder_num_samples=model.pathfinder_num_samples,
+        pathfinder_maxiter=model.pathfinder_maxiter,
+        min_obs=model.min_obs,
+        batch_size=model.batch_size,
+        inference_method=model.inference_method,
+        verbose=model.verbose,
+        dtype=model.dtype,
+        global_ordinal_values=(
+            tuple(model.global_ordinal_values.tolist())
+            if model.global_ordinal_values is not None else None
+        ),
+        n_global_classes=model.n_global_classes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Module-level worker functions (no reference to self)
+# ---------------------------------------------------------------------------
+
+def _worker_fit_zero_predictor(
+    data: np.ndarray,
+    target_idx: int,
+    cfg: _FitConfig,
+    seed: int,
+) -> UnivariateModelResult:
+    """Fit a zero-predictor (intercept-only) regression model."""
+    mask = ~np.isnan(data[:, target_idx])
+    y = data[mask, target_idx]
+    n_obs = len(y)
+
+    if n_obs < cfg.min_obs:
+        return UnivariateModelResult(
+            n_obs=n_obs, elpd_loo=float("-inf"),
+            elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
+            khat_max=float("inf"), khat_mean=float("inf"),
+            predictor_idx=None, target_idx=target_idx, converged=False,
+        )
+
+    var_type = cfg.get_var_type(target_idx)
+    if var_type is None:
+        var_type = infer_variable_type(y)
+
+    scale_factor = 1.0
+    if cfg.batch_size is not None and n_obs > cfg.batch_size:
+        rng = np.random.RandomState(seed)
+        subsample_idx = rng.choice(n_obs, size=cfg.batch_size, replace=False)
+        y_batch = y[subsample_idx]
+        scale_factor = n_obs / cfg.batch_size
+    else:
+        y_batch = y
+
+    X = np.zeros((len(y_batch), 1), dtype=np.float32)
+    data_dict = {"X": X, "y": y_batch.astype(np.float32)}
+
+    global_ov = np.array(cfg.global_ordinal_values) if cfg.global_ordinal_values is not None else None
+
+    if var_type == "binary":
+        model = SimpleLogisticRegression(
+            n_predictors=1, prior_scale=cfg.prior_scale,
+            dtype=cfg.dtype, n_obs=n_obs,
+        )
+    elif var_type == "ordinal":
+        if global_ov is not None:
+            unique_vals = global_ov
+            n_classes = cfg.n_global_classes
+        else:
+            unique_vals = np.unique(y_batch)
+            n_classes = len(unique_vals)
+        val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
+        data_dict["y"] = np.array([val_map[val] for val in y_batch], dtype=np.float32)
+        model = SimpleOrdinalLogisticRegression(
+            n_classes=n_classes, n_predictors=1,
+            prior_scale=cfg.prior_scale, dtype=cfg.dtype, n_obs=n_obs,
+        )
+    else:
+        model = SimpleLinearRegression(
+            n_predictors=1, prior_scale=cfg.prior_scale,
+            noise_scale=cfg.noise_scale, dtype=cfg.dtype, n_obs=n_obs,
+        )
+
+    params, elbo, converged, _, surrogate_fn = run_inference_with_fallback(
+        model, data_dict, scale_factor=scale_factor, seed=seed,
+        current_dtype=cfg.dtype, inference_method=cfg.inference_method,
+        num_samples=cfg.pathfinder_num_samples, maxiter=cfg.pathfinder_maxiter,
+        verbose=cfg.verbose,
+    )
+
+    if not converged or params is None:
+        return UnivariateModelResult(
+            n_obs=n_obs, elpd_loo=float("-inf"),
+            elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
+            khat_max=float("inf"), khat_mean=float("inf"),
+            predictor_idx=None, target_idx=target_idx, converged=False,
+        )
+
+    elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
+
+    if khat_max > 0.7:
+        return UnivariateModelResult(
+            n_obs=n_obs, elpd_loo=float("-inf"),
+            elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
+            khat_max=khat_max, khat_mean=khat_mean,
+            predictor_idx=None, target_idx=target_idx, converged=False,
+        )
+
+    beta_eff = model._get_beta(params)
+    beta_mean = np.array(np.mean(beta_eff, axis=0))
+    intercept_mean = float(np.mean(params["intercept"])) if "intercept" in params else None
+    cutpoints_mean = None
+    if "cutpoints_raw" in params:
+        transformed = jax.vmap(model._transform_cutpoints)(params["cutpoints_raw"])
+        cutpoints_mean = np.array(np.mean(transformed, axis=0))
+
+    return UnivariateModelResult(
+        n_obs=n_obs, elpd_loo=elpd_loo,
+        elpd_loo_per_obs=elpd_loo / n_obs if n_obs > 0 else float("-inf"),
+        elpd_loo_per_obs_se=elpd_se / n_obs if n_obs > 0 else float("inf"),
+        khat_max=khat_max, khat_mean=khat_mean,
+        predictor_idx=None, target_idx=target_idx, converged=converged,
+        params=None, beta_mean=beta_mean,
+        intercept_mean=intercept_mean, cutpoints_mean=cutpoints_mean,
+    )
+
+
+def _worker_fit_univariate(
+    data: np.ndarray,
+    target_idx: int,
+    predictor_idx: int,
+    cfg: _FitConfig,
+    seed: int,
+) -> UnivariateModelResult:
+    """Fit a one-predictor univariate regression model."""
+    mask = ~np.isnan(data[:, target_idx]) & ~np.isnan(data[:, predictor_idx])
+    n_obs = int(np.sum(mask))
+
+    if n_obs < cfg.min_obs:
+        return UnivariateModelResult(
+            n_obs=n_obs, elpd_loo=float("-inf"),
+            elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
+            khat_max=float("inf"), khat_mean=float("inf"),
+            predictor_idx=predictor_idx, target_idx=target_idx, converged=False,
+        )
+
+    X_raw = data[mask, predictor_idx : predictor_idx + 1].astype(np.float32)
+    y = data[mask, target_idx].astype(np.float32)
+
+    target_var_type = cfg.get_var_type(target_idx)
+    if target_var_type is None:
+        target_var_type = infer_variable_type(y)
+
+    predictor_var_type = cfg.get_var_type(predictor_idx)
+    if predictor_var_type is None:
+        predictor_var_type = infer_variable_type(data[mask, predictor_idx])
+
+    scale_factor = 1.0
+    if cfg.batch_size is not None and n_obs > cfg.batch_size:
+        rng = np.random.RandomState(seed)
+        subsample_idx = rng.choice(n_obs, size=cfg.batch_size, replace=False)
+        X_raw_batch = X_raw[subsample_idx]
+        y_batch = y[subsample_idx]
+        scale_factor = n_obs / cfg.batch_size
+    else:
+        X_raw_batch = X_raw
+        y_batch = y
+
+    global_ov = np.array(cfg.global_ordinal_values) if cfg.global_ordinal_values is not None else None
+
+    if predictor_var_type == "ordinal":
+        if global_ov is not None:
+            max_val = int(np.max(global_ov))
+        else:
+            max_val = int(np.max(X_raw_batch.flatten()))
+        X = ordinal_one_hot_encode(X_raw_batch.astype(int), max_val).astype(np.float32)
+        X_mean = 0.0
+        X_std = 1.0
+        n_predictors = X.shape[1]
+    else:
+        X = X_raw_batch
+        X_mean = float(np.mean(X))
+        X_std = float(np.std(X))
+        if X_std > 1e-6:
+            X = (X - X_mean) / X_std
+        else:
+            X_std = 1.0
+        n_predictors = 1
+
+    data_dict = {"X": X, "y": y_batch}
+
+    if target_var_type == "binary":
+        model = SimpleLogisticRegression(
+            n_predictors=n_predictors, prior_scale=cfg.prior_scale,
+            dtype=cfg.dtype, n_obs=n_obs,
+        )
+    elif target_var_type == "ordinal":
+        if global_ov is not None:
+            unique_vals = global_ov
+            n_classes = cfg.n_global_classes
+        else:
+            unique_vals = np.unique(y_batch)
+            n_classes = len(unique_vals)
+        val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
+        data_dict["y"] = np.array([val_map[val] for val in y_batch], dtype=np.float32)
+        model = SimpleOrdinalLogisticRegression(
+            n_classes=n_classes, n_predictors=n_predictors,
+            prior_scale=cfg.prior_scale, dtype=cfg.dtype, n_obs=n_obs,
+        )
+    else:
+        model = SimpleLinearRegression(
+            n_predictors=n_predictors, prior_scale=cfg.prior_scale,
+            noise_scale=cfg.noise_scale, dtype=cfg.dtype, n_obs=n_obs,
+        )
+
+    params, elbo, converged, _, surrogate_fn = run_inference_with_fallback(
+        model, data_dict, scale_factor=scale_factor, seed=seed,
+        current_dtype=cfg.dtype, inference_method=cfg.inference_method,
+        num_samples=cfg.pathfinder_num_samples, maxiter=cfg.pathfinder_maxiter,
+        verbose=cfg.verbose,
+    )
+
+    if not converged or params is None:
+        return UnivariateModelResult(
+            n_obs=n_obs, elpd_loo=float("-inf"),
+            elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
+            khat_max=float("inf"), khat_mean=float("inf"),
+            predictor_idx=predictor_idx, target_idx=target_idx, converged=False,
+            predictor_mean=X_mean, predictor_std=X_std,
+        )
+
+    elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
+
+    if khat_max > 0.7:
+        return UnivariateModelResult(
+            n_obs=n_obs, elpd_loo=float("-inf"),
+            elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
+            khat_max=khat_max, khat_mean=khat_mean,
+            predictor_idx=predictor_idx, target_idx=target_idx, converged=False,
+            predictor_mean=X_mean, predictor_std=X_std,
+        )
+
+    beta_eff = model._get_beta(params)
+    beta_mean = np.array(np.mean(beta_eff, axis=0))
+    intercept_mean = float(np.mean(params["intercept"])) if "intercept" in params else None
+    cutpoints_mean = None
+    if "cutpoints_raw" in params:
+        transformed = jax.vmap(model._transform_cutpoints)(params["cutpoints_raw"])
+        cutpoints_mean = np.array(np.mean(transformed, axis=0))
+
+    return UnivariateModelResult(
+        n_obs=n_obs, elpd_loo=elpd_loo,
+        elpd_loo_per_obs=elpd_loo / n_obs if n_obs > 0 else float("-inf"),
+        elpd_loo_per_obs_se=elpd_se / n_obs if n_obs > 0 else float("inf"),
+        khat_max=khat_max, khat_mean=khat_mean,
+        predictor_idx=predictor_idx, target_idx=target_idx,
+        converged=converged, params=None,
+        predictor_mean=X_mean, predictor_std=X_std,
+        beta_mean=beta_mean, intercept_mean=intercept_mean,
+        cutpoints_mean=cutpoints_mean,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dirichlet-multinomial contingency table model
 # ---------------------------------------------------------------------------
 
@@ -320,256 +617,11 @@ class PairwiseOrdinalStackingModel:
         self.dm_zero_results: Dict[int, DirichletMultinomialResult] = {}
 
     # ------------------------------------------------------------------
-    # Regression model fitting (ported from MICEBayesianLOO)
+    # Helpers
     # ------------------------------------------------------------------
 
-    def _get_observed_mask(self, data: np.ndarray, var_idx: int) -> np.ndarray:
-        return ~np.isnan(data[:, var_idx])
-
     def _get_overlapping_mask(self, data: np.ndarray, idx1: int, idx2: int) -> np.ndarray:
-        return self._get_observed_mask(data, idx1) & self._get_observed_mask(data, idx2)
-
-    def _fit_zero_predictor(
-        self,
-        data: np.ndarray,
-        target_idx: int,
-        seed: int = 42,
-    ) -> UnivariateModelResult:
-        """Fit a zero-predictor (intercept-only) regression model."""
-        mask = self._get_observed_mask(data, target_idx)
-        y = data[mask, target_idx]
-        n_obs = len(y)
-
-        if n_obs < self.min_obs:
-            return UnivariateModelResult(
-                n_obs=n_obs, elpd_loo=float("-inf"),
-                elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
-                khat_max=float("inf"), khat_mean=float("inf"),
-                predictor_idx=None, target_idx=target_idx, converged=False,
-            )
-
-        var_type = self.variable_types.get(target_idx)
-        if var_type is None:
-            var_type = infer_variable_type(y)
-
-        # Batch subsampling
-        scale_factor = 1.0
-        if self.batch_size is not None and n_obs > self.batch_size:
-            rng = np.random.RandomState(seed)
-            subsample_idx = rng.choice(n_obs, size=self.batch_size, replace=False)
-            y_batch = y[subsample_idx]
-            scale_factor = n_obs / self.batch_size
-        else:
-            y_batch = y
-
-        X = np.zeros((len(y_batch), 1), dtype=np.float32)
-        data_dict = {"X": X, "y": y_batch.astype(np.float32)}
-
-        if var_type == "binary":
-            model = SimpleLogisticRegression(
-                n_predictors=1, prior_scale=self.prior_scale,
-                dtype=self.dtype, n_obs=n_obs,
-            )
-        elif var_type == "ordinal":
-            if self.global_ordinal_values is not None:
-                unique_vals = self.global_ordinal_values
-                n_classes = self.n_global_classes
-            else:
-                unique_vals = np.unique(y_batch)
-                n_classes = len(unique_vals)
-            val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
-            data_dict["y"] = np.array([val_map[val] for val in y_batch], dtype=np.float32)
-            model = SimpleOrdinalLogisticRegression(
-                n_classes=n_classes, n_predictors=1,
-                prior_scale=self.prior_scale, dtype=self.dtype, n_obs=n_obs,
-            )
-        else:
-            model = SimpleLinearRegression(
-                n_predictors=1, prior_scale=self.prior_scale,
-                noise_scale=self.noise_scale, dtype=self.dtype, n_obs=n_obs,
-            )
-
-        params, elbo, converged, _, surrogate_fn = run_inference_with_fallback(
-            model, data_dict, scale_factor=scale_factor, seed=seed,
-            current_dtype=self.dtype, inference_method=self.inference_method,
-            num_samples=self.pathfinder_num_samples, maxiter=self.pathfinder_maxiter,
-            verbose=self.verbose,
-        )
-
-        if not converged or params is None:
-            return UnivariateModelResult(
-                n_obs=n_obs, elpd_loo=float("-inf"),
-                elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
-                khat_max=float("inf"), khat_mean=float("inf"),
-                predictor_idx=None, target_idx=target_idx, converged=False,
-            )
-
-        elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
-
-        if khat_max > 0.7:
-            if self.verbose:
-                print(f"    khat={khat_max:.2f} > 0.7, discarding zero-predictor model")
-            return UnivariateModelResult(
-                n_obs=n_obs, elpd_loo=float("-inf"),
-                elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
-                khat_max=khat_max, khat_mean=khat_mean,
-                predictor_idx=None, target_idx=target_idx, converged=False,
-            )
-
-        beta_eff = model._get_beta(params)
-        beta_mean = np.array(np.mean(beta_eff, axis=0))
-        intercept_mean = float(np.mean(params["intercept"])) if "intercept" in params else None
-        cutpoints_mean = None
-        if "cutpoints_raw" in params:
-            transformed = jax.vmap(model._transform_cutpoints)(params["cutpoints_raw"])
-            cutpoints_mean = np.array(np.mean(transformed, axis=0))
-
-        return UnivariateModelResult(
-            n_obs=n_obs, elpd_loo=elpd_loo,
-            elpd_loo_per_obs=elpd_loo / n_obs if n_obs > 0 else float("-inf"),
-            elpd_loo_per_obs_se=elpd_se / n_obs if n_obs > 0 else float("inf"),
-            khat_max=khat_max, khat_mean=khat_mean,
-            predictor_idx=None, target_idx=target_idx, converged=converged,
-            params=None, beta_mean=beta_mean,
-            intercept_mean=intercept_mean, cutpoints_mean=cutpoints_mean,
-        )
-
-    def _fit_univariate(
-        self,
-        data: np.ndarray,
-        target_idx: int,
-        predictor_idx: int,
-        seed: int = 42,
-    ) -> UnivariateModelResult:
-        """Fit a one-predictor univariate regression model."""
-        mask = self._get_overlapping_mask(data, target_idx, predictor_idx)
-        n_obs = int(np.sum(mask))
-
-        if n_obs < self.min_obs:
-            return UnivariateModelResult(
-                n_obs=n_obs, elpd_loo=float("-inf"),
-                elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
-                khat_max=float("inf"), khat_mean=float("inf"),
-                predictor_idx=predictor_idx, target_idx=target_idx, converged=False,
-            )
-
-        X_raw = data[mask, predictor_idx : predictor_idx + 1].astype(np.float32)
-        y = data[mask, target_idx].astype(np.float32)
-
-        target_var_type = self.variable_types.get(target_idx)
-        if target_var_type is None:
-            target_var_type = infer_variable_type(y)
-
-        predictor_var_type = self.variable_types.get(predictor_idx)
-        if predictor_var_type is None:
-            predictor_var_type = infer_variable_type(data[mask, predictor_idx])
-
-        # Batch subsampling
-        scale_factor = 1.0
-        if self.batch_size is not None and n_obs > self.batch_size:
-            rng = np.random.RandomState(seed)
-            subsample_idx = rng.choice(n_obs, size=self.batch_size, replace=False)
-            X_raw_batch = X_raw[subsample_idx]
-            y_batch = y[subsample_idx]
-            scale_factor = n_obs / self.batch_size
-        else:
-            X_raw_batch = X_raw
-            y_batch = y
-
-        # Prepare X based on predictor type
-        if predictor_var_type == "ordinal":
-            if self.global_ordinal_values is not None:
-                max_val = int(np.max(self.global_ordinal_values))
-            else:
-                max_val = int(np.max(X_raw_batch.flatten()))
-            X = ordinal_one_hot_encode(X_raw_batch.astype(int), max_val).astype(np.float32)
-            X_mean = 0.0
-            X_std = 1.0
-            n_predictors = X.shape[1]
-        else:
-            X = X_raw_batch
-            X_mean = float(np.mean(X))
-            X_std = float(np.std(X))
-            if X_std > 1e-6:
-                X = (X - X_mean) / X_std
-            else:
-                X_std = 1.0
-            n_predictors = 1
-
-        data_dict = {"X": X, "y": y_batch}
-
-        if target_var_type == "binary":
-            model = SimpleLogisticRegression(
-                n_predictors=n_predictors, prior_scale=self.prior_scale,
-                dtype=self.dtype, n_obs=n_obs,
-            )
-        elif target_var_type == "ordinal":
-            if self.global_ordinal_values is not None:
-                unique_vals = self.global_ordinal_values
-                n_classes = self.n_global_classes
-            else:
-                unique_vals = np.unique(y_batch)
-                n_classes = len(unique_vals)
-            val_map = {val: i for i, val in enumerate(sorted(unique_vals))}
-            data_dict["y"] = np.array([val_map[val] for val in y_batch], dtype=np.float32)
-            model = SimpleOrdinalLogisticRegression(
-                n_classes=n_classes, n_predictors=n_predictors,
-                prior_scale=self.prior_scale, dtype=self.dtype, n_obs=n_obs,
-            )
-        else:
-            model = SimpleLinearRegression(
-                n_predictors=n_predictors, prior_scale=self.prior_scale,
-                noise_scale=self.noise_scale, dtype=self.dtype, n_obs=n_obs,
-            )
-
-        params, elbo, converged, _, surrogate_fn = run_inference_with_fallback(
-            model, data_dict, scale_factor=scale_factor, seed=seed,
-            current_dtype=self.dtype, inference_method=self.inference_method,
-            num_samples=self.pathfinder_num_samples, maxiter=self.pathfinder_maxiter,
-            verbose=self.verbose,
-        )
-
-        if not converged or params is None:
-            return UnivariateModelResult(
-                n_obs=n_obs, elpd_loo=float("-inf"),
-                elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
-                khat_max=float("inf"), khat_mean=float("inf"),
-                predictor_idx=predictor_idx, target_idx=target_idx, converged=False,
-                predictor_mean=X_mean, predictor_std=X_std,
-            )
-
-        elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
-
-        if khat_max > 0.7:
-            if self.verbose:
-                print(f"    khat={khat_max:.2f} > 0.7, discarding ({predictor_idx}->{target_idx})")
-            return UnivariateModelResult(
-                n_obs=n_obs, elpd_loo=float("-inf"),
-                elpd_loo_per_obs=float("-inf"), elpd_loo_per_obs_se=float("inf"),
-                khat_max=khat_max, khat_mean=khat_mean,
-                predictor_idx=predictor_idx, target_idx=target_idx, converged=False,
-                predictor_mean=X_mean, predictor_std=X_std,
-            )
-
-        beta_eff = model._get_beta(params)
-        beta_mean = np.array(np.mean(beta_eff, axis=0))
-        intercept_mean = float(np.mean(params["intercept"])) if "intercept" in params else None
-        cutpoints_mean = None
-        if "cutpoints_raw" in params:
-            transformed = jax.vmap(model._transform_cutpoints)(params["cutpoints_raw"])
-            cutpoints_mean = np.array(np.mean(transformed, axis=0))
-
-        return UnivariateModelResult(
-            n_obs=n_obs, elpd_loo=elpd_loo,
-            elpd_loo_per_obs=elpd_loo / n_obs if n_obs > 0 else float("-inf"),
-            elpd_loo_per_obs_se=elpd_se / n_obs if n_obs > 0 else float("inf"),
-            khat_max=khat_max, khat_mean=khat_mean,
-            predictor_idx=predictor_idx, target_idx=target_idx,
-            converged=converged, params=None,
-            predictor_mean=X_mean, predictor_std=X_std,
-            beta_mean=beta_mean, intercept_mean=intercept_mean,
-            cutpoints_mean=cutpoints_mean,
-        )
+        return ~np.isnan(data[:, idx1]) & ~np.isnan(data[:, idx2])
 
     # ------------------------------------------------------------------
     # Prediction helpers (ported from MICEBayesianLOO)
@@ -749,25 +801,29 @@ class PairwiseOrdinalStackingModel:
             if self.n_global_classes > 0:
                 print(f"  Global ordinal values: {self.global_ordinal_values} (n={self.n_global_classes})")
 
+        # Snapshot config for parallel workers (avoids serializing self)
+        cfg = _make_fit_config(self)
+
         # ----------------------------------------------------------
         # Phase 1: Fit zero-predictor regression models
         # ----------------------------------------------------------
         if self.verbose:
             print("\nFitting zero-predictor regression models...")
 
-        def fit_zero(i):
-            return self._fit_zero_predictor(data, i, seed=seed + i)
-
         try:
             results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-                delayed(fit_zero)(i) for i in range(n_variables)
+                delayed(_worker_fit_zero_predictor)(data, i, cfg, seed + i)
+                for i in range(n_variables)
             )
         except Exception as e:
             if n_jobs != 1:
                 if self.verbose:
                     print(f"  Parallel fitting failed ({e}), falling back to sequential")
                 n_jobs = 1
-                results_gen = (fit_zero(i) for i in range(n_variables))
+                results_gen = (
+                    _worker_fit_zero_predictor(data, i, cfg, seed + i)
+                    for i in range(n_variables)
+                )
 
         if not self.verbose:
             results_gen = tqdm(results_gen, total=n_variables, desc="Zero-Predictor Regression")
@@ -810,21 +866,24 @@ class PairwiseOrdinalStackingModel:
             if self.verbose:
                 print(f"  Processing {target_name} ({len(valid_predictors)} predictors)")
 
-            def fit_single(j):
-                return self._fit_univariate(
-                    data, i, j, seed=seed + n_variables + (i * n_variables + j)
-                )
-
             try:
                 results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-                    delayed(fit_single)(j) for j in valid_predictors
+                    delayed(_worker_fit_univariate)(
+                        data, i, j, cfg, seed + n_variables + (i * n_variables + j)
+                    )
+                    for j in valid_predictors
                 )
             except Exception as e:
                 if n_jobs != 1:
                     if self.verbose:
                         print(f"  Parallel fitting failed ({e}), falling back to sequential")
                     n_jobs = 1
-                results_gen = (fit_single(j) for j in valid_predictors)
+                results_gen = (
+                    _worker_fit_univariate(
+                        data, i, j, cfg, seed + n_variables + (i * n_variables + j)
+                    )
+                    for j in valid_predictors
+                )
 
             if not self.verbose:
                 results_gen = tqdm(
