@@ -337,11 +337,11 @@ class FactorizedGRModel(IRTModel):
             sigma_d = sigma[d]
 
             var_transforms = [
-                (f"abilities_{d}",       lambda x: (x - mu_d) / sigma_d),
-                (f"discriminations_{d}", lambda x: x * sigma_d),
-                (f"mu_{d}",             lambda x: (x - mu_d) / sigma_d),
-                (f"difficulties0_{d}",   lambda x: (x - mu_d) / sigma_d),
-                (f"ddifficulties_{d}",   lambda x: x / sigma_d),
+                (f"abilities_{d}",       lambda x, m=mu_d, s=sigma_d: (x - m) / s),
+                (f"discriminations_{d}", lambda x, m=mu_d, s=sigma_d: x * s),
+                (f"mu_{d}",             lambda x, m=mu_d, s=sigma_d: (x - m) / s),
+                (f"difficulties0_{d}",   lambda x, m=mu_d, s=sigma_d: (x - m) / s),
+                (f"ddifficulties_{d}",   lambda x, m=mu_d, s=sigma_d: x / s),
             ]
 
             for var_name, constrained_fn in var_transforms:
