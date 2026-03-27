@@ -300,9 +300,10 @@ def training_loop(
         for epoch in range(num_epochs):
             epoch_loss = 0.0
             valid_steps = 0
-            grad_accumulator = jax.tree_util.tree_map(
-                jnp.zeros_like, unfreeze(filter_params(params))
-            )
+            if accumulation_steps > 1:
+                grad_accumulator = jax.tree_util.tree_map(
+                    jnp.zeros_like, unfreeze(filter_params(params))
+                )
             with tqdm(
                 range(steps_per_epoch),
                 desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})",
@@ -406,25 +407,30 @@ def training_loop(
                                 delta2 = flat_g - grad_means[k]
                                 grad_m2[k] = grad_m2.get(k, jnp.zeros_like(flat_g)) + delta * delta2
 
-                        grad_accumulator = jax.tree_util.tree_map(
-                            lambda acc, g: acc + g, grad_accumulator, filtered_grads
-                        )
                         total_steps += 1
-                        if (total_steps + 1) % accumulation_steps == 0:
-                            # Average accumulated gradients
-                            tot_grads = jax.tree_util.tree_map(
-                                lambda g: g / accumulation_steps, grad_accumulator
-                            )
-                            # Only update selected keys
+                        if accumulation_steps == 1:
+                            # Fast path: skip accumulation overhead
                             filtered_params = filter_params(params)
                             new_filtered_params, opt_state = train_step_fn(
-                                filtered_params, opt_state, tot_grads
+                                filtered_params, opt_state, filtered_grads
                             )
-                            # Merge updated subset back into full params
                             params = merge_params(params, new_filtered_params)
+                        else:
                             grad_accumulator = jax.tree_util.tree_map(
-                                jnp.zeros_like, unfreeze(filter_params(params))
+                                lambda acc, g: acc + g, grad_accumulator, filtered_grads
                             )
+                            if (total_steps + 1) % accumulation_steps == 0:
+                                tot_grads = jax.tree_util.tree_map(
+                                    lambda g: g / accumulation_steps, grad_accumulator
+                                )
+                                filtered_params = filter_params(params)
+                                new_filtered_params, opt_state = train_step_fn(
+                                    filtered_params, opt_state, tot_grads
+                                )
+                                params = merge_params(params, new_filtered_params)
+                                grad_accumulator = jax.tree_util.tree_map(
+                                    jnp.zeros_like, unfreeze(filter_params(params))
+                                )
 
                         pbar.set_postfix(
                             loss=f"{loss_val:.4f}", best_loss=f"{best_loss:.4f}"
@@ -434,6 +440,12 @@ def training_loop(
                         raise
             avg_epoch_loss = epoch_loss / max(valid_steps, 1) if valid_steps > 0 else float("inf")
             epoch_losses += [avg_epoch_loss]
+
+            # Periodically clear JIT caches to prevent memory growth
+            if (epoch + 1) % 10 == 0:
+                jax.clear_caches()
+                import gc as _gc
+                _gc.collect()
 
             if snapshot_epoch is not None and epoch + 1 == snapshot_epoch:
                 snapshot_params = jax.tree_util.tree_map(
