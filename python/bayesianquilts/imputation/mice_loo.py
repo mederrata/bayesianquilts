@@ -2058,7 +2058,14 @@ class MICEBayesianLOO(MICELogistic):
         """
         cutpoints = result.cutpoints_mean
         if cutpoints is None:
-            # No cutpoints — return uniform
+            if n_categories == 2:
+                # Binary logistic: eta already includes the intercept,
+                # so P(Y=1) = sigmoid(eta).
+                def _sigmoid(x):
+                    return 1.0 / (1.0 + np.exp(-x))
+                p1 = _sigmoid(eta)
+                return np.array([1.0 - p1, p1])
+            # No cutpoints and not binary — return uniform
             return np.ones(n_categories) / n_categories
 
         def sigmoid(x):
