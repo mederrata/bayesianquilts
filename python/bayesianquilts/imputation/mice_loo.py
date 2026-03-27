@@ -505,7 +505,6 @@ class MICEBayesianLOO(MICELogistic):
         var_type = self.variable_types.get(target_idx)
         if var_type is None:
             var_type = self._infer_variable_type(y)
-            self.variable_types[target_idx] = var_type
 
         # Batch subsampling for large datasets
         scale_factor = 1.0
@@ -655,12 +654,10 @@ class MICEBayesianLOO(MICELogistic):
         target_var_type = self.variable_types.get(target_idx)
         if target_var_type is None:
             target_var_type = self._infer_variable_type(y)
-            self.variable_types[target_idx] = target_var_type
 
         predictor_var_type = self.variable_types.get(predictor_idx)
         if predictor_var_type is None:
             predictor_var_type = self._infer_variable_type(data[mask, predictor_idx])
-            self.variable_types[predictor_idx] = predictor_var_type
 
         # Batch subsampling for large datasets
         scale_factor = 1.0
