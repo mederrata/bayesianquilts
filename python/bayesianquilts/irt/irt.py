@@ -136,7 +136,7 @@ class IRTModel(BayesianModel):
         responses = response_rv.sample(seed=jax.random.PRNGKey(seed))
         return responses
 
-    def standardize_abilities(self, weights=None):
+    def standardize_abilities(self, weights=None, reference_idx=None):
         """Rescale all model parameters so that abilities are N(0, 1) per dimension.
 
         The GRM response model is invariant under the affine transform
@@ -153,6 +153,12 @@ class IRTModel(BayesianModel):
             weights: Optional (N,) array of per-person weights for computing
                 the weighted mean and std.  If None, uses uniform weights
                 (simple mean/std).
+            reference_idx: Optional array of person indices whose abilities
+                define the standardization statistics per dimension. All
+                abilities (and item parameters) are shifted and scaled using
+                the reference subset's mean and std. Useful when a reference
+                subpopulation (e.g., the general population group) should
+                anchor the ability scale.
 
         Returns:
             dict with ``mu`` (D,) and ``sigma`` (D,) used for rescaling.
@@ -178,22 +184,32 @@ class IRTModel(BayesianModel):
             else:
                 ab_d = abilities
 
-            if weights is not None:
-                # Weighted mean/std over people
-                w = jnp.asarray(weights, dtype=abilities.dtype)
-                w = w / jnp.sum(w)
+            # Subset to reference population for computing statistics
+            if reference_idx is not None:
+                ref = jnp.asarray(reference_idx)
                 if ab_d.ndim == 2:
-                    # (S, N): weighted mean/std per sample, then average
-                    m = jnp.sum(ab_d * w[jnp.newaxis, :], axis=1)  # (S,)
-                    v = jnp.sum(w[jnp.newaxis, :] * (ab_d - m[:, jnp.newaxis])**2, axis=1)
+                    ab_ref = ab_d[:, ref]  # (S, N_ref)
+                else:
+                    ab_ref = ab_d[ref]  # (N_ref,)
+                w_ref = weights[ref] if weights is not None else None
+            else:
+                ab_ref = ab_d
+                w_ref = weights
+
+            if w_ref is not None:
+                w = jnp.asarray(w_ref, dtype=abilities.dtype)
+                w = w / jnp.sum(w)
+                if ab_ref.ndim == 2:
+                    m = jnp.sum(ab_ref * w[jnp.newaxis, :], axis=1)
+                    v = jnp.sum(w[jnp.newaxis, :] * (ab_ref - m[:, jnp.newaxis])**2, axis=1)
                     mu = mu.at[d].set(jnp.mean(m))
                     sigma = sigma.at[d].set(jnp.sqrt(jnp.mean(v)))
                 else:
-                    mu = mu.at[d].set(jnp.sum(w * ab_d))
-                    sigma = sigma.at[d].set(jnp.sqrt(jnp.sum(w * (ab_d - mu[d])**2)))
+                    mu = mu.at[d].set(jnp.sum(w * ab_ref))
+                    sigma = sigma.at[d].set(jnp.sqrt(jnp.sum(w * (ab_ref - mu[d])**2)))
             else:
-                mu = mu.at[d].set(jnp.mean(ab_d))
-                sigma = sigma.at[d].set(jnp.std(ab_d))
+                mu = mu.at[d].set(jnp.mean(ab_ref))
+                sigma = sigma.at[d].set(jnp.std(ab_ref))
 
             # Clamp sigma
             sigma = jnp.where(sigma < 1e-8, 1.0, sigma)

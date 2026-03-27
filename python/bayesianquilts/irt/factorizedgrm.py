@@ -241,7 +241,7 @@ class FactorizedGRModel(IRTModel):
                 return key
         return None
 
-    def standardize_abilities(self, weights=None):
+    def standardize_abilities(self, weights=None, reference_idx=None):
         """Rescale per-scale parameters so abilities are N(0, 1) per dimension.
 
         Uses the surrogate distribution's loc/scale parameters directly
@@ -252,6 +252,11 @@ class FactorizedGRModel(IRTModel):
 
         Args:
             weights: Optional (N,) per-person weights for weighted mean/std.
+            reference_idx: Optional array of person indices whose abilities
+                define the standardization statistics per dimension. All
+                abilities are shifted and scaled using the reference subset's
+                mean and std. Useful when a reference subpopulation (e.g.,
+                the general population group) should anchor the scale.
 
         Returns:
             dict with ``mu`` and ``sigma`` arrays of shape (D,).
@@ -273,30 +278,40 @@ class FactorizedGRModel(IRTModel):
                 continue
 
             ab_loc = self.params[loc_key]  # (N, 1, 1, 1)
-            ab_loc_flat = ab_loc.reshape(-1)
+            ab_1d = ab_loc[:, 0, 0, 0] if ab_loc.ndim >= 4 else ab_loc.reshape(-1)
+
+            # Select reference subset
+            if reference_idx is not None:
+                ref_idx = jnp.asarray(reference_idx)
+                ab_ref = ab_1d[ref_idx]
+            else:
+                ab_ref = ab_1d
 
             if weights is not None:
                 w = jnp.asarray(weights, dtype=self.dtype)
+                if reference_idx is not None:
+                    w = w[ref_idx]
                 w = w / jnp.sum(w)
-                ab_1d = ab_loc[:, 0, 0, 0] if ab_loc.ndim >= 4 else ab_loc.reshape(-1)
-                mu = mu.at[d].set(jnp.sum(w * ab_1d))
-                sigma_val = jnp.sqrt(jnp.sum(w * (ab_1d - mu[d])**2))
-                # Add surrogate scale contribution
+                mu = mu.at[d].set(jnp.sum(w * ab_ref))
+                sigma_val = jnp.sqrt(jnp.sum(w * (ab_ref - mu[d])**2))
                 if scale_key is not None:
                     s = self.params[scale_key]
                     if "log_scale" in scale_key:
                         s = jnp.exp(s)
                     s_1d = s[:, 0, 0, 0] if s.ndim >= 4 else s.reshape(-1)
-                    sigma_val = jnp.sqrt(sigma_val**2 + jnp.sum(w * s_1d**2))
+                    s_ref = s_1d[ref_idx] if reference_idx is not None else s_1d
+                    sigma_val = jnp.sqrt(sigma_val**2 + jnp.sum(w * s_ref**2))
                 sigma = sigma.at[d].set(sigma_val)
             else:
-                mu = mu.at[d].set(jnp.mean(ab_loc_flat))
-                var_loc = jnp.var(ab_loc_flat)
+                mu = mu.at[d].set(jnp.mean(ab_ref))
+                var_loc = jnp.var(ab_ref)
                 if scale_key is not None:
                     s = self.params[scale_key]
                     if "log_scale" in scale_key:
                         s = jnp.exp(s)
-                    var_scale = jnp.mean(s.reshape(-1)**2)
+                    s_1d = s[:, 0, 0, 0] if s.ndim >= 4 else s.reshape(-1)
+                    s_ref = s_1d[ref_idx] if reference_idx is not None else s_1d
+                    var_scale = jnp.mean(s_ref.reshape(-1)**2)
                     sigma = sigma.at[d].set(jnp.sqrt(var_loc + var_scale))
                 else:
                     sigma = sigma.at[d].set(jnp.sqrt(var_loc))
