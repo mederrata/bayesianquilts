@@ -758,9 +758,16 @@ class PairwiseOrdinalStackingModel:
         def fit_zero(i):
             return self._fit_zero_predictor(data, i, seed=seed + i)
 
-        results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-            delayed(fit_zero)(i) for i in range(n_variables)
-        )
+        try:
+            results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
+                delayed(fit_zero)(i) for i in range(n_variables)
+            )
+        except Exception as e:
+            if n_jobs != 1:
+                if self.verbose:
+                    print(f"  Parallel fitting failed ({e}), falling back to sequential")
+                n_jobs = 1
+                results_gen = (fit_zero(i) for i in range(n_variables))
 
         if not self.verbose:
             results_gen = tqdm(results_gen, total=n_variables, desc="Zero-Predictor Regression")
@@ -808,9 +815,16 @@ class PairwiseOrdinalStackingModel:
                     data, i, j, seed=seed + n_variables + (i * n_variables + j)
                 )
 
-            results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-                delayed(fit_single)(j) for j in valid_predictors
-            )
+            try:
+                results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
+                    delayed(fit_single)(j) for j in valid_predictors
+                )
+            except Exception as e:
+                if n_jobs != 1:
+                    if self.verbose:
+                        print(f"  Parallel fitting failed ({e}), falling back to sequential")
+                    n_jobs = 1
+                results_gen = (fit_single(j) for j in valid_predictors)
 
             if not self.verbose:
                 results_gen = tqdm(
