@@ -107,11 +107,13 @@ def _worker_fit_zero_predictor(
     target_idx: int,
     cfg: _FitConfig,
     seed: int,
+    sample_weights: Optional[np.ndarray] = None,
 ) -> UnivariateModelResult:
     """Fit a zero-predictor (intercept-only) regression model."""
     mask = ~np.isnan(data[:, target_idx])
     y = data[mask, target_idx]
     n_obs = len(y)
+    obs_weights = sample_weights[mask] if sample_weights is not None else None
 
     if n_obs < cfg.min_obs:
         return UnivariateModelResult(
@@ -131,11 +133,15 @@ def _worker_fit_zero_predictor(
         subsample_idx = rng.choice(n_obs, size=cfg.batch_size, replace=False)
         y_batch = y[subsample_idx]
         scale_factor = n_obs / cfg.batch_size
+        obs_weights_batch = obs_weights[subsample_idx] if obs_weights is not None else None
     else:
         y_batch = y
+        obs_weights_batch = obs_weights
 
     X = np.zeros((len(y_batch), 1), dtype=np.float32)
     data_dict = {"X": X, "y": y_batch.astype(np.float32)}
+    if obs_weights_batch is not None:
+        data_dict["weights"] = obs_weights_batch.astype(np.float32)
 
     global_ov = np.array(cfg.global_ordinal_values) if cfg.global_ordinal_values is not None else None
 
@@ -213,10 +219,12 @@ def _worker_fit_univariate(
     predictor_idx: int,
     cfg: _FitConfig,
     seed: int,
+    sample_weights: Optional[np.ndarray] = None,
 ) -> UnivariateModelResult:
     """Fit a one-predictor univariate regression model."""
     mask = ~np.isnan(data[:, target_idx]) & ~np.isnan(data[:, predictor_idx])
     n_obs = int(np.sum(mask))
+    obs_weights = sample_weights[mask] if sample_weights is not None else None
 
     if n_obs < cfg.min_obs:
         return UnivariateModelResult(
@@ -244,9 +252,11 @@ def _worker_fit_univariate(
         X_raw_batch = X_raw[subsample_idx]
         y_batch = y[subsample_idx]
         scale_factor = n_obs / cfg.batch_size
+        obs_weights_batch = obs_weights[subsample_idx] if obs_weights is not None else None
     else:
         X_raw_batch = X_raw
         y_batch = y
+        obs_weights_batch = obs_weights
 
     global_ov = np.array(cfg.global_ordinal_values) if cfg.global_ordinal_values is not None else None
 
@@ -270,6 +280,8 @@ def _worker_fit_univariate(
         n_predictors = 1
 
     data_dict = {"X": X, "y": y_batch}
+    if obs_weights_batch is not None:
+        data_dict["weights"] = obs_weights_batch.astype(np.float32)
 
     if target_var_type == "binary":
         model = SimpleLogisticRegression(
@@ -413,6 +425,7 @@ class DirichletMultinomialContingency:
         target_categories: np.ndarray,
         predictor_idx: int,
         target_idx: int,
+        weights: Optional[np.ndarray] = None,
     ) -> DirichletMultinomialResult:
         """Fit the contingency table model and compute LOO-ELPD.
 
@@ -423,6 +436,10 @@ class DirichletMultinomialContingency:
             target_categories: Sorted unique target category values.
             predictor_idx: Index of predictor variable.
             target_idx: Index of target variable.
+            weights: Per-observation sampling weights, shape (N,). When
+                     provided, weighted counts are normalized to the Kish
+                     effective sample size to maintain correct posterior
+                     precision.
 
         Returns:
             DirichletMultinomialResult with LOO-ELPD and posterior concentrations.
@@ -449,34 +466,43 @@ class DirichletMultinomialContingency:
         x_idx = np.array([pred_map[v] for v in x], dtype=int)
         y_idx = np.array([tgt_map[v] for v in y], dtype=int)
 
-        # Build contingency table: counts[k, j] = #{x=k, y=j}
+        # Build contingency table with optional weighting
         counts = np.zeros((K_pred, K_target), dtype=np.float64)
-        for xi, yi in zip(x_idx, y_idx):
-            counts[xi, yi] += 1.0
+        if weights is not None:
+            w = np.asarray(weights, dtype=np.float64)
+            # Normalize weights to Kish effective sample size
+            n_eff = (w.sum()) ** 2 / (w ** 2).sum()
+            w_normalized = w * (n_eff / w.sum())
+            for xi, yi, wi in zip(x_idx, y_idx, w_normalized):
+                counts[xi, yi] += wi
+        else:
+            for xi, yi in zip(x_idx, y_idx):
+                counts[xi, yi] += 1.0
+            n_eff = float(n_obs)
 
         # Posterior concentrations per row: alpha_post[k, :] = alpha_prior + counts[k, :]
         alpha0 = self.alpha_prior
         alpha_post = alpha0 + counts  # (K_pred, K_target)
 
         # LOO predictive log-probability for each observation.
-        # For observation i with x_i = k, y_i = j:
-        #   p_loo(y_i | x_i, data_{-i}) = (alpha_post[k, j] - 1) / (sum(alpha_post[k, :]) - 1)
-        # This is the Dirichlet-multinomial LOO formula.
+        # For observation i with x_i = k, y_i = j, the LOO contribution
+        # is the weight of observation i.  Under weighting, the analytic
+        # LOO formula is approximate (exact only for unit weights).
         loos = np.zeros(n_obs)
         for i in range(n_obs):
             k = x_idx[i]
             j = y_idx[i]
+            wi = w_normalized[i] if weights is not None else 1.0
             row_sum = alpha_post[k, :].sum()
-            # LOO: remove this observation's contribution
-            numer = alpha_post[k, j] - 1.0
-            denom = row_sum - 1.0
+            numer = alpha_post[k, j] - wi
+            denom = row_sum - wi
             if denom > 0 and numer > 0:
                 loos[i] = np.log(numer / denom)
             else:
                 loos[i] = -np.inf
 
         elpd_loo = float(np.sum(loos))
-        elpd_se = float(np.sqrt(n_obs * np.var(loos)))
+        elpd_se = float(np.sqrt(n_eff * np.var(loos)))
 
         return DirichletMultinomialResult(
             n_obs=n_obs,
@@ -728,6 +754,8 @@ class PairwiseOrdinalStackingModel:
         n_jobs: int = -1,
         n_top_features: int = 50,
         save_dir: Optional[Union[str, Path]] = None,
+        groups: Optional[np.ndarray] = None,
+        group_weights: Optional[Dict[Any, float]] = None,
     ) -> "PairwiseOrdinalStackingModel":
         """Fit all regression and Dirichlet-multinomial models.
 
@@ -738,6 +766,15 @@ class PairwiseOrdinalStackingModel:
                     -1 uses all cores.
             n_top_features: Top correlated features per target for regression.
             save_dir: Directory to save incremental results.
+            groups: Group label for each respondent, shape (n_respondents,).
+                    Used with ``group_weights`` to compute IPW sampling weights
+                    that correct for stratified or oversampled calibration data.
+                    Group 0 is treated as the general population, which may
+                    contain unlabeled members of other groups at their natural
+                    population rate.
+            group_weights: Target population proportion for each group label,
+                    e.g. ``{0: 0.95, 1: 0.05}``. Must sum to 1. Required when
+                    ``groups`` is provided.
 
         Returns:
             self
@@ -764,6 +801,29 @@ class PairwiseOrdinalStackingModel:
         self.variable_names = list(X_df.columns)
         n_variables = data.shape[1]
         self.n_obs_total = data.shape[0]
+
+        # Compute per-respondent sampling weights from group labels
+        sample_weights = None
+        if groups is not None:
+            if group_weights is None:
+                raise ValueError("group_weights must be provided when groups is specified")
+            groups = np.asarray(groups)
+            if len(groups) != self.n_obs_total:
+                raise ValueError(
+                    f"groups length ({len(groups)}) must match number of "
+                    f"respondents ({self.n_obs_total})"
+                )
+            n = self.n_obs_total
+            sample_weights = np.ones(n, dtype=np.float64)
+            for g, W_g in group_weights.items():
+                g_mask = groups == g
+                n_g = int(g_mask.sum())
+                if n_g > 0:
+                    sample_weights[g_mask] = W_g * n / n_g
+            if self.verbose:
+                print(f"  IPW sampling weights: min={sample_weights.min():.3f}, "
+                      f"max={sample_weights.max():.3f}, "
+                      f"n_eff={sample_weights.sum()**2 / (sample_weights**2).sum():.0f}")
 
         # 1. Infer variable types and global ordinal values
         all_ordinal_values = set()
@@ -812,7 +872,7 @@ class PairwiseOrdinalStackingModel:
 
         try:
             results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-                delayed(_worker_fit_zero_predictor)(data, i, cfg, seed + i)
+                delayed(_worker_fit_zero_predictor)(data, i, cfg, seed + i, sample_weights)
                 for i in range(n_variables)
             )
         except Exception as e:
@@ -821,7 +881,7 @@ class PairwiseOrdinalStackingModel:
                     print(f"  Parallel fitting failed ({e}), falling back to sequential")
                 n_jobs = 1
                 results_gen = (
-                    _worker_fit_zero_predictor(data, i, cfg, seed + i)
+                    _worker_fit_zero_predictor(data, i, cfg, seed + i, sample_weights)
                     for i in range(n_variables)
                 )
 
@@ -869,7 +929,8 @@ class PairwiseOrdinalStackingModel:
             try:
                 results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
                     delayed(_worker_fit_univariate)(
-                        data, i, j, cfg, seed + n_variables + (i * n_variables + j)
+                        data, i, j, cfg, seed + n_variables + (i * n_variables + j),
+                        sample_weights,
                     )
                     for j in valid_predictors
                 )
@@ -880,7 +941,8 @@ class PairwiseOrdinalStackingModel:
                     n_jobs = 1
                 results_gen = (
                     _worker_fit_univariate(
-                        data, i, j, cfg, seed + n_variables + (i * n_variables + j)
+                        data, i, j, cfg, seed + n_variables + (i * n_variables + j),
+                        sample_weights,
                     )
                     for j in valid_predictors
                 )
@@ -922,11 +984,13 @@ class PairwiseOrdinalStackingModel:
             if len(y_obs) < self.min_obs:
                 continue
             dummy_x = np.zeros(len(y_obs), dtype=int)
+            dm_w = sample_weights[obs_mask] if sample_weights is not None else None
             result = self.dm_model.fit_and_loo(
                 x=dummy_x, y=y_obs,
                 predictor_categories=np.array([0]),
                 target_categories=cats,
                 predictor_idx=-1, target_idx=i,
+                weights=dm_w,
             )
             self.dm_zero_results[i] = result
             if self.verbose and result.converged:
@@ -945,11 +1009,13 @@ class PairwiseOrdinalStackingModel:
                 if n_overlap < self.min_obs:
                     continue
 
+                dm_w = sample_weights[mask] if sample_weights is not None else None
                 result = self.dm_model.fit_and_loo(
                     x=data[mask, j], y=data[mask, i],
                     predictor_categories=pred_cats,
                     target_categories=target_cats,
                     predictor_idx=j, target_idx=i,
+                    weights=dm_w,
                 )
                 self.dm_results[(i, j)] = result
                 n_dm_fitted += 1

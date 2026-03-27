@@ -183,7 +183,11 @@ class SimpleLinearRegression:
 
     def unormalized_log_prob(self, data: Dict[str, Any], scale_factor: float = 1.0, **params) -> jnp.ndarray:
         log_lik = self.log_likelihood(data, params)
-        total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
+        if 'weights' in data:
+            w = jnp.asarray(data['weights'], dtype=self.dtype)
+            total_log_lik = jnp.sum(w[None, :] * log_lik, axis=-1) * scale_factor if log_lik.ndim == 2 else jnp.sum(w * log_lik) * scale_factor
+        else:
+            total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
         lp_horseshoe = _horseshoe_log_prior(
             params['log_tau'], params['log_local_scales'],
             params['log_c'], params['beta_raw'], self.tau0)
@@ -263,7 +267,11 @@ class SimpleLogisticRegression:
 
     def unormalized_log_prob(self, data: Dict[str, Any], scale_factor: float = 1.0, **params) -> jnp.ndarray:
         log_lik = self.log_likelihood(data, params)
-        total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
+        if 'weights' in data:
+            w = jnp.asarray(data['weights'], dtype=self.dtype)
+            total_log_lik = jnp.sum(w[None, :] * log_lik, axis=-1) * scale_factor if log_lik.ndim == 2 else jnp.sum(w * log_lik) * scale_factor
+        else:
+            total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
         lp_horseshoe = _horseshoe_log_prior(
             params['log_tau'], params['log_local_scales'],
             params['log_c'], params['beta_raw'], self.tau0)
@@ -370,7 +378,11 @@ class SimpleOrdinalLogisticRegression:
 
     def unormalized_log_prob(self, data: Dict[str, Any], scale_factor: float = 1.0, **params) -> jnp.ndarray:
         log_lik = self.log_likelihood(data, params)
-        total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
+        if 'weights' in data:
+            w = jnp.asarray(data['weights'], dtype=self.dtype)
+            total_log_lik = jnp.sum(w[None, :] * log_lik, axis=-1) * scale_factor if log_lik.ndim == 2 else jnp.sum(w * log_lik) * scale_factor
+        else:
+            total_log_lik = jnp.sum(log_lik, axis=-1) * scale_factor
         lp_horseshoe = _horseshoe_log_prior(
             params['log_tau'], params['log_local_scales'],
             params['log_c'], params['beta_raw'], self.tau0)
@@ -680,12 +692,20 @@ def compute_loo_elpd(
 ) -> Tuple[float, float, float, float]:
     """Compute LOO-ELPD using PSIS.
 
+    If data contains a 'weights' key, the per-observation LOO log-likelihoods
+    are multiplied by the weights before summing to obtain the weighted ELPD.
+
     Returns:
         Tuple of (elpd_loo, elpd_loo_se, khat_max, khat_mean)
     """
     log_lik = model.log_likelihood(data, params)
     log_lik_np = np.array(log_lik)
     loo, loos, ks = nppsis.psisloo(log_lik_np)
+
+    if 'weights' in data:
+        w = np.asarray(data['weights'], dtype=np.float64)
+        loos = loos * w
+        loo = float(np.sum(loos))
 
     n = len(loos)
     elpd_se = np.sqrt(n * np.var(loos))
