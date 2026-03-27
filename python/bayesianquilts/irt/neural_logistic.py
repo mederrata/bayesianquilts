@@ -250,9 +250,12 @@ class NeuralLogisticModel(IRTModel):
             jnp.isfinite(log_likelihood), log_likelihood,
             jnp.ones_like(log_likelihood) * min_val,
         )
-        return jnp.astype(prior_weight, log_prior.dtype) * log_prior + jnp.sum(
-            log_likelihood, axis=-1
-        )
+        if 'sample_weights' in data:
+            sw = jnp.asarray(data['sample_weights'], dtype=log_likelihood.dtype)
+            weighted_ll = jnp.sum(sw[None, :] * log_likelihood, axis=-1)
+        else:
+            weighted_ll = jnp.sum(log_likelihood, axis=-1)
+        return jnp.astype(prior_weight, log_prior.dtype) * log_prior + weighted_ll
 
     def create_distributions(self, grouping_params=None):
         """Create prior and surrogate distributions."""
