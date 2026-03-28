@@ -528,37 +528,82 @@ class IRTModel(BayesianModel):
             if not np.isnan(loo2) and (np.isnan(loo) or bad_k2 < bad_k_initial):
                 loo, loos, ks = loo2, loos2, ks2
 
-        # AIS refinement for high k-hat observations
+        # AIS refinement for high k-hat observations.
+        # Process ONE observation at a time to minimize memory.
+        # Try transformations in order of complexity, stop early per obs.
         bad_k_count = int(np.sum(ks > khat_threshold))
         if use_ais and bad_k_count > 0 and hasattr(self, '_prepare_ais_inputs'):
-            print(f"  Running AIS for {bad_k_count} high k-hat observations...")
+            print(f"  Running AIS for {bad_k_count} high k-hat observations (one at a time)...")
             try:
                 from bayesianquilts.metrics.ais import AdaptiveImportanceSampler
                 likelihood_fn, ais_data, ais_params = self._prepare_ais_inputs(
                     all_batches, samples
                 )
-                sampler = AdaptiveImportanceSampler(likelihood_fn)
-                ais_result = sampler.adaptive_is_loo(
-                    data=ais_data,
-                    params=ais_params,
-                    transformations=['identity', 'mm1', 'mm2', 'pmm1', 'pmm2', 'll'],
-                    khat_threshold=khat_threshold,
-                    verbose=False,
-                )
-                ais_loos = np.array(ais_result['ll_loo_psis'])  # (N,)
-                ais_khats = np.array(ais_result['khat'])  # (N,)
 
-                # Replace PSIS estimates with AIS where AIS achieved lower k-hat
-                improved = 0
-                for i in range(n_obs):
-                    if ks[i] > khat_threshold and ais_khats[i] < ks[i]:
-                        loos[i] = ais_loos[i]
-                        ks[i] = ais_khats[i]
-                        improved += 1
+                transforms_by_complexity = [
+                    'identity', 'mm1', 'mm2', 'mm3',
+                    'pmm1', 'pmm2', 'pmm3',
+                    'kl', 'll', 'mixis',
+                ]
+
+                bad_indices = np.where(ks > khat_threshold)[0]
+                total_improved = 0
+
+                for count, obs_idx in enumerate(bad_indices):
+                    # Build single-observation subset of ais_data
+                    person_mask = ais_data['person_idx'] == obs_idx
+                    obs_data = {
+                        'person_idx': np.zeros(int(person_mask.sum()), dtype=np.int32),
+                        'item_idx': ais_data['item_idx'][person_mask],
+                        'y': ais_data['y'][person_mask],
+                        'n_people': 1,
+                    }
+                    obs_params = {
+                        k: v[:, obs_idx:obs_idx+1] if v.ndim >= 2 and v.shape[1] > 1 else v
+                        for k, v in ais_params.items()
+                    }
+
+                    best_loo_i = loos[obs_idx]
+                    best_khat_i = ks[obs_idx]
+                    sampler = AdaptiveImportanceSampler(likelihood_fn)
+
+                    print(f"    Obs {obs_idx} (k-hat={best_khat_i:.3f}, "
+                          f"{count+1}/{len(bad_indices)}):", end="", flush=True)
+
+                    for t_name in transforms_by_complexity:
+                        if best_khat_i <= khat_threshold:
+                            break
+                        try:
+                            ais_result = sampler.adaptive_is_loo(
+                                data=obs_data,
+                                params=obs_params,
+                                transformations=[t_name],
+                                khat_threshold=khat_threshold,
+                                verbose=False,
+                            )
+                            t_khat = float(np.array(ais_result['khat'])[0])
+                            t_loo = float(np.array(ais_result['ll_loo_psis'])[0])
+
+                            if t_khat < best_khat_i:
+                                best_khat_i = t_khat
+                                best_loo_i = t_loo
+                                print(f" {t_name}={t_khat:.3f}", end="", flush=True)
+                        except Exception:
+                            continue
+
+                    if best_khat_i < ks[obs_idx]:
+                        loos[obs_idx] = best_loo_i
+                        ks[obs_idx] = best_khat_i
+                        total_improved += 1
+                    print(f" -> {best_khat_i:.3f}", flush=True)
+
+                    # Free memory between observations
+                    import gc
+                    gc.collect()
 
                 loo = float(np.sum(loos))
                 bad_k_after = int(np.sum(ks > khat_threshold))
-                print(f"  AIS improved {improved}/{bad_k_count} observations, "
+                print(f"  AIS improved {total_improved}/{bad_k_count} observations, "
                       f"k-hat > {khat_threshold}: {bad_k_after}/{n_obs}")
             except Exception as e:
                 print(f"  AIS failed: {e}")
