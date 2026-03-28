@@ -351,11 +351,10 @@ class IRTModel(BayesianModel):
         Items with w_pairwise below their threshold are treated as
         ignorable. S is the MC sample size per gradient step.
 
-        ``inference="mcmc"``: Uses ELPD significance. An item is treated
-        as ignorable when its pairwise ELPD improvement over the
-        intercept-only model is not statistically significant:
-        |delta_ELPD_i| < 2 * SE(delta_ELPD_i). No variance estimation
-        is needed since MCMC does not average across samples per step.
+        ``inference="mcmc"``: Same variance-based criterion but with
+        S=1, since each MCMC sample pays the full variance cost
+        without per-step averaging. The threshold for item i is
+        Var[log a_i] / |delta_ELPD_i|.
 
         Args:
             data_factory: Callable returning a data iterator.
@@ -373,7 +372,6 @@ class IRTModel(BayesianModel):
 
         # -- Extract per-item ELPD improvement and SE from the pairwise model --
         delta_elpd = np.ones(I) * 0.01
-        delta_elpd_se = np.ones(I) * 1e6
 
         if hasattr(im, 'pairwise_model'):
             pw = im.pairwise_model
@@ -390,35 +388,58 @@ class IRTModel(BayesianModel):
             idx = pw.variable_names.index(item_key)
 
             best_uni_elpd = -np.inf
-            best_uni_se = np.inf
             for (t, p), r in pw.univariate_results.items():
                 if t == idx and r.converged and r.elpd_loo_per_obs > best_uni_elpd:
                     best_uni_elpd = r.elpd_loo_per_obs
-                    best_uni_se = r.elpd_loo_per_obs_se
 
             zero_elpd = -np.inf
-            zero_se = np.inf
             if idx in pw.zero_predictor_results:
                 zr = pw.zero_predictor_results[idx]
                 if zr.converged:
                     zero_elpd = zr.elpd_loo_per_obs
-                    zero_se = zr.elpd_loo_per_obs_se
 
             if np.isfinite(best_uni_elpd) and np.isfinite(zero_elpd):
                 delta_elpd[i] = max(abs(best_uni_elpd - zero_elpd), 0.001)
-                # SE of the difference (conservative: sum of SEs)
-                delta_elpd_se[i] = best_uni_se + zero_se
 
         # -- Mode-specific threshold computation --
         if inference == "mcmc":
-            # MCMC mode: item is ignorable when the ELPD improvement is
-            # not statistically significant at ~2 SE (roughly 95% level).
-            # No variance estimation needed.
-            thresholds = np.where(
-                delta_elpd < 2.0 * delta_elpd_se,
-                np.inf,  # ignorable: delta_ELPD not significant
-                0.001,   # retain: delta_ELPD is significant
-            )
+            # MCMC mode: same variance criterion as VI but with S=1.
+            # Each MCMC draw pays the full variance cost — no per-step
+            # averaging reduces the noise as in VI.
+            if self.surrogate_sample is None:
+                return
+
+            log_ai_var = np.zeros(I)
+            n_missing = np.zeros(I)
+
+            for batch in data_factory():
+                pmfs, _ = self._compute_batch_pmfs(batch)
+                if pmfs is None:
+                    continue
+
+                pred = self.predictive_distribution(batch, **self.surrogate_sample)
+                response_probs = np.array(pred['rv'].probs_parameter())
+
+                for i in range(I):
+                    col = np.asarray(batch[self.item_keys[i]], dtype=np.float64)
+                    bad = np.isnan(col) | (col < 0) | (col >= K)
+                    bad_idx = np.where(bad)[0]
+                    if len(bad_idx) == 0:
+                        continue
+
+                    q = pmfs[bad_idx, i, :]
+                    p = response_probs[:, bad_idx, i, :]
+                    log_a = np.log(np.maximum(
+                        np.sum(q[np.newaxis, :, :] * p, axis=-1), 1e-30
+                    ))
+                    var_per_person = np.var(log_a, axis=0)
+                    log_ai_var[i] += var_per_person.sum()
+                    n_missing[i] += len(bad_idx)
+                break
+
+            mean_var = np.where(n_missing > 0, log_ai_var / n_missing, 0.0)
+            # S=1: each sample pays full variance cost
+            thresholds = mean_var / delta_elpd
         else:
             # VI mode: estimate Var[log a_i(theta)] from surrogate draws
             if self.surrogate_sample is None:
