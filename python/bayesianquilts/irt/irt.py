@@ -340,9 +340,15 @@ class IRTModel(BayesianModel):
     # Set by compute_adaptive_thresholds() after the first epoch.
     _adaptive_thresholds: Optional[Dict[str, float]] = None
 
-    def compute_adaptive_thresholds(self, data_factory, sample_size=32,
-                                     seed=42, inference="vi"):
+    def compute_adaptive_thresholds(self, data_factory, baseline_model,
+                                     sample_size=32, seed=42,
+                                     inference="vi"):
         """Estimate per-item ignorability thresholds.
+
+        Compares the pairwise imputation model's per-item ELPD against
+        the baseline IRT model's per-item ELPD. Items where the pairwise
+        model does not substantially outperform the baseline are treated
+        as ignorable.
 
         Two modes depending on the inference method:
 
@@ -358,6 +364,9 @@ class IRTModel(BayesianModel):
 
         Args:
             data_factory: Callable returning a data iterator.
+            baseline_model: A fitted IRT model (without imputation) whose
+                per-item ELPD serves as the reference for what ignorable
+                marginalization achieves.
             sample_size: MC draws per ELBO gradient step (VI mode only).
             seed: Random seed for surrogate sampling.
             inference: ``"vi"`` or ``"mcmc"``.
@@ -393,39 +402,38 @@ class IRTModel(BayesianModel):
                 if t == idx and r.converged and r.elpd_loo_per_obs > pw_elpd[i]:
                     pw_elpd[i] = r.elpd_loo_per_obs
 
-        # Get IRT model's per-item ELPD
-        # If the mixed model already computed it, use that.
-        # Otherwise estimate from one pass through the data.
+        # Get IRT model's per-item ELPD from the baseline model
         irt_elpd = np.full(I, -np.inf)
-        if hasattr(im, '_irt_elpd_per_item') and im._irt_elpd_per_item:
+
+        if getattr(baseline_model, 'surrogate_sample', None) is None:
+            raise ValueError(
+                "baseline_model has no surrogate_sample — fit the baseline "
+                "model and call calibrate_manually() before computing thresholds."
+            )
+
+        irt_ll_sum = np.zeros(I)
+        irt_ll_count = np.zeros(I)
+        for batch in data_factory():
+            pred = baseline_model.predictive_distribution(
+                batch, **baseline_model.surrogate_sample)
+            response_probs = np.array(pred['rv'].probs_parameter())
             for i, item_key in enumerate(self.item_keys):
-                if item_key in im._irt_elpd_per_item:
-                    irt_elpd[i] = im._irt_elpd_per_item[item_key]
-        elif self.surrogate_sample is not None:
-            # Estimate per-item average log-predictive density
-            irt_ll_sum = np.zeros(I)
-            irt_ll_count = np.zeros(I)
-            for batch in data_factory():
-                pred = self.predictive_distribution(batch, **self.surrogate_sample)
-                response_probs = np.array(pred['rv'].probs_parameter())  # (S, N, I, K)
-                for i, item_key in enumerate(self.item_keys):
-                    col = np.asarray(batch[item_key], dtype=np.float64)
-                    valid = ~np.isnan(col) & (col >= 0) & (col < K)
-                    valid_idx = np.where(valid)[0]
-                    if len(valid_idx) == 0:
-                        continue
-                    y = col[valid_idx].astype(int)
-                    # Mean log prob over posterior samples for each observed response
-                    p_obs = response_probs[:, valid_idx, i, :]  # (S, n_valid, K)
-                    log_p = np.log(np.maximum(
-                        np.mean(p_obs[np.arange(p_obs.shape[0])[:, None],
-                                      np.arange(len(y))[None, :], y[None, :]], axis=0),
-                        1e-30,
-                    ))  # (n_valid,)
-                    irt_ll_sum[i] += log_p.sum()
-                    irt_ll_count[i] += len(valid_idx)
-                break
-            irt_elpd = np.where(irt_ll_count > 0, irt_ll_sum / irt_ll_count, -np.inf)
+                col = np.asarray(batch[item_key], dtype=np.float64)
+                valid = ~np.isnan(col) & (col >= 0) & (col < K)
+                valid_idx = np.where(valid)[0]
+                if len(valid_idx) == 0:
+                    continue
+                y = col[valid_idx].astype(int)
+                p_obs = response_probs[:, valid_idx, i, :]
+                log_p = np.log(np.maximum(
+                    np.mean(p_obs[np.arange(p_obs.shape[0])[:, None],
+                                  np.arange(len(y))[None, :], y[None, :]], axis=0),
+                    1e-30,
+                ))
+                irt_ll_sum[i] += log_p.sum()
+                irt_ll_count[i] += len(valid_idx)
+            break
+        irt_elpd = np.where(irt_ll_count > 0, irt_ll_sum / irt_ll_count, -np.inf)
 
         # delta_ELPD = |ELPD_pairwise - ELPD_IRT| per item
         for i in range(I):
@@ -513,7 +521,7 @@ class IRTModel(BayesianModel):
             self.item_keys[i]: float(thresholds[i]) for i in range(I)
         }
 
-        # Determine which items are ignorable and store on the imputation model
+        # Determine which items are ignorable
         ignorable_items = {}
         for i in range(I):
             item_key = self.item_keys[i]
@@ -522,12 +530,7 @@ class IRTModel(BayesianModel):
                 ignorable_items[item_key] = w_pw <= thresholds[i]
             else:
                 ignorable_items[item_key] = thresholds[i] >= 1.0
-
-        # Store on the imputation model for serialization
-        if hasattr(im, 'ignorable_items'):
-            im.ignorable_items = ignorable_items
-        else:
-            im.ignorable_items = ignorable_items
+        self._ignorable_items = ignorable_items
 
         if hasattr(self, 'verbose') and self.verbose:
             n_ignored = sum(1 for v in ignorable_items.values() if v)
