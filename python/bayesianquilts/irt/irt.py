@@ -366,8 +366,6 @@ class IRTModel(BayesianModel):
 
         use_is = (hasattr(self.imputation_model, 'predict_mice_pmf')
                   and hasattr(self.imputation_model, 'get_item_weight'))
-        if not use_is:
-            return
 
         # Collect log a_i(theta) across one epoch
         # rb has shape (S, N, I) — already computed in predictive_distribution
@@ -439,24 +437,41 @@ class IRTModel(BayesianModel):
 
         # Adaptive threshold: w_threshold = Var[log a_i] / (S * |delta_ELPD|)
         thresholds = mean_var / (S * delta_elpd)
-        # Clamp to [0.001, 0.5] for safety
-        thresholds = np.clip(thresholds, 0.001, 0.5)
+        # Clamp lower bound for safety; no upper clamp since threshold >= 1
+        # means the item is ignorable in non-IS mode
+        thresholds = np.maximum(thresholds, 0.001)
 
         self._adaptive_thresholds = {
             self.item_keys[i]: float(thresholds[i]) for i in range(I)
         }
 
         if hasattr(self, 'verbose') and self.verbose:
-            n_ignored = sum(1 for i in range(I)
-                            if use_is and im.get_item_weight(self.item_keys[i]) <= thresholds[i])
+            if use_is:
+                n_ignored = sum(1 for i in range(I)
+                                if im.get_item_weight(self.item_keys[i]) <= thresholds[i])
+            else:
+                # Non-IS mode: items are ignorable when threshold >= 1
+                n_ignored = sum(1 for t in thresholds if t >= 1.0)
             print(f"  Adaptive thresholds: {n_ignored}/{I} items treated as ignorable")
             print(f"  Threshold range: [{thresholds.min():.4f}, {thresholds.max():.4f}]")
 
     def _get_item_threshold(self, item_key: str) -> float:
-        """Return the ignorability threshold for a given item."""
+        """Return the ignorability threshold for a given item (IS mode)."""
         if self._adaptive_thresholds is not None and item_key in self._adaptive_thresholds:
             return self._adaptive_thresholds[item_key]
         return self.ignorable_tol
+
+    def _is_item_ignorable(self, item_key: str) -> bool:
+        """Check if an item should be treated as ignorable (non-IS mode).
+
+        For the pairwise-only model (no per-item w_pairwise), the implicit
+        weight is 1. The item is ignorable when the adaptive threshold
+        exceeds 1, meaning Var[log a_i] / (S * |delta_ELPD_i|) >= 1 —
+        the variance cost of imputing exceeds the information gain.
+        """
+        if self._adaptive_thresholds is None:
+            return False
+        return self._adaptive_thresholds.get(item_key, 0.0) >= 1.0
 
     def _compute_batch_pmfs(self, batch):
         """Compute imputation PMFs for missing cells using the imputation model.
@@ -498,6 +513,13 @@ class IRTModel(BayesianModel):
                 weights[i] = self.imputation_model.get_item_weight(item_key)
                 # Skip imputation for items below their ignorability threshold
                 if weights[i] <= self._get_item_threshold(item_key):
+                    continue
+            elif self._adaptive_thresholds is not None:
+                # Non-IS mode (pairwise-only): skip items where the adaptive
+                # threshold indicates imputation adds more variance than signal.
+                # In this mode w_pairwise is implicitly 1, so check whether
+                # the item's delta-ELPD justifies the variance cost.
+                if self._is_item_ignorable(item_key):
                     continue
 
             if len(bad_indices) == 0:
