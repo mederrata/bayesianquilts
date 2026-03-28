@@ -1293,6 +1293,10 @@ class PairwiseOrdinalStackingModel:
     # Serialization
     # ------------------------------------------------------------------
 
+    def save_to_disk(self, path: Union[str, Path]) -> None:
+        """Alias for :meth:`save` for API compatibility with IRT models."""
+        return self.save(path)
+
     def save(self, path: Union[str, Path]) -> None:
         """Save the fitted model to a YAML file."""
         path = Path(path)
@@ -1376,6 +1380,12 @@ class PairwiseOrdinalStackingModel:
 
         with open(path, "w") as f:
             yaml.dump(state, f, default_flow_style=False, allow_unicode=True)
+
+    @classmethod
+    @classmethod
+    def load_from_disk(cls, path: Union[str, Path]) -> "PairwiseOrdinalStackingModel":
+        """Alias for :meth:`load` for API compatibility with IRT models."""
+        return cls.load(path)
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "PairwiseOrdinalStackingModel":
