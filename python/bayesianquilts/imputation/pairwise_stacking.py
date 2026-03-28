@@ -184,7 +184,7 @@ def _worker_fit_zero_predictor(
             predictor_idx=None, target_idx=target_idx, converged=False,
         )
 
-    elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
+    elpd_loo, elpd_se, khat_max, khat_mean, loo_vals = compute_loo_elpd(model, data_dict, params)
 
     if khat_max > 0.7:
         return UnivariateModelResult(
@@ -210,6 +210,7 @@ def _worker_fit_zero_predictor(
         predictor_idx=None, target_idx=target_idx, converged=converged,
         params=None, beta_mean=beta_mean,
         intercept_mean=intercept_mean, cutpoints_mean=cutpoints_mean,
+        loo_values=loo_vals,
     )
 
 
@@ -323,7 +324,7 @@ def _worker_fit_univariate(
             predictor_mean=X_mean, predictor_std=X_std,
         )
 
-    elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
+    elpd_loo, elpd_se, khat_max, khat_mean, loo_vals = compute_loo_elpd(model, data_dict, params)
 
     if khat_max > 0.7:
         return UnivariateModelResult(
@@ -351,7 +352,7 @@ def _worker_fit_univariate(
         converged=converged, params=None,
         predictor_mean=X_mean, predictor_std=X_std,
         beta_mean=beta_mean, intercept_mean=intercept_mean,
-        cutpoints_mean=cutpoints_mean,
+        cutpoints_mean=cutpoints_mean, loo_values=loo_vals,
     )
 
 
@@ -375,6 +376,7 @@ class DirichletMultinomialResult:
     alpha_posterior: Optional[np.ndarray] = None  # (K_pred, K_target)
     predictor_categories: Optional[np.ndarray] = None
     target_categories: Optional[np.ndarray] = None
+    loo_values: Optional[np.ndarray] = None  # per-observation LOO log-predictive densities
 
 
 class DirichletMultinomialContingency:
@@ -515,6 +517,7 @@ class DirichletMultinomialContingency:
             alpha_posterior=alpha_post,
             predictor_categories=predictor_categories,
             target_categories=target_categories,
+            loo_values=loos.astype(np.float32),
         )
 
     def predict_pmf(
@@ -1117,7 +1120,9 @@ class PairwiseOrdinalStackingModel:
         if not models_info:
             raise ValueError(f"No converged models available for target '{target}'")
 
-        stacked_pred, weights = self._compute_stacking_weights(models_info, uncertainty_penalty)
+        stacked_pred, weights = self._compute_stacking_weights(
+            models_info, uncertainty_penalty, target_idx=target_idx
+        )
 
         if return_details:
             return {
@@ -1222,9 +1227,12 @@ class PairwiseOrdinalStackingModel:
         if not models_info:
             return np.ones(n_categories) / n_categories
 
-        elpd_values = np.array([m[1] for m in models_info])
-        se_values = np.array([m[2] for m in models_info])
-        weights = self._elpd_weights(elpd_values, se_values, uncertainty_penalty)
+        # Reuse _compute_stacking_weights for consistent weight selection
+        # (uses optimal weights when available, falls back to ELPD softmax)
+        _, weights = self._compute_stacking_weights(
+            [(m[0], m[1], m[2], 0.0) for m in models_info],  # dummy predictions
+            uncertainty_penalty, target_idx=target_idx,
+        )
 
         pmf_stack = np.stack([m[3] for m in models_info], axis=0)
         stacked_pmf = weights @ pmf_stack
@@ -1239,6 +1247,107 @@ class PairwiseOrdinalStackingModel:
     # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
+
+    def compute_optimal_stacking_weights(self):
+        """Compute optimal stacking weights by maximizing LOO-ELPD.
+
+        For each target variable, solves the convex optimization:
+
+            max_w  sum_i log( sum_m w_m * exp(loo_m[i]) )
+            s.t.   w_m >= 0, sum_m w_m = 1
+
+        where loo_m[i] is the per-observation LOO log-predictive density
+        from model m for observation i (Yao et al. 2018).
+
+        Requires per-observation LOO values stored during fitting
+        (loo_values field on UnivariateModelResult / DirichletMultinomialResult).
+
+        Stores the result in ``self._optimal_weights``, a dict mapping
+        target_idx -> dict of {model_key: weight}.
+        """
+        from scipy.optimize import minimize
+
+        self._optimal_weights = {}
+
+        for target_idx in range(len(self.variable_names)):
+            # Collect all models for this target with per-obs LOO values
+            model_keys = []
+            loo_arrays = []
+
+            # Zero-predictor regression
+            if target_idx in self.zero_predictor_results:
+                zr = self.zero_predictor_results[target_idx]
+                if zr.converged and zr.loo_values is not None:
+                    model_keys.append(("reg", "intercept"))
+                    loo_arrays.append(zr.loo_values)
+
+            # Univariate regression models
+            for (t, p), r in self.univariate_results.items():
+                if t == target_idx and r.converged and r.loo_values is not None:
+                    model_keys.append(("reg", p))
+                    loo_arrays.append(r.loo_values)
+
+            # DM zero-predictor
+            if target_idx in self.dm_zero_results:
+                dmz = self.dm_zero_results[target_idx]
+                if dmz.converged and dmz.loo_values is not None:
+                    model_keys.append(("dm", "marginal"))
+                    loo_arrays.append(dmz.loo_values)
+
+            # DM pairwise
+            for (t, p), r in self.dm_results.items():
+                if t == target_idx and r.converged and r.loo_values is not None:
+                    model_keys.append(("dm", p))
+                    loo_arrays.append(r.loo_values)
+
+            if len(loo_arrays) < 2:
+                # Fewer than 2 models: uniform weight
+                if model_keys:
+                    self._optimal_weights[target_idx] = {
+                        model_keys[0]: 1.0
+                    }
+                continue
+
+            # All LOO arrays must be the same length (same observation set)
+            # Models may have different observation subsets due to missingness.
+            # Use the minimum length and truncate.
+            min_len = min(len(a) for a in loo_arrays)
+            lpd_matrix = np.stack(
+                [a[:min_len].astype(np.float32) for a in loo_arrays], axis=0
+            )  # (M, N) in float32
+
+            M, N = lpd_matrix.shape
+
+            # Solve: max_w sum_i log( sum_m w_m * exp(lpd[m,i]) )
+            # Equivalent to: min_w -sum_i log( sum_m w_m * exp(lpd[m,i]) )
+            def neg_loo_elpd(log_w):
+                # Use log-space weights for unconstrained optimization,
+                # then softmax to enforce simplex constraint
+                w = np.exp(log_w - np.max(log_w))
+                w = w / w.sum()
+                # log sum_m w_m * exp(lpd[m,i]) via log-sum-exp
+                # = log sum_m exp(log(w_m) + lpd[m,i])
+                log_w_safe = np.log(np.maximum(w, 1e-30))
+                terms = log_w_safe[:, None] + lpd_matrix  # (M, N)
+                max_terms = np.max(terms, axis=0)  # (N,)
+                lse = max_terms + np.log(np.sum(np.exp(terms - max_terms[None, :]), axis=0))
+                return -np.sum(lse)
+
+            # Initialize at uniform
+            log_w0 = np.zeros(M, dtype=np.float32)
+            result = minimize(neg_loo_elpd, log_w0, method='L-BFGS-B')
+
+            # Convert to simplex weights
+            w_opt = np.exp(result.x - np.max(result.x))
+            w_opt = w_opt / w_opt.sum()
+
+            self._optimal_weights[target_idx] = {
+                k: float(w_opt[j]) for j, k in enumerate(model_keys)
+            }
+
+        if self.verbose:
+            n_targets = len(self._optimal_weights)
+            print(f"Optimal stacking weights computed for {n_targets} targets")
 
     def get_all_predictors_loo(
         self,
@@ -1736,11 +1845,47 @@ class PairwiseOrdinalStackingModel:
         self,
         models_info: List[Tuple[str, float, float, float]],
         uncertainty_penalty: float,
+        target_idx: Optional[int] = None,
     ) -> Tuple[float, np.ndarray]:
-        elpd_values = np.array([m[1] for m in models_info])
-        se_values = np.array([m[2] for m in models_info])
         predictions = np.array([m[3] for m in models_info])
-        weights = self._elpd_weights(elpd_values, se_values, uncertainty_penalty)
+
+        # Use optimal stacking weights when available
+        if (target_idx is not None
+                and hasattr(self, '_optimal_weights')
+                and self._optimal_weights
+                and target_idx in self._optimal_weights):
+            opt = self._optimal_weights[target_idx]
+            weights = np.zeros(len(models_info))
+            for j, (name, _, _, _) in enumerate(models_info):
+                # Map name string to optimal weight key
+                parts = name.split(":", 1)
+                model_type = parts[0]
+                model_id = parts[1] if len(parts) > 1 else ""
+                if model_id in ("intercept", "marginal"):
+                    key = (model_type, model_id)
+                else:
+                    # predictor name -> predictor index
+                    if model_id in self.variable_names:
+                        key = (model_type, self.variable_names.index(model_id))
+                    else:
+                        key = (model_type, model_id)
+                weights[j] = opt.get(key, 0.0)
+            total = weights.sum()
+            if total > 0:
+                weights /= total
+            else:
+                weights = self._elpd_weights(
+                    np.array([m[1] for m in models_info]),
+                    np.array([m[2] for m in models_info]),
+                    uncertainty_penalty,
+                )
+        else:
+            weights = self._elpd_weights(
+                np.array([m[1] for m in models_info]),
+                np.array([m[2] for m in models_info]),
+                uncertainty_penalty,
+            )
+
         stacked_pred = float(np.sum(weights * predictions))
         return stacked_pred, weights
 

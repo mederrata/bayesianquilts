@@ -100,6 +100,7 @@ class UnivariateModelResult:
     beta_mean: Optional[Union[float, np.ndarray]] = None
     intercept_mean: Optional[float] = None
     cutpoints_mean: Optional[np.ndarray] = None
+    loo_values: Optional[np.ndarray] = None  # per-observation LOO log-predictive densities
 
 
 # ---------------------------------------------------------------------------
@@ -710,4 +711,4 @@ def compute_loo_elpd(
     n = len(loos)
     elpd_se = np.sqrt(n * np.var(loos))
 
-    return float(loo), float(elpd_se), float(np.max(ks)), float(np.mean(ks))
+    return float(loo), float(elpd_se), float(np.max(ks)), float(np.mean(ks)), loos.astype(np.float32)
