@@ -1240,6 +1240,46 @@ class PairwiseOrdinalStackingModel:
     # Diagnostics
     # ------------------------------------------------------------------
 
+    def get_all_predictors_loo(
+        self,
+        metric: str = "elpd_loo",
+        k: Optional[int] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Get LOO values for all predictors for all targets.
+
+        Args:
+            metric: ``"elpd_loo"`` or ``"elpd_loo_per_obs"``.
+            k: If provided, return only the top k predictors per target.
+
+        Returns:
+            Dict mapping target_name -> {predictor_name: metric_value},
+            sorted descending by metric value.
+        """
+        summary: Dict[str, Dict[str, float]] = {}
+        for name in self.variable_names:
+            summary[name] = {}
+
+        for (t_idx, p_idx), result in self.univariate_results.items():
+            target_name = self.variable_names[t_idx] if t_idx < len(self.variable_names) else f"Var_{t_idx}"
+            predictor_name = self.variable_names[p_idx] if p_idx < len(self.variable_names) else f"Var_{p_idx}"
+
+            if metric == "elpd_loo":
+                val = result.elpd_loo
+            elif metric == "elpd_loo_per_obs":
+                val = result.elpd_loo_per_obs
+            else:
+                raise ValueError(f"Invalid metric: {metric}")
+
+            summary[target_name][predictor_name] = float(val)
+
+        for target in summary:
+            sorted_preds = dict(sorted(summary[target].items(), key=lambda x: x[1], reverse=True))
+            if k is not None:
+                sorted_preds = dict(list(sorted_preds.items())[:k])
+            summary[target] = sorted_preds
+
+        return summary
+
     def get_elpd_matrix(self) -> Dict[str, np.ndarray]:
         """Get ELPD matrices for both regression and DM models.
 
