@@ -340,72 +340,41 @@ class IRTModel(BayesianModel):
     # Set by compute_adaptive_thresholds() after the first epoch.
     _adaptive_thresholds: Optional[Dict[str, float]] = None
 
-    def compute_adaptive_thresholds(self, data_factory, sample_size=32, seed=42):
-        """Estimate per-item ignorability thresholds from ELBO variance.
+    def compute_adaptive_thresholds(self, data_factory, sample_size=32,
+                                     seed=42, inference="vi"):
+        """Estimate per-item ignorability thresholds.
 
-        For each item i, computes Var[log a_i(theta)] across surrogate
-        posterior draws and the per-item ELPD improvement from the
-        imputation model. The threshold for item i is:
+        Two modes depending on the inference method:
 
-            w_threshold_i = Var[log a_i] / (S * |delta_ELPD_i|)
-
+        ``inference="vi"`` (default): Uses ELBO gradient variance.
+        The threshold for item i is Var[log a_i] / (S * |delta_ELPD_i|).
         Items with w_pairwise below their threshold are treated as
-        ignorable during subsequent training.
+        ignorable. S is the MC sample size per gradient step.
+
+        ``inference="mcmc"``: Uses ELPD significance. An item is treated
+        as ignorable when its pairwise ELPD improvement over the
+        intercept-only model is not statistically significant:
+        |delta_ELPD_i| < 2 * SE(delta_ELPD_i). No variance estimation
+        is needed since MCMC does not average across samples per step.
 
         Args:
             data_factory: Callable returning a data iterator.
-            sample_size: Number of MC draws (S) used per ELBO gradient step.
+            sample_size: MC draws per ELBO gradient step (VI mode only).
             seed: Random seed for surrogate sampling.
+            inference: ``"vi"`` or ``"mcmc"``.
         """
-        if self.surrogate_sample is None:
-            return
-
-        S = sample_size
         I = self.num_items
         K = self.response_cardinality
+        S = sample_size
 
         use_is = (hasattr(self.imputation_model, 'predict_mice_pmf')
                   and hasattr(self.imputation_model, 'get_item_weight'))
-
-        # Collect log a_i(theta) across one epoch
-        # rb has shape (S, N, I) — already computed in predictive_distribution
-        log_ai_var = np.zeros(I)
-        n_missing = np.zeros(I)
-
-        for batch in data_factory():
-            pmfs, weights = self._compute_batch_pmfs(batch)
-            if pmfs is None:
-                continue
-
-            pred = self.predictive_distribution(batch, **self.surrogate_sample)
-            response_probs = np.array(pred['rv'].probs_parameter())  # (S, N, I, K)
-
-            for i in range(I):
-                col = np.asarray(batch[self.item_keys[i]], dtype=np.float64)
-                bad = np.isnan(col) | (col < 0) | (col >= K)
-                bad_idx = np.where(bad)[0]
-                if len(bad_idx) == 0:
-                    continue
-
-                # log a_i(theta) for missing cells: log sum_k q(k) * p(k|theta)
-                q = pmfs[bad_idx, i, :]  # (n_bad, K)
-                p = response_probs[:, bad_idx, i, :]  # (S, n_bad, K)
-                log_a = np.log(np.maximum(
-                    np.sum(q[np.newaxis, :, :] * p, axis=-1), 1e-30
-                ))  # (S, n_bad)
-
-                # Variance over S draws, averaged over missing people
-                var_per_person = np.var(log_a, axis=0)  # (n_bad,)
-                log_ai_var[i] += var_per_person.sum()
-                n_missing[i] += len(bad_idx)
-            break  # one epoch is enough
-
-        # Average variance per missing cell
-        mean_var = np.where(n_missing > 0, log_ai_var / n_missing, 0.0)
-
-        # Per-item ELPD improvement from the imputation model
-        delta_elpd = np.ones(I) * 0.01  # default small value
         im = self.imputation_model
+
+        # -- Extract per-item ELPD improvement and SE from the pairwise model --
+        delta_elpd = np.ones(I) * 0.01
+        delta_elpd_se = np.ones(I) * 1e6
+
         if hasattr(im, 'pairwise_model'):
             pw = im.pairwise_model
         elif hasattr(im, 'mice_model'):
@@ -420,25 +389,72 @@ class IRTModel(BayesianModel):
                 continue
             idx = pw.variable_names.index(item_key)
 
-            # Best univariate ELPD vs zero-predictor ELPD
-            best_uni = -np.inf
+            best_uni_elpd = -np.inf
+            best_uni_se = np.inf
             for (t, p), r in pw.univariate_results.items():
-                if t == idx and r.converged:
-                    best_uni = max(best_uni, r.elpd_loo_per_obs)
+                if t == idx and r.converged and r.elpd_loo_per_obs > best_uni_elpd:
+                    best_uni_elpd = r.elpd_loo_per_obs
+                    best_uni_se = r.elpd_loo_per_obs_se
 
             zero_elpd = -np.inf
+            zero_se = np.inf
             if idx in pw.zero_predictor_results:
                 zr = pw.zero_predictor_results[idx]
                 if zr.converged:
                     zero_elpd = zr.elpd_loo_per_obs
+                    zero_se = zr.elpd_loo_per_obs_se
 
-            if np.isfinite(best_uni) and np.isfinite(zero_elpd):
-                delta_elpd[i] = max(abs(best_uni - zero_elpd), 0.001)
+            if np.isfinite(best_uni_elpd) and np.isfinite(zero_elpd):
+                delta_elpd[i] = max(abs(best_uni_elpd - zero_elpd), 0.001)
+                # SE of the difference (conservative: sum of SEs)
+                delta_elpd_se[i] = best_uni_se + zero_se
 
-        # Adaptive threshold: w_threshold = Var[log a_i] / (S * |delta_ELPD|)
-        thresholds = mean_var / (S * delta_elpd)
-        # Clamp lower bound for safety; no upper clamp since threshold >= 1
-        # means the item is ignorable in non-IS mode
+        # -- Mode-specific threshold computation --
+        if inference == "mcmc":
+            # MCMC mode: item is ignorable when the ELPD improvement is
+            # not statistically significant at ~2 SE (roughly 95% level).
+            # No variance estimation needed.
+            thresholds = np.where(
+                delta_elpd < 2.0 * delta_elpd_se,
+                np.inf,  # ignorable: delta_ELPD not significant
+                0.001,   # retain: delta_ELPD is significant
+            )
+        else:
+            # VI mode: estimate Var[log a_i(theta)] from surrogate draws
+            if self.surrogate_sample is None:
+                return
+
+            log_ai_var = np.zeros(I)
+            n_missing = np.zeros(I)
+
+            for batch in data_factory():
+                pmfs, _ = self._compute_batch_pmfs(batch)
+                if pmfs is None:
+                    continue
+
+                pred = self.predictive_distribution(batch, **self.surrogate_sample)
+                response_probs = np.array(pred['rv'].probs_parameter())
+
+                for i in range(I):
+                    col = np.asarray(batch[self.item_keys[i]], dtype=np.float64)
+                    bad = np.isnan(col) | (col < 0) | (col >= K)
+                    bad_idx = np.where(bad)[0]
+                    if len(bad_idx) == 0:
+                        continue
+
+                    q = pmfs[bad_idx, i, :]
+                    p = response_probs[:, bad_idx, i, :]
+                    log_a = np.log(np.maximum(
+                        np.sum(q[np.newaxis, :, :] * p, axis=-1), 1e-30
+                    ))
+                    var_per_person = np.var(log_a, axis=0)
+                    log_ai_var[i] += var_per_person.sum()
+                    n_missing[i] += len(bad_idx)
+                break
+
+            mean_var = np.where(n_missing > 0, log_ai_var / n_missing, 0.0)
+            thresholds = mean_var / (S * delta_elpd)
+
         thresholds = np.maximum(thresholds, 0.001)
 
         self._adaptive_thresholds = {
@@ -450,10 +466,11 @@ class IRTModel(BayesianModel):
                 n_ignored = sum(1 for i in range(I)
                                 if im.get_item_weight(self.item_keys[i]) <= thresholds[i])
             else:
-                # Non-IS mode: items are ignorable when threshold >= 1
                 n_ignored = sum(1 for t in thresholds if t >= 1.0)
-            print(f"  Adaptive thresholds: {n_ignored}/{I} items treated as ignorable")
-            print(f"  Threshold range: [{thresholds.min():.4f}, {thresholds.max():.4f}]")
+            print(f"  Adaptive thresholds ({inference}): "
+                  f"{n_ignored}/{I} items treated as ignorable")
+            print(f"  Threshold range: [{thresholds.min():.4f}, "
+                  f"{thresholds.max():.4f}]")
 
     def _get_item_threshold(self, item_key: str) -> float:
         """Return the ignorability threshold for a given item (IS mode)."""
