@@ -332,6 +332,10 @@ class IRTModel(BayesianModel):
                 return True
         return False
 
+    # Tolerance for treating w_irt as 1 (ignorable missingness).
+    # Items with w_pairwise <= ignorable_tol skip imputation entirely.
+    ignorable_tol = 0.01
+
     def _compute_batch_pmfs(self, batch):
         """Compute imputation PMFs for missing cells using the imputation model.
 
@@ -339,6 +343,11 @@ class IRTModel(BayesianModel):
         (has ``predict_mice_pmf`` and ``get_item_weight``), returns
         MICE-only PMFs and per-item stacking weights.  Otherwise falls
         back to the blended ``predict_pmf`` interface.
+
+        Items where ``w_pairwise <= self.ignorable_tol`` (i.e., w_irt is
+        effectively 1) are skipped entirely — their missing cells are
+        treated as ignorable missingness and contribute 0 to the
+        log-likelihood, avoiding unnecessary PMF computation.
 
         Args:
             batch: dict mapping keys to arrays.
@@ -366,6 +375,9 @@ class IRTModel(BayesianModel):
 
             if use_is:
                 weights[i] = self.imputation_model.get_item_weight(item_key)
+                # Skip imputation for items where w_irt ≈ 1
+                if weights[i] <= self.ignorable_tol:
+                    continue
 
             if len(bad_indices) == 0:
                 continue
