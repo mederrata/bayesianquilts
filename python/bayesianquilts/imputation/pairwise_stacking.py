@@ -1293,9 +1293,245 @@ class PairwiseOrdinalStackingModel:
     # Serialization
     # ------------------------------------------------------------------
 
-    def save_to_disk(self, path: Union[str, Path]) -> None:
-        """Alias for :meth:`save` for API compatibility with IRT models."""
-        return self.save(path)
+    def save_to_disk(self, path: Union[str, Path], backend: str = "hdf5") -> None:
+        """Save model to a directory with config.yaml + numerical arrays.
+
+        Matches the BayesianModel directory format: metadata in config.yaml,
+        numerical arrays in params.h5 (or tensors.safetensors).
+
+        Args:
+            path: Directory to write to (created if it does not exist).
+            backend: ``"hdf5"`` (default). Safetensors not yet supported.
+        """
+        import h5py
+
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        def _scalar(x):
+            if x is None:
+                return None
+            if isinstance(x, (np.number,)):
+                return x.item()
+            if isinstance(x, (np.ndarray, jnp.ndarray)):
+                return np.array(x).tolist()
+            return x
+
+        # -- config.yaml: metadata only (no large arrays) --
+        config = {
+            "version": "2.0",
+            "_backend": backend,
+            "config": {
+                "alpha_prior": self.alpha_prior,
+                "prior_scale": self.prior_scale,
+                "noise_scale": self.noise_scale,
+                "pathfinder_num_samples": self.pathfinder_num_samples,
+                "pathfinder_maxiter": self.pathfinder_maxiter,
+                "min_obs": self.min_obs,
+                "inference_method": self.inference_method,
+            },
+            "data": {
+                "variable_names": self.variable_names,
+                "variable_types": {int(k): v for k, v in self.variable_types.items()},
+                "n_obs_total": self.n_obs_total,
+                "global_ordinal_values": _scalar(self.global_ordinal_values),
+                "n_global_classes": self.n_global_classes,
+            },
+            "zero_predictor_meta": {},
+            "univariate_meta": [],
+            "dm_zero_meta": {},
+            "dm_meta": [],
+        }
+
+        for k, v in self.zero_predictor_results.items():
+            config["zero_predictor_meta"][int(k)] = {
+                "n_obs": int(v.n_obs), "elpd_loo": float(v.elpd_loo),
+                "elpd_loo_per_obs": float(v.elpd_loo_per_obs),
+                "elpd_loo_per_obs_se": float(v.elpd_loo_per_obs_se),
+                "khat_max": float(v.khat_max), "khat_mean": float(v.khat_mean),
+                "predictor_idx": None if v.predictor_idx is None else int(v.predictor_idx),
+                "target_idx": int(v.target_idx), "converged": bool(v.converged),
+                "predictor_mean": _scalar(v.predictor_mean),
+                "predictor_std": _scalar(v.predictor_std),
+            }
+
+        for (t, p), v in self.univariate_results.items():
+            config["univariate_meta"].append({
+                "target_idx": int(t), "predictor_idx": int(p),
+                "n_obs": int(v.n_obs), "elpd_loo": float(v.elpd_loo),
+                "elpd_loo_per_obs": float(v.elpd_loo_per_obs),
+                "elpd_loo_per_obs_se": float(v.elpd_loo_per_obs_se),
+                "khat_max": float(v.khat_max), "khat_mean": float(v.khat_mean),
+                "converged": bool(v.converged),
+                "predictor_mean": _scalar(v.predictor_mean),
+                "predictor_std": _scalar(v.predictor_std),
+            })
+
+        for k, v in self.dm_zero_results.items():
+            config["dm_zero_meta"][int(k)] = {
+                "n_obs": int(v.n_obs), "elpd_loo": float(v.elpd_loo),
+                "elpd_loo_per_obs": float(v.elpd_loo_per_obs),
+                "elpd_loo_per_obs_se": float(v.elpd_loo_per_obs_se),
+                "predictor_idx": v.predictor_idx,
+                "target_idx": int(v.target_idx), "converged": bool(v.converged),
+            }
+
+        for (t, p), v in self.dm_results.items():
+            config["dm_meta"].append({
+                "target_idx": int(t), "predictor_idx": int(p),
+                "n_obs": int(v.n_obs), "elpd_loo": float(v.elpd_loo),
+                "elpd_loo_per_obs": float(v.elpd_loo_per_obs),
+                "elpd_loo_per_obs_se": float(v.elpd_loo_per_obs_se),
+                "converged": bool(v.converged),
+            })
+
+        def repr_float(dumper, data):
+            return dumper.represent_float(float(data))
+        def repr_int(dumper, data):
+            return dumper.represent_int(int(data))
+        yaml.add_representer(np.float32, repr_float)
+        yaml.add_representer(np.float64, repr_float)
+        yaml.add_representer(np.int32, repr_int)
+        yaml.add_representer(np.int64, repr_int)
+
+        with open(path / "config.yaml", "w") as f:
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
+
+        # -- params.h5: numerical arrays --
+        with h5py.File(path / "params.h5", "w") as f:
+            for k, v in self.zero_predictor_results.items():
+                grp = f.create_group(f"zero_predictor/{int(k)}")
+                if v.beta_mean is not None:
+                    grp.create_dataset("beta_mean", data=np.atleast_1d(np.asarray(v.beta_mean)))
+                if v.intercept_mean is not None:
+                    grp.create_dataset("intercept_mean", data=np.atleast_1d(np.asarray(v.intercept_mean)))
+                if v.cutpoints_mean is not None:
+                    grp.create_dataset("cutpoints_mean", data=np.asarray(v.cutpoints_mean))
+
+            for (t, p), v in self.univariate_results.items():
+                grp = f.create_group(f"univariate/{int(t)}_{int(p)}")
+                if v.beta_mean is not None:
+                    grp.create_dataset("beta_mean", data=np.atleast_1d(np.asarray(v.beta_mean)))
+                if v.intercept_mean is not None:
+                    grp.create_dataset("intercept_mean", data=np.atleast_1d(np.asarray(v.intercept_mean)))
+                if v.cutpoints_mean is not None:
+                    grp.create_dataset("cutpoints_mean", data=np.asarray(v.cutpoints_mean))
+
+            for k, v in self.dm_zero_results.items():
+                grp = f.create_group(f"dm_zero/{int(k)}")
+                if v.alpha_posterior is not None:
+                    grp.create_dataset("alpha_posterior", data=np.asarray(v.alpha_posterior))
+                if v.predictor_categories is not None:
+                    grp.create_dataset("predictor_categories", data=np.asarray(v.predictor_categories))
+                if v.target_categories is not None:
+                    grp.create_dataset("target_categories", data=np.asarray(v.target_categories))
+
+            for (t, p), v in self.dm_results.items():
+                grp = f.create_group(f"dm/{int(t)}_{int(p)}")
+                if v.alpha_posterior is not None:
+                    grp.create_dataset("alpha_posterior", data=np.asarray(v.alpha_posterior))
+                if v.predictor_categories is not None:
+                    grp.create_dataset("predictor_categories", data=np.asarray(v.predictor_categories))
+                if v.target_categories is not None:
+                    grp.create_dataset("target_categories", data=np.asarray(v.target_categories))
+
+    @classmethod
+    def load_from_disk(cls, path: Union[str, Path]) -> "PairwiseOrdinalStackingModel":
+        """Load model from a directory with config.yaml + params.h5.
+
+        Args:
+            path: Directory containing config.yaml and params.h5.
+
+        Returns:
+            Loaded PairwiseOrdinalStackingModel instance.
+        """
+        import h5py
+
+        path = Path(path)
+        with open(path / "config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+
+        cfg = config["config"]
+        instance = cls(
+            alpha_prior=cfg.get("alpha_prior", 0.5),
+            prior_scale=cfg.get("prior_scale", 1.0),
+            noise_scale=cfg.get("noise_scale", 1.0),
+            pathfinder_num_samples=cfg.get("pathfinder_num_samples", 200),
+            pathfinder_maxiter=cfg.get("pathfinder_maxiter", 100),
+            min_obs=cfg.get("min_obs", 5),
+            inference_method=cfg.get("inference_method", "pathfinder"),
+            verbose=False,
+        )
+
+        data = config["data"]
+        instance.variable_names = data["variable_names"]
+        instance.variable_types = {int(k): v for k, v in data["variable_types"].items()}
+        instance.n_obs_total = data["n_obs_total"]
+        gv = data.get("global_ordinal_values")
+        instance.global_ordinal_values = np.array(gv) if gv is not None else None
+        instance.n_global_classes = data.get("n_global_classes", 0)
+
+        # Load numerical arrays
+        with h5py.File(path / "params.h5", "r") as f:
+            # Regression zero-predictor
+            for k_str, meta in config.get("zero_predictor_meta", {}).items():
+                k = int(k_str)
+                prefix = f"zero_predictor/{k}"
+                beta_mean = np.array(f[f"{prefix}/beta_mean"]) if f"{prefix}/beta_mean" in f else None
+                if beta_mean is not None and beta_mean.ndim == 1 and beta_mean.shape[0] == 1:
+                    beta_mean = float(beta_mean[0])
+                intercept_mean = float(f[f"{prefix}/intercept_mean"][0]) if f"{prefix}/intercept_mean" in f else None
+                cutpoints_mean = np.array(f[f"{prefix}/cutpoints_mean"]) if f"{prefix}/cutpoints_mean" in f else None
+                instance.zero_predictor_results[k] = UnivariateModelResult(
+                    **meta, beta_mean=beta_mean, intercept_mean=intercept_mean,
+                    cutpoints_mean=cutpoints_mean,
+                )
+
+            # Regression univariate
+            for item in config.get("univariate_meta", []):
+                t, p = int(item["target_idx"]), int(item["predictor_idx"])
+                prefix = f"univariate/{t}_{p}"
+                beta_mean = np.array(f[f"{prefix}/beta_mean"]) if f"{prefix}/beta_mean" in f else None
+                if beta_mean is not None and beta_mean.ndim == 1 and beta_mean.shape[0] == 1:
+                    beta_mean = float(beta_mean[0])
+                intercept_mean = float(f[f"{prefix}/intercept_mean"][0]) if f"{prefix}/intercept_mean" in f else None
+                cutpoints_mean = np.array(f[f"{prefix}/cutpoints_mean"]) if f"{prefix}/cutpoints_mean" in f else None
+                meta_copy = {k2: v2 for k2, v2 in item.items() if k2 not in ("target_idx", "predictor_idx")}
+                meta_copy["target_idx"] = t
+                meta_copy["predictor_idx"] = p
+                instance.univariate_results[(t, p)] = UnivariateModelResult(
+                    **meta_copy, beta_mean=beta_mean, intercept_mean=intercept_mean,
+                    cutpoints_mean=cutpoints_mean,
+                )
+
+            # DM zero-predictor
+            for k_str, meta in config.get("dm_zero_meta", {}).items():
+                k = int(k_str)
+                prefix = f"dm_zero/{k}"
+                alpha_post = np.array(f[f"{prefix}/alpha_posterior"]) if f"{prefix}/alpha_posterior" in f else None
+                pred_cats = np.array(f[f"{prefix}/predictor_categories"]) if f"{prefix}/predictor_categories" in f else None
+                tgt_cats = np.array(f[f"{prefix}/target_categories"]) if f"{prefix}/target_categories" in f else None
+                instance.dm_zero_results[k] = DirichletMultinomialResult(
+                    **meta, alpha_posterior=alpha_post,
+                    predictor_categories=pred_cats, target_categories=tgt_cats,
+                )
+
+            # DM pairwise
+            for item in config.get("dm_meta", []):
+                t, p = int(item["target_idx"]), int(item["predictor_idx"])
+                prefix = f"dm/{t}_{p}"
+                alpha_post = np.array(f[f"{prefix}/alpha_posterior"]) if f"{prefix}/alpha_posterior" in f else None
+                pred_cats = np.array(f[f"{prefix}/predictor_categories"]) if f"{prefix}/predictor_categories" in f else None
+                tgt_cats = np.array(f[f"{prefix}/target_categories"]) if f"{prefix}/target_categories" in f else None
+                meta_copy = {k2: v2 for k2, v2 in item.items() if k2 not in ("target_idx", "predictor_idx")}
+                meta_copy["target_idx"] = t
+                meta_copy["predictor_idx"] = p
+                instance.dm_results[(t, p)] = DirichletMultinomialResult(
+                    **meta_copy, alpha_posterior=alpha_post,
+                    predictor_categories=pred_cats, target_categories=tgt_cats,
+                )
+
+        return instance
 
     def save(self, path: Union[str, Path]) -> None:
         """Save the fitted model to a YAML file."""
@@ -1380,12 +1616,6 @@ class PairwiseOrdinalStackingModel:
 
         with open(path, "w") as f:
             yaml.dump(state, f, default_flow_style=False, allow_unicode=True)
-
-    @classmethod
-    @classmethod
-    def load_from_disk(cls, path: Union[str, Path]) -> "PairwiseOrdinalStackingModel":
-        """Alias for :meth:`load` for API compatibility with IRT models."""
-        return cls.load(path)
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "PairwiseOrdinalStackingModel":
