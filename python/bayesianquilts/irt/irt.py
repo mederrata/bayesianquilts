@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict, Optional
 
 import jax
 import numpy as np
@@ -332,9 +332,131 @@ class IRTModel(BayesianModel):
                 return True
         return False
 
-    # Tolerance for treating w_irt as 1 (ignorable missingness).
-    # Items with w_pairwise <= ignorable_tol skip imputation entirely.
+    # Default tolerance for treating w_irt as 1 (ignorable missingness).
+    # Overridden per item when adaptive thresholds are computed.
     ignorable_tol = 0.01
+
+    # Per-item adaptive thresholds, keyed by item name.
+    # Set by compute_adaptive_thresholds() after the first epoch.
+    _adaptive_thresholds: Optional[Dict[str, float]] = None
+
+    def compute_adaptive_thresholds(self, data_factory, sample_size=32, seed=42):
+        """Estimate per-item ignorability thresholds from ELBO variance.
+
+        For each item i, computes Var[log a_i(theta)] across surrogate
+        posterior draws and the per-item ELPD improvement from the
+        imputation model. The threshold for item i is:
+
+            w_threshold_i = Var[log a_i] / (S * |delta_ELPD_i|)
+
+        Items with w_pairwise below their threshold are treated as
+        ignorable during subsequent training.
+
+        Args:
+            data_factory: Callable returning a data iterator.
+            sample_size: Number of MC draws (S) used per ELBO gradient step.
+            seed: Random seed for surrogate sampling.
+        """
+        if self.surrogate_sample is None:
+            return
+
+        S = sample_size
+        I = self.num_items
+        K = self.response_cardinality
+
+        use_is = (hasattr(self.imputation_model, 'predict_mice_pmf')
+                  and hasattr(self.imputation_model, 'get_item_weight'))
+        if not use_is:
+            return
+
+        # Collect log a_i(theta) across one epoch
+        # rb has shape (S, N, I) — already computed in predictive_distribution
+        log_ai_var = np.zeros(I)
+        n_missing = np.zeros(I)
+
+        for batch in data_factory():
+            pmfs, weights = self._compute_batch_pmfs(batch)
+            if pmfs is None:
+                continue
+
+            pred = self.predictive_distribution(batch, **self.surrogate_sample)
+            response_probs = np.array(pred['rv'].probs_parameter())  # (S, N, I, K)
+
+            for i in range(I):
+                col = np.asarray(batch[self.item_keys[i]], dtype=np.float64)
+                bad = np.isnan(col) | (col < 0) | (col >= K)
+                bad_idx = np.where(bad)[0]
+                if len(bad_idx) == 0:
+                    continue
+
+                # log a_i(theta) for missing cells: log sum_k q(k) * p(k|theta)
+                q = pmfs[bad_idx, i, :]  # (n_bad, K)
+                p = response_probs[:, bad_idx, i, :]  # (S, n_bad, K)
+                log_a = np.log(np.maximum(
+                    np.sum(q[np.newaxis, :, :] * p, axis=-1), 1e-30
+                ))  # (S, n_bad)
+
+                # Variance over S draws, averaged over missing people
+                var_per_person = np.var(log_a, axis=0)  # (n_bad,)
+                log_ai_var[i] += var_per_person.sum()
+                n_missing[i] += len(bad_idx)
+            break  # one epoch is enough
+
+        # Average variance per missing cell
+        mean_var = np.where(n_missing > 0, log_ai_var / n_missing, 0.0)
+
+        # Per-item ELPD improvement from the imputation model
+        delta_elpd = np.ones(I) * 0.01  # default small value
+        im = self.imputation_model
+        if hasattr(im, 'pairwise_model'):
+            pw = im.pairwise_model
+        elif hasattr(im, 'mice_model'):
+            pw = im.mice_model
+        else:
+            pw = im
+
+        for i, item_key in enumerate(self.item_keys):
+            if not hasattr(pw, 'variable_names'):
+                continue
+            if item_key not in pw.variable_names:
+                continue
+            idx = pw.variable_names.index(item_key)
+
+            # Best univariate ELPD vs zero-predictor ELPD
+            best_uni = -np.inf
+            for (t, p), r in pw.univariate_results.items():
+                if t == idx and r.converged:
+                    best_uni = max(best_uni, r.elpd_loo_per_obs)
+
+            zero_elpd = -np.inf
+            if idx in pw.zero_predictor_results:
+                zr = pw.zero_predictor_results[idx]
+                if zr.converged:
+                    zero_elpd = zr.elpd_loo_per_obs
+
+            if np.isfinite(best_uni) and np.isfinite(zero_elpd):
+                delta_elpd[i] = max(abs(best_uni - zero_elpd), 0.001)
+
+        # Adaptive threshold: w_threshold = Var[log a_i] / (S * |delta_ELPD|)
+        thresholds = mean_var / (S * delta_elpd)
+        # Clamp to [0.001, 0.5] for safety
+        thresholds = np.clip(thresholds, 0.001, 0.5)
+
+        self._adaptive_thresholds = {
+            self.item_keys[i]: float(thresholds[i]) for i in range(I)
+        }
+
+        if hasattr(self, 'verbose') and self.verbose:
+            n_ignored = sum(1 for i in range(I)
+                            if use_is and im.get_item_weight(self.item_keys[i]) <= thresholds[i])
+            print(f"  Adaptive thresholds: {n_ignored}/{I} items treated as ignorable")
+            print(f"  Threshold range: [{thresholds.min():.4f}, {thresholds.max():.4f}]")
+
+    def _get_item_threshold(self, item_key: str) -> float:
+        """Return the ignorability threshold for a given item."""
+        if self._adaptive_thresholds is not None and item_key in self._adaptive_thresholds:
+            return self._adaptive_thresholds[item_key]
+        return self.ignorable_tol
 
     def _compute_batch_pmfs(self, batch):
         """Compute imputation PMFs for missing cells using the imputation model.
@@ -344,10 +466,9 @@ class IRTModel(BayesianModel):
         MICE-only PMFs and per-item stacking weights.  Otherwise falls
         back to the blended ``predict_pmf`` interface.
 
-        Items where ``w_pairwise <= self.ignorable_tol`` (i.e., w_irt is
-        effectively 1) are skipped entirely — their missing cells are
-        treated as ignorable missingness and contribute 0 to the
-        log-likelihood, avoiding unnecessary PMF computation.
+        Items where ``w_pairwise`` falls below their per-item ignorability
+        threshold are skipped — their missing cells are treated as
+        ignorable missingness and contribute 0 to the log-likelihood.
 
         Args:
             batch: dict mapping keys to arrays.
@@ -375,8 +496,8 @@ class IRTModel(BayesianModel):
 
             if use_is:
                 weights[i] = self.imputation_model.get_item_weight(item_key)
-                # Skip imputation for items where w_irt ≈ 1
-                if weights[i] <= self.ignorable_tol:
+                # Skip imputation for items below their ignorability threshold
+                if weights[i] <= self._get_item_threshold(item_key):
                     continue
 
             if len(bad_indices) == 0:
