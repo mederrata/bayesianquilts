@@ -370,9 +370,13 @@ class IRTModel(BayesianModel):
                   and hasattr(self.imputation_model, 'get_item_weight'))
         im = self.imputation_model
 
-        # -- Extract per-item ELPD improvement and SE from the pairwise model --
+        # -- Compute delta_ELPD: pairwise model vs IRT model, per item --
+        # The relevant comparison is whether the pairwise model predicts
+        # item i better than the IRT model does. If not, imputing item i
+        # adds noise for no gain over the IRT model's own marginalization.
         delta_elpd = np.ones(I) * 0.01
 
+        # Get pairwise model's best per-item ELPD
         if hasattr(im, 'pairwise_model'):
             pw = im.pairwise_model
         elif hasattr(im, 'mice_model'):
@@ -380,26 +384,53 @@ class IRTModel(BayesianModel):
         else:
             pw = im
 
+        pw_elpd = np.full(I, -np.inf)
         for i, item_key in enumerate(self.item_keys):
-            if not hasattr(pw, 'variable_names'):
-                continue
-            if item_key not in pw.variable_names:
+            if not hasattr(pw, 'variable_names') or item_key not in pw.variable_names:
                 continue
             idx = pw.variable_names.index(item_key)
-
-            best_uni_elpd = -np.inf
             for (t, p), r in pw.univariate_results.items():
-                if t == idx and r.converged and r.elpd_loo_per_obs > best_uni_elpd:
-                    best_uni_elpd = r.elpd_loo_per_obs
+                if t == idx and r.converged and r.elpd_loo_per_obs > pw_elpd[i]:
+                    pw_elpd[i] = r.elpd_loo_per_obs
 
-            zero_elpd = -np.inf
-            if idx in pw.zero_predictor_results:
-                zr = pw.zero_predictor_results[idx]
-                if zr.converged:
-                    zero_elpd = zr.elpd_loo_per_obs
+        # Get IRT model's per-item ELPD
+        # If the mixed model already computed it, use that.
+        # Otherwise estimate from one pass through the data.
+        irt_elpd = np.full(I, -np.inf)
+        if hasattr(im, '_irt_elpd_per_item') and im._irt_elpd_per_item:
+            for i, item_key in enumerate(self.item_keys):
+                if item_key in im._irt_elpd_per_item:
+                    irt_elpd[i] = im._irt_elpd_per_item[item_key]
+        elif self.surrogate_sample is not None:
+            # Estimate per-item average log-predictive density
+            irt_ll_sum = np.zeros(I)
+            irt_ll_count = np.zeros(I)
+            for batch in data_factory():
+                pred = self.predictive_distribution(batch, **self.surrogate_sample)
+                response_probs = np.array(pred['rv'].probs_parameter())  # (S, N, I, K)
+                for i, item_key in enumerate(self.item_keys):
+                    col = np.asarray(batch[item_key], dtype=np.float64)
+                    valid = ~np.isnan(col) & (col >= 0) & (col < K)
+                    valid_idx = np.where(valid)[0]
+                    if len(valid_idx) == 0:
+                        continue
+                    y = col[valid_idx].astype(int)
+                    # Mean log prob over posterior samples for each observed response
+                    p_obs = response_probs[:, valid_idx, i, :]  # (S, n_valid, K)
+                    log_p = np.log(np.maximum(
+                        np.mean(p_obs[np.arange(p_obs.shape[0])[:, None],
+                                      np.arange(len(y))[None, :], y[None, :]], axis=0),
+                        1e-30,
+                    ))  # (n_valid,)
+                    irt_ll_sum[i] += log_p.sum()
+                    irt_ll_count[i] += len(valid_idx)
+                break
+            irt_elpd = np.where(irt_ll_count > 0, irt_ll_sum / irt_ll_count, -np.inf)
 
-            if np.isfinite(best_uni_elpd) and np.isfinite(zero_elpd):
-                delta_elpd[i] = max(abs(best_uni_elpd - zero_elpd), 0.001)
+        # delta_ELPD = |ELPD_pairwise - ELPD_IRT| per item
+        for i in range(I):
+            if np.isfinite(pw_elpd[i]) and np.isfinite(irt_elpd[i]):
+                delta_elpd[i] = max(abs(pw_elpd[i] - irt_elpd[i]), 0.001)
 
         # -- Mode-specific threshold computation --
         if inference == "mcmc":
@@ -482,12 +513,24 @@ class IRTModel(BayesianModel):
             self.item_keys[i]: float(thresholds[i]) for i in range(I)
         }
 
-        if hasattr(self, 'verbose') and self.verbose:
+        # Determine which items are ignorable and store on the imputation model
+        ignorable_items = {}
+        for i in range(I):
+            item_key = self.item_keys[i]
             if use_is:
-                n_ignored = sum(1 for i in range(I)
-                                if im.get_item_weight(self.item_keys[i]) <= thresholds[i])
+                w_pw = im.get_item_weight(item_key)
+                ignorable_items[item_key] = w_pw <= thresholds[i]
             else:
-                n_ignored = sum(1 for t in thresholds if t >= 1.0)
+                ignorable_items[item_key] = thresholds[i] >= 1.0
+
+        # Store on the imputation model for serialization
+        if hasattr(im, 'ignorable_items'):
+            im.ignorable_items = ignorable_items
+        else:
+            im.ignorable_items = ignorable_items
+
+        if hasattr(self, 'verbose') and self.verbose:
+            n_ignored = sum(1 for v in ignorable_items.values() if v)
             print(f"  Adaptive thresholds ({inference}): "
                   f"{n_ignored}/{I} items treated as ignorable")
             print(f"  Threshold range: [{thresholds.min():.4f}, "

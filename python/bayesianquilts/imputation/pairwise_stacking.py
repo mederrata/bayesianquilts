@@ -642,6 +642,11 @@ class PairwiseOrdinalStackingModel:
         self.dm_results: Dict[Tuple[int, int], DirichletMultinomialResult] = {}
         self.dm_zero_results: Dict[int, DirichletMultinomialResult] = {}
 
+        # Per-item ignorability flags, set by IRT model's
+        # compute_adaptive_thresholds(). Items marked True are skipped
+        # during CAT scoring.
+        self.ignorable_items: Dict[str, bool] = {}
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -1341,6 +1346,7 @@ class PairwiseOrdinalStackingModel:
             "univariate_meta": [],
             "dm_zero_meta": {},
             "dm_meta": [],
+            "ignorable_items": {k: bool(v) for k, v in self.ignorable_items.items()},
         }
 
         for k, v in self.zero_predictor_results.items():
@@ -1531,6 +1537,8 @@ class PairwiseOrdinalStackingModel:
                     predictor_categories=pred_cats, target_categories=tgt_cats,
                 )
 
+        instance.ignorable_items = config.get("ignorable_items", {})
+
         return instance
 
     def save(self, path: Union[str, Path]) -> None:
@@ -1601,6 +1609,7 @@ class PairwiseOrdinalStackingModel:
                 {"target_idx": int(k[0]), "predictor_idx": int(k[1]), "result": dm_result_to_dict(v)}
                 for k, v in self.dm_results.items()
             ],
+            "ignorable_items": {k: bool(v) for k, v in self.ignorable_items.items()},
         }
 
         def repr_float(dumper, data):
@@ -1683,6 +1692,9 @@ class PairwiseOrdinalStackingModel:
             if v.get("target_categories") is not None:
                 v["target_categories"] = np.array(v["target_categories"])
             instance.dm_results[key] = DirichletMultinomialResult(**v)
+
+        # Restore ignorable items
+        instance.ignorable_items = state.get("ignorable_items", {})
 
         return instance
 

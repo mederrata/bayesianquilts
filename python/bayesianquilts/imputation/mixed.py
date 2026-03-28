@@ -73,6 +73,7 @@ class IrtMixedImputationModel:
         self._irt_elpd_per_item: Dict[str, float] = {}
         self._mice_elpd_per_item: Dict[str, float] = {}
         self._weights: Dict[str, float] = {}  # w_i for MICE; (1 - w_i) for IRT
+        self.ignorable_items: Dict[str, bool] = {}  # set by compute_adaptive_thresholds
 
         self._compute_irt_elpd(data_factory, batch_size=irt_elpd_batch_size,
                                n_posterior_samples=n_posterior_samples)
