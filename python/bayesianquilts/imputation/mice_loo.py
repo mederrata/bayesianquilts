@@ -5,7 +5,7 @@ This module implements a Bayesian framework for evaluating variable relationship
 using Leave-One-Out Cross-Validation with Pathfinder variational inference.
 
 For P variables, this framework fits:
-- P zero-predictor (intercept-only) models
+- P marginal (intercept-only) models
 - Up to P*(P-1) one-predictor univariate models
 
 Each univariate model predicts variable i using variable j, where the data
@@ -62,7 +62,7 @@ class MICEBayesianLOO(MICELogistic):
         instead. This class will be removed in a future release.
 
     For P variables, this class fits:
-    - P zero-predictor (intercept-only) models
+    - P marginal (intercept-only) models
     - Up to P*(P-1) one-predictor univariate models
 
     Each univariate model predicts variable i using variable j, where the data
@@ -71,7 +71,7 @@ class MICEBayesianLOO(MICELogistic):
     Attributes:
         variable_names: List of variable names
         variable_types: Dict mapping variable name to type ('continuous' or 'binary')
-        zero_predictor_results: Dict mapping variable index to UnivariateModelResult
+        marginal_results: Dict mapping variable index to UnivariateModelResult
         univariate_results: Dict mapping (target_idx, predictor_idx) to UnivariateModelResult
     """
 
@@ -127,7 +127,7 @@ class MICEBayesianLOO(MICELogistic):
 
         self.variable_names: List[str] = []
         self.variable_types: Dict[int, str] = {}
-        self.zero_predictor_results: Dict[int, UnivariateModelResult] = {}
+        self.marginal_results: Dict[int, UnivariateModelResult] = {}
         self.univariate_results: Dict[Tuple[int, int], UnivariateModelResult] = {}
         self.prediction_graph: Dict[str, List[str]] = {}
         self.n_obs_total: int = 0  # Overall dataset size
@@ -476,13 +476,13 @@ class MICEBayesianLOO(MICELogistic):
         return float(loo), float(elpd_se), float(np.max(ks)), float(np.mean(ks))
 
 
-    def _fit_zero_predictor(
+    def _fit_marginal(
         self,
         data: np.ndarray,
         target_idx: int,
         seed: int = 42
     ) -> UnivariateModelResult:
-        """Fit a zero-predictor (intercept-only) model."""
+        """Fit a marginal (intercept-only) model."""
         # Get observed values
         mask = self._get_observed_mask(data, target_idx)
         y = data[mask, target_idx]
@@ -517,7 +517,7 @@ class MICEBayesianLOO(MICELogistic):
         else:
             y_batch = y
 
-        # For zero-predictor model, use X of zeros
+        # For marginal model, use X of zeros
         X = np.zeros((len(y_batch), 1), dtype=np.float32)
         data_dict = {'X': X, 'y': y_batch.astype(np.float32)}
 
@@ -584,7 +584,7 @@ class MICEBayesianLOO(MICELogistic):
         # Discard model if khat > 0.7
         if khat_max > 0.7:
             if self.verbose:
-                print(f"    khat={khat_max:.2f} > 0.7, discarding zero-predictor model")
+                print(f"    khat={khat_max:.2f} > 0.7, discarding marginal model")
             return UnivariateModelResult(
                 n_obs=n_obs, elpd_loo=float('-inf'), elpd_loo_per_obs=float('-inf'),
                 elpd_loo_per_obs_se=float('inf'), khat_max=khat_max, khat_mean=khat_mean,
@@ -813,7 +813,7 @@ class MICEBayesianLOO(MICELogistic):
     def fit_loo_models(
         self,
         X_df: pd.DataFrame,
-        fit_zero_predictors: bool = True,
+        fit_marginals: bool = True,
         seed: int = 42,
         save_dir: Optional[Union[str, Path]] = None,
         n_jobs: int = -1,
@@ -826,13 +826,13 @@ class MICEBayesianLOO(MICELogistic):
 
         Args:
             X_df: DataFrame with potentially missing values (NaN)
-            fit_zero_predictors: Whether to fit zero-predictor (intercept-only) models
+            fit_marginals: Whether to fit marginal (intercept-only) models
             seed: Random seed
             save_dir: Directory to save incremental results. If None, keeps all in memory.
             n_jobs: Number of parallel jobs. -1 uses all cores.
             n_top_features: Number of top correlated features to consider as predictors.
             resume: If True, skip models that are already fitted (i.e., present in
-                self.zero_predictor_results or self.univariate_results). Useful for
+                self.marginal_results or self.univariate_results). Useful for
                 resuming after loading a partial checkpoint via ``self.load()``.
             checkpoint_path: Path to auto-save a checkpoint after each target variable's
                 univariate models complete. If None but save_dir is provided, a default
@@ -919,23 +919,23 @@ class MICEBayesianLOO(MICELogistic):
         elif save_dir is not None:
             _checkpoint_path = Path(save_dir) / "checkpoint.yaml"
 
-        # Fit zero-predictor models
-        if fit_zero_predictors:
+        # Fit marginal models
+        if fit_marginals:
             # Determine which indices still need fitting
             if resume:
-                zero_indices = [i for i in range(n_variables) if i not in self.zero_predictor_results]
+                zero_indices = [i for i in range(n_variables) if i not in self.marginal_results]
                 if self.verbose and len(zero_indices) < n_variables:
-                    print(f"\nResuming zero-predictor models: {n_variables - len(zero_indices)} already fitted, {len(zero_indices)} remaining")
+                    print(f"\nResuming marginal models: {n_variables - len(zero_indices)} already fitted, {len(zero_indices)} remaining")
             else:
                 zero_indices = list(range(n_variables))
 
             if zero_indices:
                 if self.verbose:
-                    print("\nFitting zero-predictor models...")
-                    print(f"  Scheduling {len(zero_indices)} zero-predictor jobs...")
+                    print("\nFitting marginal models...")
+                    print(f"  Scheduling {len(zero_indices)} marginal jobs...")
 
-                def fit_zero(i):
-                    return self._fit_zero_predictor(data, i, seed=seed + i)
+                def fit_marginal(i):
+                    return self._fit_marginal(data, i, seed=seed + i)
 
                 # Use return_as="generator" to allow tqdm to track completion
                 results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
@@ -944,7 +944,7 @@ class MICEBayesianLOO(MICELogistic):
 
                 # Wrap generator with tqdm if verbose is off
                 if not self.verbose:
-                    results_gen = tqdm(results_gen, total=len(zero_indices), desc="Zero-Predictor Models")
+                    results_gen = tqdm(results_gen, total=len(zero_indices), desc="Marginal Models")
 
                 # Collect results locally to avoid modifying self while pickling tasks
                 local_results = []
@@ -958,7 +958,7 @@ class MICEBayesianLOO(MICELogistic):
 
                 # Update state after parallel execution finishes
                 for i, result in local_results:
-                    self.zero_predictor_results[i] = result
+                    self.marginal_results[i] = result
 
         # Fit one-predictor models
         if self.verbose:
@@ -1051,8 +1051,8 @@ class MICEBayesianLOO(MICELogistic):
 
             # Collect results for this target locally
             target_results = {}
-            if fit_zero_predictors and i in self.zero_predictor_results:
-                target_results['zero_predictor'] = self._result_to_dict(self.zero_predictor_results[i])
+            if fit_marginals and i in self.marginal_results:
+                target_results['marginal'] = self._result_to_dict(self.marginal_results[i])
 
             univariate_list = []
             local_updates = []
@@ -1124,10 +1124,10 @@ class MICEBayesianLOO(MICELogistic):
             yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
 
         if self.verbose:
-            n_converged_zero = sum(1 for r in self.zero_predictor_results.values() if r.converged)
+            n_converged_zero = sum(1 for r in self.marginal_results.values() if r.converged)
             n_converged_uni = sum(1 for r in self.univariate_results.values() if r.converged)
             print(f"\nCompleted:")
-            print(f"  Zero-predictor: {n_converged_zero}/{len(self.zero_predictor_results)} converged")
+            print(f"  Marginal: {n_converged_zero}/{len(self.marginal_results)} converged")
             print(f"  Univariate: {n_converged_uni}/{len(self.univariate_results)} converged")
 
         return self
@@ -1139,13 +1139,13 @@ class MICEBayesianLOO(MICELogistic):
         Returns:
             Array of shape (n_variables, n_variables) where entry [i, j] is
             the ELPD per observation for predicting variable i from variable j.
-            Diagonal entries are from zero-predictor models.
+            Diagonal entries are from marginal models.
         """
         n_variables = len(self.variable_names)
         matrix = np.full((n_variables, n_variables), np.nan)
 
-        # Fill diagonal with zero-predictor results
-        for i, result in self.zero_predictor_results.items():
+        # Fill diagonal with marginal results
+        for i, result in self.marginal_results.items():
             if result.converged:
                 matrix[i, i] = result.elpd_loo_per_obs
 
@@ -1163,13 +1163,13 @@ class MICEBayesianLOO(MICELogistic):
         Returns:
             Array of shape (n_variables, n_variables) where entry [i, j] is
             the standard error of ELPD per observation for predicting variable i from variable j.
-            Diagonal entries are from zero-predictor models.
+            Diagonal entries are from marginal models.
         """
         n_variables = len(self.variable_names)
         matrix = np.full((n_variables, n_variables), np.nan)
 
-        # Fill diagonal with zero-predictor results
-        for i, result in self.zero_predictor_results.items():
+        # Fill diagonal with marginal results
+        for i, result in self.marginal_results.items():
             if result.converged:
                 matrix[i, i] = result.elpd_loo_per_obs_se
 
@@ -1191,8 +1191,8 @@ class MICEBayesianLOO(MICELogistic):
         n_variables = len(self.variable_names)
         matrix = np.zeros((n_variables, n_variables), dtype=int)
 
-        # Fill diagonal with zero-predictor results
-        for i, result in self.zero_predictor_results.items():
+        # Fill diagonal with marginal results
+        for i, result in self.marginal_results.items():
             matrix[i, i] = result.n_obs
 
         # Fill off-diagonal with univariate results
@@ -1203,7 +1203,7 @@ class MICEBayesianLOO(MICELogistic):
 
     def get_improvement_matrix(self) -> np.ndarray:
         """
-        Get matrix of ELPD improvements over zero-predictor.
+        Get matrix of ELPD improvements over marginal.
 
         Returns:
             Array of shape (n_variables, n_variables) where entry [i, j] is
@@ -1249,7 +1249,7 @@ class MICEBayesianLOO(MICELogistic):
             'n_obs_matrix': n_obs_matrix,
             'improvement_matrix': improvement_matrix,
             'best_predictors': best_predictors,
-            'n_converged_zero': sum(1 for r in self.zero_predictor_results.values() if r.converged),
+            'n_converged_zero': sum(1 for r in self.marginal_results.values() if r.converged),
             'n_converged_univariate': sum(1 for r in self.univariate_results.values() if r.converged),
         }
 
@@ -1491,7 +1491,7 @@ class MICEBayesianLOO(MICELogistic):
         Predict a target variable using stacked univariate models.
 
         Uses available predictors from the items dict to stack predictions from
-        the zero-predictor model and univariate models. Stacking weights are
+        the marginal model and univariate models. Stacking weights are
         computed as exp(elpd_loo - uncertainty_penalty * elpd_se) to hedge
         against uncertainty in the ELPD estimates.
 
@@ -1533,11 +1533,11 @@ class MICEBayesianLOO(MICELogistic):
         # List of (name, elpd_per_obs, se_per_obs, prediction)
         models_info = []
 
-        # 1. Zero-predictor model (always available if converged)
-        if target_idx in self.zero_predictor_results:
-            zero_result = self.zero_predictor_results[target_idx]
+        # 1. Marginal model (always available if converged)
+        if target_idx in self.marginal_results:
+            zero_result = self.marginal_results[target_idx]
             if zero_result.converged:
-                # Compute prediction from zero-predictor model
+                # Compute prediction from marginal model
                 # Use stored intercept_mean if available
                 if zero_result.intercept_mean is not None:
                      intercept = zero_result.intercept_mean
@@ -1709,9 +1709,9 @@ class MICEBayesianLOO(MICELogistic):
         # Per-obs ELPD and SE used directly — no rescaling by N.
         models_info: list = []
 
-        # Zero-predictor
-        if target_idx in self.zero_predictor_results:
-            zr = self.zero_predictor_results[target_idx]
+        # Marginal
+        if target_idx in self.marginal_results:
+            zr = self.marginal_results[target_idx]
             if zr.converged:
                 intercept = (
                     zr.intercept_mean
@@ -1859,9 +1859,9 @@ class MICEBayesianLOO(MICELogistic):
                 'variable_types': {int(k): v for k, v in self.variable_types.items()},
                 'n_obs_total': self.n_obs_total,
             },
-            'zero_predictor_results': {
+            'marginal_results': {
                 int(k): self._result_to_dict(v)
-                for k, v in self.zero_predictor_results.items()
+                for k, v in self.marginal_results.items()
             },
             'univariate_results': [
                 {
@@ -1931,9 +1931,9 @@ class MICEBayesianLOO(MICELogistic):
         instance.variable_types = {int(k): v for k, v in data['variable_types'].items()}
         instance.n_obs_total = data['n_obs_total']
 
-        # Restore zero predictor results
-        for k, v in state['zero_predictor_results'].items():
-            instance.zero_predictor_results[int(k)] = instance._dict_to_result(v)
+        # Restore marginal results
+        for k, v in state['marginal_results'].items():
+            instance.marginal_results[int(k)] = instance._dict_to_result(v)
 
         # Restore univariate results (handle both v1.0 and v1.1 formats)
         univariate_data = state['univariate_results']
@@ -1993,12 +1993,12 @@ class MICEBayesianLOO(MICELogistic):
             },
             'prediction_graph': self.prediction_graph,
             # Store result metadata (non-numerical) in YAML
-            'zero_predictor_meta': {},
+            'marginal_meta': {},
             'univariate_meta': [],
         }
 
-        for k, v in self.zero_predictor_results.items():
-            config['zero_predictor_meta'][int(k)] = {
+        for k, v in self.marginal_results.items():
+            config['marginal_meta'][int(k)] = {
                 'n_obs': int(v.n_obs),
                 'elpd_loo': float(v.elpd_loo),
                 'elpd_loo_per_obs': float(v.elpd_loo_per_obs),
@@ -2039,8 +2039,8 @@ class MICEBayesianLOO(MICELogistic):
     def _save_arrays_hdf5(self, path: Path) -> None:
         """Write numerical arrays to params.h5."""
         with h5py.File(path / 'params.h5', 'w') as f:
-            for k, v in self.zero_predictor_results.items():
-                grp = f.create_group(f'zero_predictor/{int(k)}')
+            for k, v in self.marginal_results.items():
+                grp = f.create_group(f'marginal/{int(k)}')
                 if v.beta_mean is not None:
                     grp.create_dataset('beta_mean', data=np.atleast_1d(np.asarray(v.beta_mean)))
                 if v.intercept_mean is not None:
@@ -2062,8 +2062,8 @@ class MICEBayesianLOO(MICELogistic):
         from safetensors.numpy import save_file
 
         tensors = {}
-        for k, v in self.zero_predictor_results.items():
-            prefix = f"zero_predictor/{int(k)}"
+        for k, v in self.marginal_results.items():
+            prefix = f"marginal/{int(k)}"
             if v.beta_mean is not None:
                 tensors[f"{prefix}/beta_mean"] = np.atleast_1d(np.asarray(v.beta_mean, dtype=np.float64))
             if v.intercept_mean is not None:
@@ -2127,8 +2127,8 @@ class MICEBayesianLOO(MICELogistic):
         else:
             array_data = cls._load_arrays_hdf5(path)
 
-        # Restore zero-predictor results
-        for k_str, meta in config.get('zero_predictor_meta', {}).items():
+        # Restore marginal results
+        for k_str, meta in config.get('marginal_meta', {}).items():
             k = int(k_str)
             arrays = array_data.get(('zp', k), {})
             beta_mean = arrays.get('beta_mean')
@@ -2137,7 +2137,7 @@ class MICEBayesianLOO(MICELogistic):
             intercept_mean = arrays.get('intercept_mean')
             if intercept_mean is not None and intercept_mean.ndim == 1 and intercept_mean.shape[0] == 1:
                 intercept_mean = float(intercept_mean[0])
-            instance.zero_predictor_results[k] = UnivariateModelResult(
+            instance.marginal_results[k] = UnivariateModelResult(
                 n_obs=meta['n_obs'],
                 elpd_loo=meta['elpd_loo'],
                 elpd_loo_per_obs=meta['elpd_loo_per_obs'],
@@ -2197,9 +2197,9 @@ class MICEBayesianLOO(MICELogistic):
                 for key in grp:
                     out[key] = np.array(grp[key])
                 return out
-            if 'zero_predictor' in f:
-                for k in f['zero_predictor']:
-                    result[('zp', int(k))] = _read_group(f[f'zero_predictor/{k}'])
+            if 'marginal' in f:
+                for k in f['marginal']:
+                    result[('zp', int(k))] = _read_group(f[f'marginal/{k}'])
             if 'univariate' in f:
                 for k in f['univariate']:
                     t_idx, p_idx = k.split('_')
@@ -2215,12 +2215,12 @@ class MICEBayesianLOO(MICELogistic):
         tensors = load_file(str(st_path))
         result = {}
         for full_key, arr in tensors.items():
-            # Keys are like "zero_predictor/0/beta_mean" or "univariate/1_0/beta_mean"
+            # Keys are like "marginal/0/beta_mean" or "univariate/1_0/beta_mean"
             parts = full_key.split('/')
             if len(parts) != 3:
                 continue
             category, group_key, param_name = parts
-            if category == 'zero_predictor':
+            if category == 'marginal':
                 k = ('zp', int(group_key))
             elif category == 'univariate':
                 t_idx, p_idx = group_key.split('_')
@@ -2254,9 +2254,9 @@ class MICEBayesianLOO(MICELogistic):
                 'variable_types': {int(k): v for k, v in self.variable_types.items()},
                 'n_obs_total': self.n_obs_total,
             },
-            'zero_predictor_results': {
+            'marginal_results': {
                 int(k): self._result_to_dict(v)
-                for k, v in self.zero_predictor_results.items()
+                for k, v in self.marginal_results.items()
             },
             'univariate_results': [
                 {
@@ -2306,9 +2306,9 @@ class MICEBayesianLOO(MICELogistic):
         instance.variable_types = {int(k): v for k, v in data['variable_types'].items()}
         instance.n_obs_total = data['n_obs_total']
 
-        # Restore zero predictor results
-        for k, v in state['zero_predictor_results'].items():
-            instance.zero_predictor_results[int(k)] = instance._dict_to_result(v)
+        # Restore marginal results
+        for k, v in state['marginal_results'].items():
+            instance.marginal_results[int(k)] = instance._dict_to_result(v)
 
         # Restore univariate results (handle both v1.0 and v1.1 formats)
         univariate_data = state['univariate_results']

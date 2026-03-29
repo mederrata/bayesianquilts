@@ -312,7 +312,47 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
 
     gc.collect()
 
-    # ---- Stage 3: Pairwise-only GRM ----
+    # ---- Stage 3: Build mixed imputation model ----
+    from bayesianquilts.imputation.mixed import IrtMixedImputationModel
+    import json
+
+    print("\n--- Building mixed imputation model ---")
+    mixed_imputation = IrtMixedImputationModel(
+        irt_model=model_baseline,
+        mice_model=pairwise_model,
+        data_factory=data_factory,
+        irt_elpd_batch_size=4,
+    )
+    print(mixed_imputation.summary())
+
+    weights_path = work_dir / 'mixed_weights.json'
+    with open(weights_path, 'w') as f:
+        json.dump(mixed_imputation.weights, f, indent=2)
+    print(f"Saved mixed weights to {weights_path}")
+
+    gc.collect()
+
+    # ---- Stage 3b: Compute adaptive ignorability thresholds ----
+    # Temporarily set mixed model on baseline to compute thresholds.
+    # Items where w_pairwise < threshold are treated as ignorable during
+    # subsequent GRM training (Rao-Blackwell variance reduction).
+    print("\n--- Computing adaptive ignorability thresholds ---")
+    model_baseline.imputation_model = mixed_imputation
+    calibrate_manually(model_baseline, n_samples=sample_size, seed=101)
+    model_baseline.compute_adaptive_thresholds(
+        data_factory, sample_size=sample_size, seed=seed)
+    adaptive_thresholds = model_baseline._adaptive_thresholds
+    model_baseline.imputation_model = None  # restore baseline to no-imputation
+
+    # Save thresholds
+    thresholds_path = work_dir / 'adaptive_thresholds.json'
+    with open(thresholds_path, 'w') as f:
+        json.dump(adaptive_thresholds, f, indent=2)
+    print(f"Saved adaptive thresholds to {thresholds_path}")
+
+    gc.collect()
+
+    # ---- Stage 4: Pairwise-only GRM (with adaptive thresholds) ----
     print("\n--- Fitting pairwise-only GRM ---")
     model_mice_only = GRModel(
         item_keys=item_keys,
@@ -327,6 +367,15 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         slab_scale=slab_scale,
         slab_df=slab_df,
     )
+    model_mice_only._adaptive_thresholds = adaptive_thresholds
+    ignored_pw = [k for k, t in adaptive_thresholds.items() if t >= 1.0]
+    imputed_pw = [k for k in item_keys if k not in ignored_pw]
+    print(f"  Pairwise-only: imputing {len(imputed_pw)}/{n_items}, "
+          f"ignoring {len(ignored_pw)}/{n_items} items' missing values")
+    if ignored_pw:
+        print(f"    Ignored: {', '.join(ignored_pw)}")
+    if imputed_pw:
+        print(f"    Imputed: {', '.join(imputed_pw)}")
     res_mice = model_mice_only.fit(
         data_factory,
         batch_size=batch_size,
@@ -351,28 +400,7 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
 
     gc.collect()
 
-    # ---- Stage 4a: Mixed imputation model ----
-    from bayesianquilts.imputation.mixed import IrtMixedImputationModel
-
-    print("\n--- Building mixed imputation model ---")
-    mixed_imputation = IrtMixedImputationModel(
-        irt_model=model_baseline,
-        mice_model=pairwise_model,
-        data_factory=data_factory,
-        irt_elpd_batch_size=4,
-    )
-    print(mixed_imputation.summary())
-
-    # Save mixed weights as JSON for gofluttercat export
-    import json
-    weights_path = work_dir / 'mixed_weights.json'
-    with open(weights_path, 'w') as f:
-        json.dump(mixed_imputation.weights, f, indent=2)
-    print(f"Saved mixed weights to {weights_path}")
-
-    gc.collect()
-
-    # ---- Stage 4b: Mixed-imputed GRM ----
+    # ---- Stage 5: Mixed-imputed GRM (with adaptive thresholds) ----
     print("\n--- Fitting mixed-imputed GRM ---")
     model_imputed = GRModel(
         item_keys=item_keys,
@@ -387,9 +415,16 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         slab_scale=slab_scale,
         slab_df=slab_df,
     )
-
-    # Train imputed model from scratch — snapshot warm-start often
-    # destabilizes because the imputation objective differs significantly
+    model_imputed._adaptive_thresholds = adaptive_thresholds
+    ignored_mixed = [k for k in item_keys
+                     if mixed_imputation.get_item_weight(k) <= adaptive_thresholds.get(k, 0.0)]
+    imputed_mixed = [k for k in item_keys if k not in ignored_mixed]
+    print(f"  Mixed: imputing {len(imputed_mixed)}/{n_items}, "
+          f"ignoring {len(ignored_mixed)}/{n_items} items' missing values")
+    if ignored_mixed:
+        print(f"    Ignored: {', '.join(ignored_mixed)}")
+    if imputed_mixed:
+        print(f"    Imputed: {', '.join(imputed_mixed)}")
     res_imputed = model_imputed.fit(
         data_factory,
         batch_size=batch_size,
@@ -431,38 +466,82 @@ def run_dataset(dataset_name, work_dir, skip_baseline=False, skip_mice=False,
         gc.collect()
 
     # ---- Summary ----
+    import json as _json
+
     print(f"\n{'='*100}")
     print(f"SUMMARY: {dataset_name.upper()}")
     print(f"{'='*100}")
     print(f"{'Model':<15} {'Pred RMSE':>10} {'LOO-RMSE':>10} {'ELPD/person':>20} {'ELPD/response':>20}")
     print(f"{'-'*100}")
+
+    summary_results = {
+        'dataset': dataset_name,
+        'num_people': SUBSAMPLE_N,
+        'num_items': n_items,
+        'response_cardinality': response_cardinality,
+        'n_observed_responses': int(n_observed_responses),
+        'adaptive_thresholds': adaptive_thresholds,
+        'ignorability': {
+            'pairwise_only': {
+                'ignored': ignored_pw,
+                'imputed': imputed_pw,
+            },
+            'mixed': {
+                'ignored': ignored_mixed,
+                'imputed': imputed_mixed,
+            },
+        },
+        'models': {},
+    }
+
     for label, mdl in [('Baseline', model_baseline),
-                        ('MICE-only', model_mice_only),
+                        ('Pairwise-only', model_mice_only),
                         ('Mixed', model_imputed)]:
+        entry = {}
         elpd = getattr(mdl, 'elpd_loo', None)
         se = getattr(mdl, 'elpd_loo_se', None)
         n = getattr(mdl, 'elpd_loo_n_obs', SUBSAMPLE_N)
         if elpd is not None and not np.isnan(elpd):
             pp = f"{elpd/n:.4f} ± {se/n:.4f}"
             pr = f"{elpd/n_observed_responses:.4f} ± {se/n_observed_responses:.4f}"
+            entry['elpd_loo'] = float(elpd)
+            entry['elpd_loo_se'] = float(se)
+            entry['elpd_per_person'] = float(elpd / n)
+            entry['elpd_per_response'] = float(elpd / n_observed_responses)
+            entry['n_obs'] = int(n)
+            khat = getattr(mdl, 'elpd_loo_khat', None)
+            if khat is not None:
+                entry['max_khat'] = float(np.max(khat))
+                entry['mean_khat'] = float(np.mean(khat))
+                entry['n_high_khat'] = int(np.sum(khat > 0.7))
         else:
             pp = "nan"
             pr = "nan"
         try:
             rmse = predictive_rmse(mdl, batch, item_keys, response_cardinality)
             rmse_str = f"{rmse:.4f}"
+            entry['pred_rmse'] = float(rmse)
         except Exception:
             rmse_str = "nan"
         try:
             loo_rmse = predictive_rmse(mdl, batch, item_keys, response_cardinality, loo=True, n_samples=100)
             loo_rmse_str = f"{loo_rmse:.4f}"
+            entry['loo_rmse'] = float(loo_rmse)
         except Exception as e:
             print(f"  LOO-RMSE failed for {label}: {e}")
             loo_rmse_str = "nan"
         print(f"{label:<15} {rmse_str:>10} {loo_rmse_str:>10} {pp:>20} {pr:>20}")
+        summary_results['models'][label] = entry
+
     print(f"{'='*100}")
     print(f"Artifacts: grm_baseline/, grm_mice_only/, grm_imputed/")
     print(f"{'='*100}")
+
+    # Save results JSON
+    results_path = work_dir / 'results.json'
+    with open(results_path, 'w') as f:
+        _json.dump(summary_results, f, indent=2)
+    print(f"Results saved to {results_path}")
 
 
 def main():
@@ -474,7 +553,7 @@ def main():
                         help='Load existing MICE model instead of re-fitting')
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--lr-decay-factor', type=float, default=0.975)
     parser.add_argument('--sample-size', type=int, default=32,
                         help='MC samples per ADVI gradient step (default 32)')

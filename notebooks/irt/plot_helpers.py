@@ -17,11 +17,13 @@ import matplotlib.colors as mcolors
 STYLE = {
     'baseline_color': '#4477AA',   # blue
     'imputed_color': '#EE6677',    # red/coral
-    'mice_color': '#228833',       # green
+    'pairwise_color': '#228833',   # green
+    'mice_color': '#228833',       # green (alias)
     'irt_color': '#CCBB44',        # yellow
     'true_color': '#222222',       # near-black
     'marker_baseline': 'o',
     'marker_imputed': 's',
+    'marker_pairwise': 'D',
     'marker_size': 4,
     'capsize': 2,
     'elinewidth': 1,
@@ -42,17 +44,21 @@ def _set_tufte_style(ax):
     ax.spines['bottom'].set_linewidth(0.5)
 
 
-def plot_loss_comparison(losses_baseline, losses_imputed, title=None, ax=None):
-    """Plot training loss curves for baseline and imputed models."""
+def plot_loss_comparison(losses_baseline, losses_imputed, title=None, ax=None,
+                         losses_pairwise=None):
+    """Plot training loss curves for baseline, pairwise, and mixed models."""
     if ax is None:
         fig, ax = plt.subplots(figsize=STYLE['figsize_loss'])
     else:
         fig = ax.figure
 
     ax.plot(losses_baseline, color=STYLE['baseline_color'], alpha=0.8,
-            linewidth=1.2, label='Baseline (ignorable)')
+            linewidth=1.2, label='Baseline')
+    if losses_pairwise is not None:
+        ax.plot(losses_pairwise, color=STYLE['pairwise_color'], alpha=0.8,
+                linewidth=1.2, label='Pairwise')
     ax.plot(losses_imputed, color=STYLE['imputed_color'], alpha=0.8,
-            linewidth=1.2, label='Imputed (Rao-Blackwell)')
+            linewidth=1.2, label='Mixed')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Loss (neg ELBO)')
     if title:
@@ -64,7 +70,8 @@ def plot_loss_comparison(losses_baseline, losses_imputed, title=None, ax=None):
 
 
 def plot_forest_discriminations(item_keys, model_baseline, model_imputed,
-                                 title='Item Discriminations', ax=None):
+                                 title='Item Discriminations', ax=None,
+                                 model_pairwise=None):
     """Forest plot of discrimination parameters with posterior uncertainty."""
     disc_base = np.array(model_baseline.surrogate_sample['discriminations']).reshape(
         -1, len(item_keys))
@@ -72,6 +79,7 @@ def plot_forest_discriminations(item_keys, model_baseline, model_imputed,
         -1, len(item_keys))
 
     n_items = len(item_keys)
+    n_models = 3 if model_pairwise is not None else 2
     height = max(4, n_items * 0.3)
     if ax is None:
         fig, ax = plt.subplots(figsize=(STYLE['figsize_forest'][0], height))
@@ -79,18 +87,28 @@ def plot_forest_discriminations(item_keys, model_baseline, model_imputed,
         fig = ax.figure
 
     y_pos = np.arange(n_items)
-    offset = 0.15
+    offset = 0.2 if n_models == 3 else 0.15
 
     ax.errorbar(disc_base.mean(0), y_pos - offset, xerr=disc_base.std(0),
                 fmt=STYLE['marker_baseline'], capsize=STYLE['capsize'],
                 markersize=STYLE['marker_size'], elinewidth=STYLE['elinewidth'],
                 color=STYLE['baseline_color'], alpha=STYLE['alpha'],
                 label='Baseline')
+
+    if model_pairwise is not None:
+        disc_pw = np.array(model_pairwise.surrogate_sample['discriminations']).reshape(
+            -1, len(item_keys))
+        ax.errorbar(disc_pw.mean(0), y_pos, xerr=disc_pw.std(0),
+                    fmt=STYLE['marker_pairwise'], capsize=STYLE['capsize'],
+                    markersize=STYLE['marker_size'], elinewidth=STYLE['elinewidth'],
+                    color=STYLE['pairwise_color'], alpha=STYLE['alpha'],
+                    label='Pairwise')
+
     ax.errorbar(disc_imp.mean(0), y_pos + offset, xerr=disc_imp.std(0),
                 fmt=STYLE['marker_imputed'], capsize=STYLE['capsize'],
                 markersize=STYLE['marker_size'], elinewidth=STYLE['elinewidth'],
                 color=STYLE['imputed_color'], alpha=STYLE['alpha'],
-                label='Imputed')
+                label='Mixed')
 
     ax.set_yticks(y_pos)
     ax.set_yticklabels(item_keys, fontsize=max(5, 9 - n_items // 20))
@@ -130,7 +148,8 @@ def plot_ability_scatter(abilities_baseline, abilities_imputed, label='latent tr
 
 
 def plot_ability_distributions(abilities_baseline, abilities_imputed,
-                                label='latent trait', ax=None):
+                                label='latent trait', ax=None,
+                                abilities_pairwise=None):
     """Step histograms of ability distributions."""
     ab_base = np.array(abilities_baseline).flatten()
     ab_imp = np.array(abilities_imputed).flatten()
@@ -142,8 +161,12 @@ def plot_ability_distributions(abilities_baseline, abilities_imputed,
 
     ax.hist(ab_base, bins=30, histtype='step', linewidth=1.5,
             label='Baseline', color=STYLE['baseline_color'])
+    if abilities_pairwise is not None:
+        ab_pw = np.array(abilities_pairwise).flatten()
+        ax.hist(ab_pw, bins=30, histtype='step', linewidth=1.5,
+                label='Pairwise', color=STYLE['pairwise_color'])
     ax.hist(ab_imp, bins=30, histtype='step', linewidth=1.5,
-            label='Imputed', color=STYLE['imputed_color'])
+            label='Mixed', color=STYLE['imputed_color'])
     ax.set_xlabel(f'Ability ({label})')
     ax.set_ylabel('Count')
     ax.legend(frameon=False, fontsize=9)
@@ -152,7 +175,8 @@ def plot_ability_distributions(abilities_baseline, abilities_imputed,
     return fig
 
 
-def plot_thresholds(item_keys, model_baseline, model_imputed, title=None):
+def plot_thresholds(item_keys, model_baseline, model_imputed, title=None,
+                    model_pairwise=None):
     """Panel plot of difficulty thresholds per level."""
     def _compute_thresholds(model):
         diff0 = np.array(model.surrogate_sample['difficulties0'])
@@ -170,6 +194,7 @@ def plot_thresholds(item_keys, model_baseline, model_imputed, title=None):
     thresh_imp = _compute_thresholds(model_imputed)
 
     n_items = len(item_keys)
+    n_models = 3 if model_pairwise is not None else 2
     K_minus_1 = thresh_base.shape[-1]
     n_cols = min(4, K_minus_1)
     n_rows = int(np.ceil(K_minus_1 / n_cols))
@@ -178,21 +203,33 @@ def plot_thresholds(item_keys, model_baseline, model_imputed, title=None):
     fig, axes = plt.subplots(n_rows, n_cols,
         figsize=(4.5 * n_cols, row_height * n_rows), squeeze=False)
 
+    offset = 0.2 if n_models == 3 else 0.15
+
+    if model_pairwise is not None:
+        thresh_pw = _compute_thresholds(model_pairwise)
+
     for level in range(K_minus_1):
         ax = axes[level // n_cols, level % n_cols]
         y_pos = np.arange(n_items)
-        offset = 0.15
 
         ax.errorbar(thresh_base[:, :, level].mean(0), y_pos - offset,
                      xerr=thresh_base[:, :, level].std(0),
                      fmt=STYLE['marker_baseline'], capsize=2, markersize=3,
                      elinewidth=0.8, color=STYLE['baseline_color'],
                      alpha=STYLE['alpha'], label='Baseline')
+
+        if model_pairwise is not None:
+            ax.errorbar(thresh_pw[:, :, level].mean(0), y_pos,
+                         xerr=thresh_pw[:, :, level].std(0),
+                         fmt=STYLE['marker_pairwise'], capsize=2, markersize=3,
+                         elinewidth=0.8, color=STYLE['pairwise_color'],
+                         alpha=STYLE['alpha'], label='Pairwise')
+
         ax.errorbar(thresh_imp[:, :, level].mean(0), y_pos + offset,
                      xerr=thresh_imp[:, :, level].std(0),
                      fmt=STYLE['marker_imputed'], capsize=2, markersize=3,
                      elinewidth=0.8, color=STYLE['imputed_color'],
-                     alpha=STYLE['alpha'], label='Imputed')
+                     alpha=STYLE['alpha'], label='Mixed')
 
         ax.set_yticks(y_pos)
         ax.set_yticklabels(item_keys, fontsize=max(4, 8 - n_items // 20))
@@ -212,7 +249,7 @@ def plot_thresholds(item_keys, model_baseline, model_imputed, title=None):
 
 
 def plot_individual_abilities(item_keys, model_baseline, model_imputed,
-                               n_show=100, seed=42):
+                               n_show=100, seed=42, model_pairwise=None):
     """Forest plot of abilities for a random subset of individuals."""
     ab_base = np.array(model_baseline.surrogate_sample['abilities']).reshape(
         model_baseline.surrogate_sample['abilities'].shape[0], -1)
@@ -230,18 +267,31 @@ def plot_individual_abilities(item_keys, model_baseline, model_imputed,
     mean_b, std_b = mean_b[order], std_b[order]
     mean_i, std_i = mean_i[order], std_i[order]
 
+    n_models = 3 if model_pairwise is not None else 2
+    offset = 0.2 if n_models == 3 else 0.15
+
     fig, ax = plt.subplots(figsize=(6, min(25, n_show * 0.22)))
     y_pos = np.arange(len(idx))
-    offset = 0.15
 
     ax.errorbar(mean_b, y_pos - offset, xerr=std_b,
                 fmt=STYLE['marker_baseline'], capsize=1, markersize=2,
                 elinewidth=0.7, color=STYLE['baseline_color'],
                 alpha=STYLE['alpha'], label='Baseline')
+
+    if model_pairwise is not None:
+        ab_pw = np.array(model_pairwise.surrogate_sample['abilities']).reshape(
+            model_pairwise.surrogate_sample['abilities'].shape[0], -1)
+        mean_p, std_p = ab_pw[:, idx].mean(0), ab_pw[:, idx].std(0)
+        mean_p, std_p = mean_p[order], std_p[order]
+        ax.errorbar(mean_p, y_pos, xerr=std_p,
+                    fmt=STYLE['marker_pairwise'], capsize=1, markersize=2,
+                    elinewidth=0.7, color=STYLE['pairwise_color'],
+                    alpha=STYLE['alpha'], label='Pairwise')
+
     ax.errorbar(mean_i, y_pos + offset, xerr=std_i,
                 fmt=STYLE['marker_imputed'], capsize=1, markersize=2,
                 elinewidth=0.7, color=STYLE['imputed_color'],
-                alpha=STYLE['alpha'], label='Imputed')
+                alpha=STYLE['alpha'], label='Mixed')
 
     ax.set_yticks(y_pos[::5])
     ax.set_yticklabels([f'{i}' for i in idx[order][::5]], fontsize=5)
@@ -262,7 +312,7 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
     weight decomposition across all contributing models:
       - I univariate MICE predictor columns (diagonal cell = 0, item
         cannot predict itself)
-      - 1 zero-predictor (intercept-only) MICE model column
+      - 1 marginal (intercept-only) MICE model column
       - 1 IRT model column
     Each row sums to 1.
 
@@ -278,7 +328,7 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
 
     # Build weight matrix: (n_items, n_items + 2)
     # Columns 0..n_items-1 = univariate MICE predictors (diagonal = 0)
-    # Column n_items = zero-predictor (intercept-only)
+    # Column n_items = marginal (intercept-only)
     # Column n_items+1 = IRT weight
     weight_matrix = np.zeros((n_items, n_items + 2))
 
@@ -289,9 +339,9 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
         w_irt = 1.0 - w_mice
 
         # Collect ELPDs for all MICE sub-models predicting this target
-        # Zero-predictor
-        if target_idx in mice_model.zero_predictor_results:
-            zp = mice_model.zero_predictor_results[target_idx]
+        # Marginal
+        if target_idx in mice_model.marginal_results:
+            zp = mice_model.marginal_results[target_idx]
             zero_elpd = zp.elpd_loo_per_obs if zp.converged else -np.inf
         else:
             zero_elpd = -np.inf
@@ -307,7 +357,7 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
                 if result.converged:
                     predictor_elpds[j] = result.elpd_loo_per_obs
 
-        # Softmax stacking weights over zero-predictor + univariate models
+        # Softmax stacking weights over marginal + univariate models
         pred_indices = list(predictor_elpds.keys())
         elpd_vals = np.array([predictor_elpds[j] for j in pred_indices])
         all_elpds = np.concatenate([[zero_elpd], elpd_vals])
@@ -320,7 +370,7 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
         for k, j in enumerate(pred_indices):
             weight_matrix[i, j] = w_mice * softmax_w[k + 1]
 
-        # Zero-predictor column
+        # Marginal column
         weight_matrix[i, n_items] = w_mice * softmax_w[0]
 
         # IRT column
@@ -346,7 +396,7 @@ def plot_imputation_weights_pcolormesh(mice_model, mixed_model, item_keys,
 
     # Mark diagonal cells (item cannot predict itself)
     for i in range(n_items):
-        ax.text(i + 0.5, i + 0.5, '×', ha='center', va='center',
+        ax.text(i + 0.5, i + 0.5, '\u00d7', ha='center', va='center',
                 fontsize=max(6, 10 - n_items // 15), color='red',
                 fontweight='bold')
 

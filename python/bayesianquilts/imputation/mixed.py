@@ -66,7 +66,7 @@ class IrtMixedImputationModel:
         # Mirror the attributes that IRTModel.validate_imputation_model checks
         self.variable_names: List[str] = list(mice_model.variable_names)
         self.variable_types: Dict[int, str] = dict(mice_model.variable_types)
-        self.zero_predictor_results = mice_model.zero_predictor_results
+        self.marginal_results = mice_model.marginal_results
         self.univariate_results = mice_model.univariate_results
 
         # Compute per-item ELPDs from both models
@@ -717,4 +717,49 @@ class IrtMixedImputationModel:
             ei = self._irt_elpd_per_item.get(k, float('nan'))
             kh = self._irt_khat_per_item.get(k, float('nan'))
             lines.append(f"{k:<12} {w:>8.3f} {em:>10.4f} {ei:>10.4f} {kh:>9.3f}")
+        return "\n".join(lines)
+
+
+class PairwiseOnlyImputationModel:
+    """Wraps a MICEBayesianLOO as a pairwise-only imputation model (w=1 for all items).
+
+    Use this when you want a GRModel that uses *only* the pairwise stacking
+    ensemble for imputation, without blending in the IRT baseline model.
+    This corresponds to the "Pairwise" column in Table 2 of the paper.
+
+    Parameters
+    ----------
+    mice_model : MICEBayesianLOO
+        A fitted MICE imputation model.
+    """
+
+    def __init__(self, mice_model):
+        self.mice_model = mice_model
+        self.pairwise_model = mice_model
+        self.variable_names: List[str] = list(mice_model.variable_names)
+        self.variable_types: Dict[int, str] = dict(mice_model.variable_types)
+        self.marginal_results = mice_model.marginal_results
+        self.univariate_results = mice_model.univariate_results
+
+    def predict_pmf(
+        self, items, target, n_categories=None, **kwargs
+    ) -> np.ndarray:
+        return self.mice_model.predict_pmf(
+            items, target, n_categories=n_categories
+        )
+
+    def predict_mice_pmf(
+        self, items, target, n_categories=None, **kwargs
+    ) -> np.ndarray:
+        return self.mice_model.predict_pmf(
+            items, target, n_categories=n_categories
+        )
+
+    def get_item_weight(self, target: str) -> float:
+        return 1.0
+
+    def summary(self) -> str:
+        lines = ["Pairwise-Only Imputation (w_mice = 1.0 for all items):"]
+        lines.append(f"  Variables: {len(self.variable_names)}")
+        lines.append(f"  Univariate models: {len(self.univariate_results)}")
         return "\n".join(lines)

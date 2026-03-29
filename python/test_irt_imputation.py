@@ -45,7 +45,7 @@ class MockImputationModel:
                  converged_items=None, khat_overrides=None):
         self.variable_names = variable_names if fitted else []
         self.variable_types = variable_types or {}
-        self.zero_predictor_results = {}
+        self.marginal_results = {}
         self.univariate_results = {}
         self.prediction_graph = {}
         self.n_obs_total = 100
@@ -54,14 +54,14 @@ class MockImputationModel:
             for i, name in enumerate(variable_names):
                 if converged_items is not None and name not in converged_items:
                     # Create non-converged result
-                    self.zero_predictor_results[i] = MockUnivariateResult(
+                    self.marginal_results[i] = MockUnivariateResult(
                         target_idx=i, converged=False
                     )
                 else:
                     khat = 0.3
                     if khat_overrides and name in khat_overrides:
                         khat = khat_overrides[name]
-                    self.zero_predictor_results[i] = MockUnivariateResult(
+                    self.marginal_results[i] = MockUnivariateResult(
                         target_idx=i, converged=True, khat_max=khat
                     )
 

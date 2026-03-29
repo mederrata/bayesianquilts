@@ -102,14 +102,14 @@ def _make_fit_config(model: "PairwiseOrdinalStackingModel") -> _FitConfig:
 # Module-level worker functions (no reference to self)
 # ---------------------------------------------------------------------------
 
-def _worker_fit_zero_predictor(
+def _worker_fit_marginal(
     data: np.ndarray,
     target_idx: int,
     cfg: _FitConfig,
     seed: int,
     sample_weights: Optional[np.ndarray] = None,
 ) -> UnivariateModelResult:
-    """Fit a zero-predictor (intercept-only) regression model."""
+    """Fit a marginal (intercept-only) regression model."""
     mask = ~np.isnan(data[:, target_idx])
     y = data[mask, target_idx]
     n_obs = len(y)
@@ -184,7 +184,7 @@ def _worker_fit_zero_predictor(
             predictor_idx=None, target_idx=target_idx, converged=False,
         )
 
-    elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
+    elpd_loo, elpd_se, khat_max, khat_mean, loo_vals = compute_loo_elpd(model, data_dict, params)
 
     if khat_max > 0.7:
         return UnivariateModelResult(
@@ -210,6 +210,7 @@ def _worker_fit_zero_predictor(
         predictor_idx=None, target_idx=target_idx, converged=converged,
         params=None, beta_mean=beta_mean,
         intercept_mean=intercept_mean, cutpoints_mean=cutpoints_mean,
+        loo_values=loo_vals,
     )
 
 
@@ -323,7 +324,7 @@ def _worker_fit_univariate(
             predictor_mean=X_mean, predictor_std=X_std,
         )
 
-    elpd_loo, elpd_se, khat_max, khat_mean = compute_loo_elpd(model, data_dict, params)
+    elpd_loo, elpd_se, khat_max, khat_mean, loo_vals = compute_loo_elpd(model, data_dict, params)
 
     if khat_max > 0.7:
         return UnivariateModelResult(
@@ -351,7 +352,7 @@ def _worker_fit_univariate(
         converged=converged, params=None,
         predictor_mean=X_mean, predictor_std=X_std,
         beta_mean=beta_mean, intercept_mean=intercept_mean,
-        cutpoints_mean=cutpoints_mean,
+        cutpoints_mean=cutpoints_mean, loo_values=loo_vals,
     )
 
 
@@ -375,6 +376,7 @@ class DirichletMultinomialResult:
     alpha_posterior: Optional[np.ndarray] = None  # (K_pred, K_target)
     predictor_categories: Optional[np.ndarray] = None
     target_categories: Optional[np.ndarray] = None
+    loo_values: Optional[np.ndarray] = None  # per-observation LOO log-predictive densities
 
 
 class DirichletMultinomialContingency:
@@ -515,6 +517,7 @@ class DirichletMultinomialContingency:
             alpha_posterior=alpha_post,
             predictor_categories=predictor_categories,
             target_categories=target_categories,
+            loo_values=loos.astype(np.float32),
         )
 
     def predict_pmf(
@@ -579,7 +582,7 @@ class PairwiseOrdinalStackingModel:
        logistic) with horseshoe priors for automatic variable selection.
     2. Fits Dirichlet-multinomial contingency table models for pairs where
        both variables are ordinal or categorical.
-    3. Retains zero-predictor (intercept-only) models as a baseline for
+    3. Retains marginal (intercept-only) models as a baseline for
        both regression and DM model families.
     4. Computes stacking weights via LOO-ELPD.
 
@@ -635,7 +638,7 @@ class PairwiseOrdinalStackingModel:
         self.n_global_classes: int = 0
 
         # Regression results
-        self.zero_predictor_results: Dict[int, UnivariateModelResult] = {}
+        self.marginal_results: Dict[int, UnivariateModelResult] = {}
         self.univariate_results: Dict[Tuple[int, int], UnivariateModelResult] = {}
 
         # Dirichlet-multinomial results
@@ -721,7 +724,7 @@ class PairwiseOrdinalStackingModel:
     def _regression_zero_predict(
         self, zr: UnivariateModelResult, var_type: str,
     ) -> float:
-        """Predict from a zero-predictor regression model."""
+        """Predict from a marginal regression model."""
         intercept = (
             zr.intercept_mean
             if zr.intercept_mean is not None
@@ -865,15 +868,30 @@ class PairwiseOrdinalStackingModel:
         cfg = _make_fit_config(self)
 
         # ----------------------------------------------------------
-        # Phase 1: Fit zero-predictor regression models
+        # Resume support: load previously saved results
+        # ----------------------------------------------------------
+        if save_dir is not None:
+            save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            n_loaded = self._load_incremental(save_dir)
+            if n_loaded > 0 and self.verbose:
+                print(f"  Resumed {n_loaded} previously fitted models from {save_dir}")
+
+        # ----------------------------------------------------------
+        # Phase 1: Fit marginal regression models
         # ----------------------------------------------------------
         if self.verbose:
-            print("\nFitting zero-predictor regression models...")
+            print("\nFitting marginal regression models...")
+
+        # Skip already-fitted marginal models
+        zp_todo = [i for i in range(n_variables) if i not in self.marginal_results]
+        if zp_todo and self.verbose:
+            print(f"  {len(zp_todo)} of {n_variables} remaining")
 
         try:
             results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
-                delayed(_worker_fit_zero_predictor)(data, i, cfg, seed + i, sample_weights)
-                for i in range(n_variables)
+                delayed(_worker_fit_marginal)(data, i, cfg, seed + i, sample_weights)
+                for i in zp_todo
             )
         except Exception as e:
             if n_jobs != 1:
@@ -881,17 +899,20 @@ class PairwiseOrdinalStackingModel:
                     print(f"  Parallel fitting failed ({e}), falling back to sequential")
                 n_jobs = 1
                 results_gen = (
-                    _worker_fit_zero_predictor(data, i, cfg, seed + i, sample_weights)
-                    for i in range(n_variables)
+                    _worker_fit_marginal(data, i, cfg, seed + i, sample_weights)
+                    for i in zp_todo
                 )
 
         if not self.verbose:
-            results_gen = tqdm(results_gen, total=n_variables, desc="Zero-Predictor Regression")
+            results_gen = tqdm(results_gen, total=len(zp_todo), desc="Marginal Regression")
 
-        for i, result in enumerate(results_gen):
-            self.zero_predictor_results[i] = result
+        for i, result in zip(zp_todo, results_gen):
+            self.marginal_results[i] = result
             if self.verbose and result.converged:
                 print(f"  Var {i} ({self.variable_names[i]}): elpd/n={result.elpd_loo_per_obs:.4f}")
+
+        if save_dir is not None:
+            self._save_incremental(save_dir)
 
         # ----------------------------------------------------------
         # Phase 2: Fit one-predictor regression models
@@ -916,6 +937,8 @@ class PairwiseOrdinalStackingModel:
 
             valid_predictors = []
             for j in top_features:
+                if (i, j) in self.univariate_results:
+                    continue  # already fitted (resumed)
                 mask = self._get_overlapping_mask(data, i, j)
                 if np.sum(mask) >= self.min_obs:
                     valid_predictors.append(j)
@@ -924,7 +947,7 @@ class PairwiseOrdinalStackingModel:
                 continue
 
             if self.verbose:
-                print(f"  Processing {target_name} ({len(valid_predictors)} predictors)")
+                print(f"  Processing {target_name} ({len(valid_predictors)} predictors to fit)")
 
             try:
                 results_gen = Parallel(n_jobs=n_jobs, return_as="generator")(
@@ -956,6 +979,9 @@ class PairwiseOrdinalStackingModel:
             for j, result in zip(valid_predictors, results_gen):
                 self.univariate_results[(i, j)] = result
 
+        if save_dir is not None:
+            self._save_incremental(save_dir)
+
         # ----------------------------------------------------------
         # Phase 3: Fit Dirichlet-multinomial models
         # ----------------------------------------------------------
@@ -976,7 +1002,7 @@ class PairwiseOrdinalStackingModel:
             obs = data[~np.isnan(data[:, i]), i]
             var_categories[i] = np.sort(np.unique(obs))
 
-        # Zero-predictor DM models (marginal)
+        # Marginal DM models (marginal)
         for i in categorical_indices:
             obs_mask = ~np.isnan(data[:, i])
             y_obs = data[obs_mask, i]
@@ -994,7 +1020,7 @@ class PairwiseOrdinalStackingModel:
             )
             self.dm_zero_results[i] = result
             if self.verbose and result.converged:
-                print(f"  Zero-predictor DM var {i} ({self.variable_names[i]}): elpd/n={result.elpd_loo_per_obs:.4f}")
+                print(f"  Marginal DM var {i} ({self.variable_names[i]}): elpd/n={result.elpd_loo_per_obs:.4f}")
 
         # Pairwise DM models
         n_dm_fitted = 0
@@ -1003,6 +1029,9 @@ class PairwiseOrdinalStackingModel:
             for j in categorical_indices:
                 if i == j:
                     continue
+                if (i, j) in self.dm_results:
+                    n_dm_fitted += 1
+                    continue  # already fitted (resumed)
                 pred_cats = var_categories[j]
                 mask = ~np.isnan(data[:, i]) & ~np.isnan(data[:, j])
                 n_overlap = int(np.sum(mask))
@@ -1026,18 +1055,69 @@ class PairwiseOrdinalStackingModel:
                         f"elpd/n={result.elpd_loo_per_obs:.4f}, n={result.n_obs}"
                     )
 
+        if save_dir is not None:
+            self._save_incremental(save_dir)
+
         if self.verbose:
-            n_reg_zero = sum(1 for r in self.zero_predictor_results.values() if r.converged)
+            n_reg_zero = sum(1 for r in self.marginal_results.values() if r.converged)
             n_reg_uni = sum(1 for r in self.univariate_results.values() if r.converged)
             n_dm_conv = sum(1 for r in self.dm_results.values() if r.converged)
             n_dm_zero = sum(1 for r in self.dm_zero_results.values() if r.converged)
             print(f"\nCompleted:")
-            print(f"  Regression zero-predictor: {n_reg_zero}/{len(self.zero_predictor_results)}")
+            print(f"  Regression marginal: {n_reg_zero}/{len(self.marginal_results)}")
             print(f"  Regression univariate: {n_reg_uni}/{len(self.univariate_results)}")
-            print(f"  DM zero-predictor: {n_dm_zero}/{len(self.dm_zero_results)}")
+            print(f"  DM marginal: {n_dm_zero}/{len(self.dm_zero_results)}")
             print(f"  DM pairwise: {n_dm_conv}/{n_dm_fitted}")
 
         return self
+
+    def _save_incremental(self, save_dir: Path):
+        """Save current fitted model results to disk for resume support.
+
+        Uses pickle for dataclass serialization of internal model results.
+        These files are only read back by _load_incremental in the same
+        process/codebase — not for untrusted data exchange.
+        """
+        import pickle
+        state = {
+            'marginal_results': self.marginal_results,
+            'univariate_results': self.univariate_results,
+            'dm_zero_results': self.dm_zero_results,
+            'dm_results': self.dm_results,
+            'variable_names': self.variable_names,
+            'variable_types': self.variable_types,
+            'n_obs_total': self.n_obs_total,
+        }
+        with open(save_dir / '_incremental.pkl', 'wb') as f:
+            pickle.dump(state, f, protocol=4)
+
+    def _load_incremental(self, save_dir: Path) -> int:
+        """Load previously saved results for resume. Returns count loaded."""
+        import pickle
+        pkl_path = save_dir / '_incremental.pkl'
+        if not pkl_path.exists():
+            return 0
+        try:
+            with open(pkl_path, 'rb') as f:
+                state = pickle.load(f)  # noqa: S301 - trusted local checkpoint
+            n = 0
+            for key in ('marginal_results', 'univariate_results',
+                        'dm_zero_results', 'dm_results'):
+                loaded = state.get(key, {})
+                existing = getattr(self, key)
+                for k, v in loaded.items():
+                    if k not in existing:
+                        existing[k] = v
+                        n += 1
+            if 'variable_names' in state and not self.variable_names:
+                self.variable_names = state['variable_names']
+            if 'variable_types' in state and not self.variable_types:
+                self.variable_types = state['variable_types']
+            if 'n_obs_total' in state:
+                self.n_obs_total = state['n_obs_total']
+            return n
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------
     # predict()
@@ -1053,8 +1133,8 @@ class PairwiseOrdinalStackingModel:
         """Predict a target variable using stacked regression + DM models.
 
         Collects predictions from:
-          - Zero-predictor regression model (intercept-only)
-          - Zero-predictor DM model (marginal)
+          - Marginal regression model (intercept-only)
+          - Marginal DM model (marginal)
           - Univariate regression models for each available predictor
           - DM contingency models for each available categorical predictor
 
@@ -1078,14 +1158,14 @@ class PairwiseOrdinalStackingModel:
         # Collect (name, elpd_per_obs, se_per_obs, prediction)
         models_info: List[Tuple[str, float, float, float]] = []
 
-        # 1. Zero-predictor regression model
-        if target_idx in self.zero_predictor_results:
-            zr = self.zero_predictor_results[target_idx]
+        # 1. Marginal regression model
+        if target_idx in self.marginal_results:
+            zr = self.marginal_results[target_idx]
             if zr.converged:
                 pred = self._regression_zero_predict(zr, var_type)
                 models_info.append(("reg:intercept", zr.elpd_loo_per_obs, zr.elpd_loo_per_obs_se, pred))
 
-        # 2. Zero-predictor DM model (marginal)
+        # 2. Marginal DM model (marginal)
         if target_idx in self.dm_zero_results:
             dmz = self.dm_zero_results[target_idx]
             if dmz.converged:
@@ -1117,7 +1197,9 @@ class PairwiseOrdinalStackingModel:
         if not models_info:
             raise ValueError(f"No converged models available for target '{target}'")
 
-        stacked_pred, weights = self._compute_stacking_weights(models_info, uncertainty_penalty)
+        stacked_pred, weights = self._compute_stacking_weights(
+            models_info, uncertainty_penalty, target_idx=target_idx
+        )
 
         if return_details:
             return {
@@ -1174,15 +1256,15 @@ class PairwiseOrdinalStackingModel:
         # Collect (name, elpd_per_obs, se_per_obs, pmf)
         models_info: List[Tuple[str, float, float, np.ndarray]] = []
 
-        # Zero-predictor regression
-        if target_idx in self.zero_predictor_results:
-            zr = self.zero_predictor_results[target_idx]
+        # Marginal regression
+        if target_idx in self.marginal_results:
+            zr = self.marginal_results[target_idx]
             if zr.converged:
                 intercept = zr.intercept_mean if zr.intercept_mean is not None else 0.0
                 pmf = self._ordinal_pmf_from_regression(zr, intercept, n_categories)
                 models_info.append(("reg:intercept", zr.elpd_loo_per_obs, zr.elpd_loo_per_obs_se, pmf))
 
-        # Zero-predictor DM
+        # Marginal DM
         if target_idx in self.dm_zero_results:
             dmz = self.dm_zero_results[target_idx]
             if dmz.converged:
@@ -1222,9 +1304,12 @@ class PairwiseOrdinalStackingModel:
         if not models_info:
             return np.ones(n_categories) / n_categories
 
-        elpd_values = np.array([m[1] for m in models_info])
-        se_values = np.array([m[2] for m in models_info])
-        weights = self._elpd_weights(elpd_values, se_values, uncertainty_penalty)
+        # Reuse _compute_stacking_weights for consistent weight selection
+        # (uses optimal weights when available, falls back to ELPD softmax)
+        _, weights = self._compute_stacking_weights(
+            [(m[0], m[1], m[2], 0.0) for m in models_info],  # dummy predictions
+            uncertainty_penalty, target_idx=target_idx,
+        )
 
         pmf_stack = np.stack([m[3] for m in models_info], axis=0)
         stacked_pmf = weights @ pmf_stack
@@ -1240,6 +1325,147 @@ class PairwiseOrdinalStackingModel:
     # Diagnostics
     # ------------------------------------------------------------------
 
+    def compute_optimal_stacking_weights(self):
+        """Compute optimal stacking weights by maximizing LOO-ELPD.
+
+        For each target variable, solves the convex optimization:
+
+            max_w  sum_i log( sum_m w_m * exp(loo_m[i]) )
+            s.t.   w_m >= 0, sum_m w_m = 1
+
+        where loo_m[i] is the per-observation LOO log-predictive density
+        from model m for observation i (Yao et al. 2018).
+
+        Requires per-observation LOO values stored during fitting
+        (loo_values field on UnivariateModelResult / DirichletMultinomialResult).
+
+        Stores the result in ``self._optimal_weights``, a dict mapping
+        target_idx -> dict of {model_key: weight}.
+        """
+        from scipy.optimize import minimize
+
+        self._optimal_weights = {}
+
+        for target_idx in range(len(self.variable_names)):
+            # Collect all models for this target with per-obs LOO values
+            model_keys = []
+            loo_arrays = []
+
+            # Marginal regression
+            if target_idx in self.marginal_results:
+                zr = self.marginal_results[target_idx]
+                if zr.converged and zr.loo_values is not None:
+                    model_keys.append(("reg", "intercept"))
+                    loo_arrays.append(zr.loo_values)
+
+            # Univariate regression models
+            for (t, p), r in self.univariate_results.items():
+                if t == target_idx and r.converged and r.loo_values is not None:
+                    model_keys.append(("reg", p))
+                    loo_arrays.append(r.loo_values)
+
+            # DM marginal
+            if target_idx in self.dm_zero_results:
+                dmz = self.dm_zero_results[target_idx]
+                if dmz.converged and dmz.loo_values is not None:
+                    model_keys.append(("dm", "marginal"))
+                    loo_arrays.append(dmz.loo_values)
+
+            # DM pairwise
+            for (t, p), r in self.dm_results.items():
+                if t == target_idx and r.converged and r.loo_values is not None:
+                    model_keys.append(("dm", p))
+                    loo_arrays.append(r.loo_values)
+
+            if len(loo_arrays) < 2:
+                # Fewer than 2 models: uniform weight
+                if model_keys:
+                    self._optimal_weights[target_idx] = {
+                        model_keys[0]: 1.0
+                    }
+                continue
+
+            # All LOO arrays must be the same length (same observation set)
+            # Models may have different observation subsets due to missingness.
+            # Use the minimum length and truncate.
+            min_len = min(len(a) for a in loo_arrays)
+            lpd_matrix = np.stack(
+                [a[:min_len].astype(np.float32) for a in loo_arrays], axis=0
+            )  # (M, N) in float32
+
+            M, N = lpd_matrix.shape
+
+            # Solve: max_w sum_i log( sum_m w_m * exp(lpd[m,i]) )
+            # Equivalent to: min_w -sum_i log( sum_m w_m * exp(lpd[m,i]) )
+            def neg_loo_elpd(log_w):
+                # Use log-space weights for unconstrained optimization,
+                # then softmax to enforce simplex constraint
+                w = np.exp(log_w - np.max(log_w))
+                w = w / w.sum()
+                # log sum_m w_m * exp(lpd[m,i]) via log-sum-exp
+                # = log sum_m exp(log(w_m) + lpd[m,i])
+                log_w_safe = np.log(np.maximum(w, 1e-30))
+                terms = log_w_safe[:, None] + lpd_matrix  # (M, N)
+                max_terms = np.max(terms, axis=0)  # (N,)
+                lse = max_terms + np.log(np.sum(np.exp(terms - max_terms[None, :]), axis=0))
+                return -np.sum(lse)
+
+            # Initialize at uniform
+            log_w0 = np.zeros(M, dtype=np.float32)
+            result = minimize(neg_loo_elpd, log_w0, method='L-BFGS-B')
+
+            # Convert to simplex weights
+            w_opt = np.exp(result.x - np.max(result.x))
+            w_opt = w_opt / w_opt.sum()
+
+            self._optimal_weights[target_idx] = {
+                k: float(w_opt[j]) for j, k in enumerate(model_keys)
+            }
+
+        if self.verbose:
+            n_targets = len(self._optimal_weights)
+            print(f"Optimal stacking weights computed for {n_targets} targets")
+
+    def get_all_predictors_loo(
+        self,
+        metric: str = "elpd_loo",
+        k: Optional[int] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Get LOO values for all predictors for all targets.
+
+        Args:
+            metric: ``"elpd_loo"`` or ``"elpd_loo_per_obs"``.
+            k: If provided, return only the top k predictors per target.
+
+        Returns:
+            Dict mapping target_name -> {predictor_name: metric_value},
+            sorted descending by metric value.
+        """
+        summary: Dict[str, Dict[str, float]] = {}
+        for name in self.variable_names:
+            summary[name] = {}
+
+        for (t_idx, p_idx), result in self.univariate_results.items():
+            target_name = self.variable_names[t_idx] if t_idx < len(self.variable_names) else f"Var_{t_idx}"
+            predictor_name = self.variable_names[p_idx] if p_idx < len(self.variable_names) else f"Var_{p_idx}"
+
+            if metric == "elpd_loo":
+                val = result.elpd_loo
+            elif metric == "elpd_loo_per_obs":
+                val = result.elpd_loo_per_obs
+            else:
+                raise ValueError(f"Invalid metric: {metric}")
+
+            summary[target_name][predictor_name] = float(val)
+
+        for target in summary:
+            sorted_preds = dict(sorted(summary[target].items(), key=lambda x: x[1], reverse=True))
+            if k is not None:
+                sorted_preds = dict(list(sorted_preds.items())[:k])
+            summary[target] = sorted_preds
+
+        return summary
+
     def get_elpd_matrix(self) -> Dict[str, np.ndarray]:
         """Get ELPD matrices for both regression and DM models.
 
@@ -1250,7 +1476,7 @@ class PairwiseOrdinalStackingModel:
         n = len(self.variable_names)
 
         reg_matrix = np.full((n, n), np.nan)
-        for i, result in self.zero_predictor_results.items():
+        for i, result in self.marginal_results.items():
             if result.converged:
                 reg_matrix[i, i] = result.elpd_loo_per_obs
         for (ti, pi), result in self.univariate_results.items():
@@ -1269,7 +1495,7 @@ class PairwiseOrdinalStackingModel:
 
     def summary(self) -> Dict[str, Any]:
         """Get summary statistics for all model types."""
-        n_reg_zero = sum(1 for r in self.zero_predictor_results.values() if r.converged)
+        n_reg_zero = sum(1 for r in self.marginal_results.values() if r.converged)
         n_reg_uni = sum(1 for r in self.univariate_results.values() if r.converged)
         n_dm_conv = sum(1 for r in self.dm_results.values() if r.converged)
         n_dm_zero = sum(1 for r in self.dm_zero_results.values() if r.converged)
@@ -1280,7 +1506,7 @@ class PairwiseOrdinalStackingModel:
             "variable_types": self.variable_types,
             "n_obs_total": self.n_obs_total,
             "n_reg_zero_converged": n_reg_zero,
-            "n_reg_zero_total": len(self.zero_predictor_results),
+            "n_reg_zero_total": len(self.marginal_results),
             "n_reg_univariate_converged": n_reg_uni,
             "n_reg_univariate_total": len(self.univariate_results),
             "n_dm_zero_converged": n_dm_zero,
@@ -1337,14 +1563,14 @@ class PairwiseOrdinalStackingModel:
                 "global_ordinal_values": _scalar(self.global_ordinal_values),
                 "n_global_classes": self.n_global_classes,
             },
-            "zero_predictor_meta": {},
+            "marginal_meta": {},
             "univariate_meta": [],
             "dm_zero_meta": {},
             "dm_meta": [],
         }
 
-        for k, v in self.zero_predictor_results.items():
-            config["zero_predictor_meta"][int(k)] = {
+        for k, v in self.marginal_results.items():
+            config["marginal_meta"][int(k)] = {
                 "n_obs": int(v.n_obs), "elpd_loo": float(v.elpd_loo),
                 "elpd_loo_per_obs": float(v.elpd_loo_per_obs),
                 "elpd_loo_per_obs_se": float(v.elpd_loo_per_obs_se),
@@ -1399,8 +1625,8 @@ class PairwiseOrdinalStackingModel:
 
         # -- params.h5: numerical arrays --
         with h5py.File(path / "params.h5", "w") as f:
-            for k, v in self.zero_predictor_results.items():
-                grp = f.create_group(f"zero_predictor/{int(k)}")
+            for k, v in self.marginal_results.items():
+                grp = f.create_group(f"marginal/{int(k)}")
                 if v.beta_mean is not None:
                     grp.create_dataset("beta_mean", data=np.atleast_1d(np.asarray(v.beta_mean)))
                 if v.intercept_mean is not None:
@@ -1473,16 +1699,16 @@ class PairwiseOrdinalStackingModel:
 
         # Load numerical arrays
         with h5py.File(path / "params.h5", "r") as f:
-            # Regression zero-predictor
-            for k_str, meta in config.get("zero_predictor_meta", {}).items():
+            # Regression marginal
+            for k_str, meta in config.get("marginal_meta", {}).items():
                 k = int(k_str)
-                prefix = f"zero_predictor/{k}"
+                prefix = f"marginal/{k}"
                 beta_mean = np.array(f[f"{prefix}/beta_mean"]) if f"{prefix}/beta_mean" in f else None
                 if beta_mean is not None and beta_mean.ndim == 1 and beta_mean.shape[0] == 1:
                     beta_mean = float(beta_mean[0])
                 intercept_mean = float(f[f"{prefix}/intercept_mean"][0]) if f"{prefix}/intercept_mean" in f else None
                 cutpoints_mean = np.array(f[f"{prefix}/cutpoints_mean"]) if f"{prefix}/cutpoints_mean" in f else None
-                instance.zero_predictor_results[k] = UnivariateModelResult(
+                instance.marginal_results[k] = UnivariateModelResult(
                     **meta, beta_mean=beta_mean, intercept_mean=intercept_mean,
                     cutpoints_mean=cutpoints_mean,
                 )
@@ -1504,7 +1730,7 @@ class PairwiseOrdinalStackingModel:
                     cutpoints_mean=cutpoints_mean,
                 )
 
-            # DM zero-predictor
+            # DM marginal
             for k_str, meta in config.get("dm_zero_meta", {}).items():
                 k = int(k_str)
                 prefix = f"dm_zero/{k}"
@@ -1589,8 +1815,8 @@ class PairwiseOrdinalStackingModel:
                 "global_ordinal_values": to_python(self.global_ordinal_values),
                 "n_global_classes": self.n_global_classes,
             },
-            "zero_predictor_results": {
-                int(k): result_to_dict(v) for k, v in self.zero_predictor_results.items()
+            "marginal_results": {
+                int(k): result_to_dict(v) for k, v in self.marginal_results.items()
             },
             "univariate_results": [
                 {"target_idx": int(k[0]), "predictor_idx": int(k[1]), "result": result_to_dict(v)}
@@ -1647,13 +1873,13 @@ class PairwiseOrdinalStackingModel:
         instance.n_global_classes = data.get("n_global_classes", 0)
 
         # Restore regression results
-        for k_str, v in state.get("zero_predictor_results", {}).items():
+        for k_str, v in state.get("marginal_results", {}).items():
             k = int(k_str)
             if v.get("beta_mean") is not None and isinstance(v["beta_mean"], list):
                 v["beta_mean"] = np.array(v["beta_mean"])
             if v.get("cutpoints_mean") is not None and isinstance(v["cutpoints_mean"], list):
                 v["cutpoints_mean"] = np.array(v["cutpoints_mean"])
-            instance.zero_predictor_results[k] = UnivariateModelResult(**v)
+            instance.marginal_results[k] = UnivariateModelResult(**v)
 
         for item in state.get("univariate_results", []):
             key = (int(item["target_idx"]), int(item["predictor_idx"]))
@@ -1696,11 +1922,47 @@ class PairwiseOrdinalStackingModel:
         self,
         models_info: List[Tuple[str, float, float, float]],
         uncertainty_penalty: float,
+        target_idx: Optional[int] = None,
     ) -> Tuple[float, np.ndarray]:
-        elpd_values = np.array([m[1] for m in models_info])
-        se_values = np.array([m[2] for m in models_info])
         predictions = np.array([m[3] for m in models_info])
-        weights = self._elpd_weights(elpd_values, se_values, uncertainty_penalty)
+
+        # Use optimal stacking weights when available
+        if (target_idx is not None
+                and hasattr(self, '_optimal_weights')
+                and self._optimal_weights
+                and target_idx in self._optimal_weights):
+            opt = self._optimal_weights[target_idx]
+            weights = np.zeros(len(models_info))
+            for j, (name, _, _, _) in enumerate(models_info):
+                # Map name string to optimal weight key
+                parts = name.split(":", 1)
+                model_type = parts[0]
+                model_id = parts[1] if len(parts) > 1 else ""
+                if model_id in ("intercept", "marginal"):
+                    key = (model_type, model_id)
+                else:
+                    # predictor name -> predictor index
+                    if model_id in self.variable_names:
+                        key = (model_type, self.variable_names.index(model_id))
+                    else:
+                        key = (model_type, model_id)
+                weights[j] = opt.get(key, 0.0)
+            total = weights.sum()
+            if total > 0:
+                weights /= total
+            else:
+                weights = self._elpd_weights(
+                    np.array([m[1] for m in models_info]),
+                    np.array([m[2] for m in models_info]),
+                    uncertainty_penalty,
+                )
+        else:
+            weights = self._elpd_weights(
+                np.array([m[1] for m in models_info]),
+                np.array([m[2] for m in models_info]),
+                uncertainty_penalty,
+            )
+
         stacked_pred = float(np.sum(weights * predictions))
         return stacked_pred, weights
 
