@@ -184,3 +184,15 @@ notebooks/irt/synthetic/results/
 
 # Notebooks (large output cells)
 *.ipynb
+
+# Checkpoint files
+pairwise_checkpoint/
+_incremental.pkl
+*.pkl
+
+# Model outputs
+grm_baseline/
+grm_pairwise/
+grm_imputed/
+*.yaml
+!notebooks/irt/plot_helpers.py

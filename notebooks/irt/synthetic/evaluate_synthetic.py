@@ -184,7 +184,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         n_top_features=min(len(item_keys), 40),
         n_jobs=1,
         seed=42,
+        save_dir=output_dir / "pairwise_checkpoint",
     )
+    pairwise_model.compute_optimal_stacking_weights()
     pairwise_model.save(str(output_dir / "pairwise_stacking_model.yaml"))
     print(f"  Imputation model saved ({len(pairwise_model.univariate_results)} univariate models)")
 
@@ -221,16 +223,21 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     jax.clear_caches()
     gc.collect()
 
-    # 8. Fit MICE-only GRM (imputation from MICE alone, no IRT blending)
-    print(f"\n--- Fitting MICE-only GRM on all data ({num_people} people) ---")
+    # 8. Fit pairwise-only GRM (imputation from pairwise stacking, no IRT blending)
+    #    Warm-start from baseline final params (not snapshot)
+    from bayesianquilts.imputation.mixed import PairwiseOnlyImputationModel
+    pairwise_imputation = PairwiseOnlyImputationModel(mice_model=pairwise_model)
+
+    print(f"\n--- Fitting pairwise-only GRM on all data ({num_people} people) ---")
+    print(f"  Warm-starting from baseline model parameters")
     mice_only_model = fit_grm_imputed(
         synth_data, item_keys, response_cardinality, num_people,
         save_dir=output_dir / "grm_mice_only",
-        imputation_model=pairwise_model,
+        imputation_model=pairwise_imputation,
         dim=dim, batch_size=batch_size, num_epochs=epochs,
         learning_rate=grm_lr, patience=patience,
         lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
-        initial_values=snapshot_params, sample_size=sample_size,
+        initial_values=baseline_model.params, sample_size=sample_size,
         seed=seed + 1, parameterization=parameterization,
         pathfinder_init=pathfinder_init,
         qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
@@ -261,24 +268,32 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     gc.collect()
 
     # 10. Fit mixed-imputed GRM on all data
-    #     Uses weighted Rao-Blackwellization: each missing cell
-    #     contributes w_mice * log[sum_k q_mice(k) * p(Y=k|theta)]
-    #     When w_mice=0, contribution is 0 (ignorability).
-    print(f"\n--- Fitting mixed-imputed GRM on all data ({num_people} people) ---")
-    imputed_model = fit_grm_imputed(
-        synth_data, item_keys, response_cardinality, num_people,
-        save_dir=output_dir / "grm_imputed",
-        imputation_model=mixed_imputation,
-        dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=grm_lr, patience=patience,
-        lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
-        initial_values=snapshot_params, sample_size=sample_size,
-        seed=seed + 2, parameterization=parameterization,
-        pathfinder_init=pathfinder_init,
-        qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
-        compute_elpd_loo=compute_elpd_loo,
-        discrimination_prior_scale=discrimination_prior_scale,
+    #     Warm-start from pairwise model params. Skip if all w_IRT ≈ 0.
+    all_pairwise = all(
+        mixed_imputation.get_item_weight(k) >= 1.0 - 1e-6 for k in item_keys
     )
+
+    if all_pairwise:
+        print(f"\n--- All w_IRT ≈ 0 — mixed model identical to pairwise. Reusing. ---")
+        imputed_model = mice_only_model
+    else:
+        n_irt = sum(1 for k in item_keys if mixed_imputation.get_item_weight(k) < 1.0 - 1e-6)
+        print(f"\n--- Fitting mixed-imputed GRM ({n_irt}/{len(item_keys)} items with IRT contribution) ---")
+        print(f"  Warm-starting from pairwise model parameters")
+        imputed_model = fit_grm_imputed(
+            synth_data, item_keys, response_cardinality, num_people,
+            save_dir=output_dir / "grm_imputed",
+            imputation_model=mixed_imputation,
+            dim=dim, batch_size=batch_size, num_epochs=epochs,
+            learning_rate=grm_lr * 0.5, patience=patience,
+            lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
+            initial_values=mice_only_model.params, sample_size=sample_size,
+            seed=seed + 2, parameterization=parameterization,
+            pathfinder_init=pathfinder_init,
+            qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
+            compute_elpd_loo=compute_elpd_loo,
+            discrimination_prior_scale=discrimination_prior_scale,
+        )
 
     # 11. Compare ability ordering preservation (only on fully observed respondents)
     print(f"\n--- Comparing ability orderings (fully observed respondents only) ---")
@@ -445,7 +460,7 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     return results
 
 
-DATASETS = ['grit', 'rwa', 'tma', 'wpi', 'npi', 'eqsq']
+DATASETS = ['grit', 'rwa', 'tma', 'wpi', 'npi', 'eqsq', 'gcbs', 'scs']
 
 
 def main():

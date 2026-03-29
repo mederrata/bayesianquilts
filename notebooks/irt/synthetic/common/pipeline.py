@@ -33,6 +33,8 @@ DATASET_MODULES = {
     'npi': 'bayesianquilts.data.npi',
     'wpi': 'bayesianquilts.data.wpi',
     'tma': 'bayesianquilts.data.tma',
+    'gcbs': 'bayesianquilts.data.gcbs',
+    'scs': 'bayesianquilts.data.scs',
     'bouldering': 'bayesianquilts.data.bouldering',
 }
 
