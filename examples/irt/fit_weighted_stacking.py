@@ -90,9 +90,9 @@ def run(
 
     # Summary
     summary = model.summary()
-    print(f"\nRegression zero-predictor: {summary['n_reg_zero_converged']}/{summary['n_reg_zero_total']}")
+    print(f"\nRegression marginal: {summary['n_reg_zero_converged']}/{summary['n_reg_zero_total']}")
     print(f"Regression univariate: {summary['n_reg_univariate_converged']}/{summary['n_reg_univariate_total']}")
-    print(f"DM zero-predictor: {summary['n_dm_zero_converged']}/{summary['n_dm_zero_total']}")
+    print(f"DM marginal: {summary['n_dm_zero_converged']}/{summary['n_dm_zero_total']}")
     print(f"DM pairwise: {summary['n_dm_pairwise_converged']}/{summary['n_dm_pairwise_total']}")
 
     # Prediction test

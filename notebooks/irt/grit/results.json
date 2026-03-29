@@ -1,0 +1,95 @@
+{
+  "dataset": "grit",
+  "num_people": 4270,
+  "num_items": 12,
+  "response_cardinality": 5,
+  "n_observed_responses": 51057,
+  "adaptive_thresholds": {
+    "GS1": 0.001,
+    "GS2": 0.001,
+    "GS3": 0.001,
+    "GS4": 0.001,
+    "GS5": 0.001,
+    "GS6": 0.001,
+    "GS7": 0.001,
+    "GS8": 0.001,
+    "GS9": 0.001,
+    "GS10": 0.001,
+    "GS11": 0.001,
+    "GS12": 0.001
+  },
+  "ignorability": {
+    "pairwise_only": {
+      "ignored": [],
+      "imputed": [
+        "GS1",
+        "GS2",
+        "GS3",
+        "GS4",
+        "GS5",
+        "GS6",
+        "GS7",
+        "GS8",
+        "GS9",
+        "GS10",
+        "GS11",
+        "GS12"
+      ]
+    },
+    "mixed": {
+      "ignored": [],
+      "imputed": [
+        "GS1",
+        "GS2",
+        "GS3",
+        "GS4",
+        "GS5",
+        "GS6",
+        "GS7",
+        "GS8",
+        "GS9",
+        "GS10",
+        "GS11",
+        "GS12"
+      ]
+    }
+  },
+  "models": {
+    "Baseline": {
+      "elpd_loo": -73202.82749064974,
+      "elpd_loo_se": 147.66346655379138,
+      "elpd_per_person": -17.143519318653336,
+      "elpd_per_response": -1.4337471353712465,
+      "n_obs": 4270,
+      "max_khat": Infinity,
+      "mean_khat": Infinity,
+      "n_high_khat": 8,
+      "pred_rmse": 1.122590266717405,
+      "loo_rmse": 1.122635609751941
+    },
+    "Pairwise-only": {
+      "elpd_loo": -73078.3266228513,
+      "elpd_loo_se": 148.42104128096324,
+      "elpd_per_person": -17.114362206756745,
+      "elpd_per_response": -1.4313086672317468,
+      "n_obs": 4270,
+      "max_khat": Infinity,
+      "mean_khat": Infinity,
+      "n_high_khat": 7,
+      "pred_rmse": 1.1217414538565413,
+      "loo_rmse": 1.121805771038064
+    },
+    "Mixed": {
+      "elpd_loo": -72965.33910500942,
+      "elpd_loo_se": 150.05264786553371,
+      "elpd_per_person": -17.087901429744594,
+      "elpd_per_response": -1.4290956990228454,
+      "n_obs": 4270,
+      "max_khat": Infinity,
+      "mean_khat": Infinity,
+      "n_high_khat": 7,
+      "pred_rmse": 1.117261396095765,
+      "loo_rmse": 1.117315699098724
+    }
+  }
+}

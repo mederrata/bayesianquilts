@@ -303,7 +303,7 @@ class IRTModel(BayesianModel):
                 )
 
         # Check 4: convergence
-        zero_results = getattr(im, 'zero_predictor_results', {})
+        zero_results = getattr(im, 'marginal_results', {})
         for i, name in enumerate(im.variable_names):
             if name not in self.item_keys:
                 continue
