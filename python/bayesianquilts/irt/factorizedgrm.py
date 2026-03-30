@@ -532,6 +532,36 @@ class FactorizedGRModel(IRTModel):
         )
         return out
 
+    def _response_probs_grid(self, theta_grid, **item_params):
+        """Compute response probs on a theta grid for the factorized model.
+
+        For D dimensions, this uses a 1D grid (assumes dimensions are
+        independent and identically distributed a priori). Each dimension
+        gets the same theta value — valid when fitting per-dimension via
+        fit_dim (which creates a GRModel that has its own override).
+
+        For multi-dimensional marginal inference, use fit_dim to run
+        MCMC on each scale independently.
+        """
+        params = dict(item_params)
+        params = self.transform(params)
+        discriminations = params['discriminations']
+        difficulties = params['difficulties']
+
+        # theta_grid: (Q,) → (Q, 1, D, 1, 1)
+        D = self.dimensions
+        theta_col = jnp.broadcast_to(
+            theta_grid[:, None, None, None, None],
+            (len(theta_grid), 1, D, 1, 1)
+        )
+        probs = self.grm_model_prob(theta_col, discriminations, difficulties)
+        # Weight by discrimination and sum over dimensions
+        disc_weights = jnp.abs(discriminations) / jnp.sum(
+            jnp.abs(discriminations), axis=-3, keepdims=True
+        )
+        probs = jnp.sum(probs * disc_weights, axis=-3)
+        return probs.squeeze(1)  # (Q, I, K)
+
     def predictive_distribution(
         self, data, discriminations, difficulties0, ddifficulties, abilities, **kwargs
     ):

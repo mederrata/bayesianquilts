@@ -348,6 +348,25 @@ class NeuralGRModel(IRTModel):
             abilities, discriminations, difficulties, nn_params
         )
 
+    def _response_probs_grid(self, theta_grid, **item_params):
+        """Compute P(Y_i = k | theta_q, Xi) for the neural GRM."""
+        discriminations = item_params['discriminations']
+        difficulties0 = item_params['difficulties0']
+        ddifficulties = item_params.get('ddifficulties')
+        nn_params = self._extract_nn_params(item_params)
+
+        d0 = jnp.concat([difficulties0, ddifficulties + 0.1], axis=-1)
+        difficulties = jnp.cumsum(d0, axis=-1)
+
+        theta_col = theta_grid[:, None, None, None, None]  # (Q, 1, D, 1, 1)
+        probs = self.neural_grm_model_prob(
+            theta_col, discriminations, difficulties, nn_params
+        )  # (Q, 1, I, K) or (Q, I, K) after dim-weighted sum
+        # Remove any singleton person dim
+        if probs.ndim == 4 and probs.shape[1] == 1:
+            probs = probs.squeeze(1)
+        return probs  # (Q, I, K)
+
     def predictive_distribution(
         self,
         data,

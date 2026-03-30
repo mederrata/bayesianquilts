@@ -1,6 +1,7 @@
 import gzip
 import inspect
 import pathlib
+import sys
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional
 import os
@@ -961,19 +962,20 @@ class BayesianModel(nnx.Module, ABC):
             print(f"\n--- MCMC Complete ---")
             print(f"Mean acceptance ratio: {mean_accept:.3f}")
             for var in self.var_list:
-                # Calculate R-hat
-                # potential_scale_reduction expects shape [num_chains, num_samples, ...]
-                # but TFP sometimes expects [num_samples, num_chains, ...] depending on version
-                # Checking docs: TFP uses [num_samples, num_chains, ...] by default but independent_chain_ndims=1
-                # lets us pass [num_chains, num_samples, ...]. 
-                # Actually, simpler to just transpose to [num_samples, num_chains, ...]
-                samples_transposed = jnp.swapaxes(result[var], 0, 1)
-                rhat = tfmcmc.potential_scale_reduction(samples_transposed)
-                
-                # Check for NaNs in R-hat (can happen if variance is 0)
+                # R-hat: between-chain vs within-chain variance
+                chains = result[var]  # (C, S, ...)
+                n = chains.shape[1]
+                chain_means = jnp.mean(chains, axis=1)
+                between_var = jnp.var(chain_means, axis=0, ddof=1)
+                within_var = jnp.mean(
+                    jnp.var(chains, axis=1, ddof=1), axis=0)
+                rhat = jnp.sqrt(
+                    ((n - 1) / n * within_var + between_var) /
+                    jnp.maximum(within_var, 1e-30)
+                )
                 rhat = jnp.where(jnp.isnan(rhat), 1.0, rhat)
-                max_rhat = jnp.max(rhat)
-                
+                max_rhat = float(jnp.max(rhat))
+
                 samples_flat = result[var].reshape(-1, *result[var].shape[2:])
                 print(f"  {var}: mean={jnp.mean(samples_flat, axis=0)}, std={jnp.std(samples_flat, axis=0)}, max_rhat={max_rhat:.3f}")
 
@@ -1042,61 +1044,88 @@ class BayesianModel(nnx.Module, ABC):
         seed: jax.Array,
         verbose: bool = True,
     ) -> tuple:
-        """Run a single NUTS chain.
+        """Run a single NUTS chain using BlackJAX.
 
         Args:
             target_log_prob_fn: Unnormalized log probability function
-            initial_state: List of initial values for each parameter
-            num_warmup: Number of warmup steps
-            num_samples: Number of sampling steps
-            step_size: Initial step size
-            target_accept_prob: Target acceptance probability
-            max_tree_depth: Maximum tree depth
-            seed: Random key
-            verbose: Print progress
+                accepting *params_flat (positional args).
+            initial_state: List of initial values for each parameter.
+            num_warmup: Number of warmup steps.
+            num_samples: Number of sampling steps.
+            step_size: Initial step size.
+            target_accept_prob: Target acceptance probability.
+            max_tree_depth: Maximum tree depth.
+            seed: Random key.
+            verbose: Print progress.
 
         Returns:
-            Tuple of (samples_list, mean_accept_ratio)
+            Tuple of (samples_list, non_divergent_ratio).
         """
-        # Create NUTS kernel with step size adaptation
-        nuts_kernel = tfmcmc.NoUTurnSampler(
-            target_log_prob_fn=target_log_prob_fn,
-            step_size=step_size,
-            max_tree_depth=max_tree_depth,
+        import blackjax
+
+        # BlackJAX expects a dict-based log density, so wrap the
+        # positional-arg target into a dict-based one
+        var_list = self.var_list
+
+        def logdensity_fn(params_dict):
+            params_flat = [params_dict[v] for v in var_list]
+            return target_log_prob_fn(*params_flat)
+
+        init_pos = {v: s for v, s in zip(var_list, initial_state)}
+
+        if verbose:
+            print(f"  Adapting ({num_warmup} steps)...")
+            sys.stdout.flush()
+
+        warmup = blackjax.window_adaptation(
+            blackjax.nuts,
+            logdensity_fn,
+            target_acceptance_rate=target_accept_prob,
+            initial_step_size=step_size,
+        )
+        seed, warmup_key = random.split(seed)
+        (state, parameters), _ = warmup.run(
+            warmup_key, init_pos, num_steps=num_warmup
         )
 
-        # Wrap with dual averaging step size adaptation
-        # Adapt for full warmup period for better convergence (was 80%)
-        adaptive_kernel = tfmcmc.DualAveragingStepSizeAdaptation(
-            inner_kernel=nuts_kernel,
-            num_adaptation_steps=num_warmup,
-            target_accept_prob=target_accept_prob,
-        )
+        if verbose:
+            print(f"  Adapted step size: {float(parameters['step_size']):.4f}")
+            sys.stdout.flush()
 
-        # Run the chain
+        kernel = blackjax.nuts(logdensity_fn, **parameters).step
+
         @jax.jit
-        def run_chain(init_state, seed):
-            samples, kernel_results = tfmcmc.sample_chain(
-                num_results=num_samples,
-                num_burnin_steps=num_warmup,
-                current_state=init_state,
-                kernel=adaptive_kernel,
-                seed=seed,
-                trace_fn=lambda _, pkr: pkr.inner_results.is_accepted,
-            )
-            return samples, kernel_results
+        def nuts_step(state, step_key):
+            return kernel(step_key, state)
 
         if verbose:
-            print("  Running warmup and sampling...")
+            print(f"  Sampling ({num_samples} steps)...")
+            sys.stdout.flush()
 
-        samples, is_accepted = run_chain(initial_state, seed)
+        chain_positions = []
+        n_non_divergent = 0
+        for step_idx in range(num_samples):
+            seed, step_key = random.split(seed)
+            state, info = nuts_step(state, step_key)
+            chain_positions.append(state.position)
+            n_non_divergent += int(1 - info.is_divergent)
+            if verbose and (step_idx + 1) % 100 == 0:
+                ratio = n_non_divergent / (step_idx + 1)
+                lp = float(state.logdensity)
+                print(f"    step {step_idx + 1}/{num_samples} "
+                      f"non-div={ratio:.3f} lp={lp:.1f}")
+                sys.stdout.flush()
 
-        # Compute acceptance ratio
-        accept_ratio = jnp.mean(is_accepted.astype(jnp.float32))
+        accept_ratio = n_non_divergent / num_samples
 
         if verbose:
-            print(f"  Acceptance ratio: {accept_ratio:.3f}")
+            print(f"  Non-divergent ratio: {accept_ratio:.3f}")
 
+        # Stack into per-variable arrays: (num_samples, ...)
+        samples = [
+            jnp.stack([p[v] for p in chain_positions], axis=0)
+            for v in var_list
+        ]
         return samples, float(accept_ratio)
 
     def sample_mcmc(self, num_samples: int = None) -> Dict[str, jnp.ndarray]:

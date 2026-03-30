@@ -1,3 +1,4 @@
+import sys
 from typing import Any, Dict, Optional
 
 import jax
@@ -1162,4 +1163,440 @@ class IRTModel(BayesianModel):
             'ess': ess,
             'abilities_is': abilities_is,
             'samples': samples,
+        }
+
+    # ------------------------------------------------------------------
+    # Marginal inference: integrate out abilities, fit item params only
+    # ------------------------------------------------------------------
+
+    def _response_probs_grid(self, theta_grid, **item_params):
+        """Compute P(Y_i = k | theta_q, Xi) for each quadrature point.
+
+        Subclasses must override this to implement their response model.
+
+        Args:
+            theta_grid: (Q,) array of ability values.
+            **item_params: Item parameters (no abilities).
+
+        Returns:
+            (Q, I, K) array of response probabilities.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _response_probs_grid"
+        )
+
+    def _item_var_list(self):
+        """Return list of item parameter names (everything except abilities)."""
+        ability_keys = {'abilities'}
+        # FactorizedGRModel has abilities_0, abilities_1, ...
+        for v in self.var_list:
+            if v.startswith('abilities'):
+                ability_keys.add(v)
+        return [v for v in self.var_list if v not in ability_keys]
+
+    def _make_gauss_hermite_grid(self, n_points=31):
+        """Return (theta_grid, theta_log_weights) for Gauss-Hermite quadrature."""
+        nodes, weights = np.polynomial.hermite.hermgauss(n_points)
+        theta_grid = jnp.asarray(np.sqrt(2) * nodes, dtype=self.dtype)
+        theta_log_weights = jnp.asarray(
+            np.log(weights) - 0.5 * np.log(np.pi), dtype=self.dtype
+        )
+        return theta_grid, theta_log_weights
+
+    def marginal_log_prob(self, data, theta_grid=None, theta_log_weights=None,
+                          prior_weight=1.0, **item_params):
+        """Rao-Blackwellized log posterior over item parameters only.
+
+        Integrates out person abilities on a quadrature grid:
+
+            log p(Xi | data) = log p(Xi)
+                + sum_p log int P(x_p | theta, Xi) pi(theta) dtheta
+
+        Uses Gauss-Hermite quadrature by default (31 nodes).
+        Processes people via ``jax.lax.map`` to keep compilation tractable.
+
+        Args:
+            data: Data dict with item response columns and person key.
+            theta_grid: (Q,) quadrature points. Defaults to Gauss-Hermite.
+            theta_log_weights: (Q,) log quadrature weights. If None and
+                theta_grid is also None, uses Gauss-Hermite weights.
+            prior_weight: Weight on the log prior.
+            **item_params: Item parameters (no abilities).
+
+        Returns:
+            Scalar log marginal posterior.
+        """
+        if theta_grid is None:
+            theta_grid, theta_log_weights = self._make_gauss_hermite_grid()
+        elif theta_log_weights is None:
+            dtheta = theta_grid[1] - theta_grid[0]
+            theta_log_weights = (
+                -0.5 * theta_grid ** 2
+                - 0.5 * jnp.log(2 * jnp.pi)
+                + jnp.log(dtheta)
+            )
+
+        # (Q, I, K)
+        response_probs = self._response_probs_grid(theta_grid, **item_params)
+        log_rp = jnp.log(jnp.clip(response_probs, 1e-30, None))
+
+        # Observed responses (N, I)
+        choices = jnp.concat(
+            [data[k][:, jnp.newaxis] for k in self.item_keys], axis=-1
+        )
+        bad = (choices < 0) | (choices >= self.response_cardinality) | jnp.isnan(choices)
+        choices_int = jnp.where(bad, 0, choices).astype(jnp.int32)
+
+        # Imputation
+        imputation_pmfs = data.get('_imputation_pmfs')
+        imputation_weights = data.get('_imputation_weights')
+        has_imputation = imputation_pmfs is not None
+
+        if has_imputation:
+            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))
+            imp_w = (jnp.asarray(imputation_weights)
+                     if imputation_weights is not None
+                     else jnp.ones(len(self.item_keys), dtype=self.dtype))
+
+        n_items = len(self.item_keys)
+
+        def person_marginal_ll(person_idx):
+            c_p = choices_int[person_idx]
+            bad_p = bad[person_idx]
+            log_obs_p = log_rp[:, jnp.arange(n_items), c_p]  # (Q, I)
+
+            if has_imputation:
+                log_q_p = log_q[person_idx]
+                rb_p = jax.scipy.special.logsumexp(
+                    log_rp + log_q_p[None, :, :], axis=-1
+                )
+                weighted_rb_p = imp_w[None, :] * rb_p
+                log_obs_p = jnp.where(bad_p[None, :], weighted_rb_p, log_obs_p)
+            else:
+                log_obs_p = jnp.where(bad_p[None, :], 0.0, log_obs_p)
+
+            log_lik_q = jnp.sum(log_obs_p, axis=-1)
+            return jax.scipy.special.logsumexp(log_lik_q + theta_log_weights)
+
+        n_people = choices.shape[0]
+        marginal_ll_per_person = jax.lax.map(
+            person_marginal_ll, jnp.arange(n_people)
+        )
+
+        if 'sample_weights' in data:
+            sw = jnp.asarray(data['sample_weights'], dtype=marginal_ll_per_person.dtype)
+            total_marginal_ll = jnp.sum(sw * marginal_ll_per_person)
+        else:
+            total_marginal_ll = jnp.sum(marginal_ll_per_person)
+
+        # Log prior on item parameters
+        full_params = dict(item_params)
+        # Add dummy abilities so the joint prior can compute
+        for v in self.var_list:
+            if v not in full_params:
+                shape = self.joint_prior_distribution.sample(
+                    seed=jax.random.PRNGKey(0)
+                )[v].shape
+                full_params[v] = jnp.zeros(shape, dtype=self.dtype)
+        log_prior_items = self.joint_prior_distribution.log_prob(full_params)
+
+        return prior_weight * log_prior_items + total_marginal_ll
+
+    def fit_marginal_mcmc(
+        self,
+        data,
+        theta_grid=None,
+        num_chains=4,
+        num_warmup=500,
+        num_samples=500,
+        target_accept_prob=0.85,
+        step_size=0.01,
+        seed=None,
+        verbose=True,
+    ):
+        """Run NUTS on item parameters with abilities Rao-Blackwellized out.
+
+        Uses BlackJAX NUTS with window adaptation. Targets the marginal
+        posterior over item parameters by integrating out abilities on a
+        quadrature grid.
+
+        Args:
+            data: Full data dict (all people).
+            theta_grid: Quadrature grid for ability integration.
+            num_chains: Number of NUTS chains.
+            num_warmup: Warmup steps per chain.
+            num_samples: Post-warmup samples per chain.
+            target_accept_prob: NUTS target acceptance.
+            step_size: Initial step size.
+            seed: Random seed.
+            verbose: Print progress.
+
+        Returns:
+            Dict mapping item param names to posterior sample arrays of
+            shape (num_chains, num_samples, ...).
+        """
+        import blackjax
+        from jax import random
+
+        if seed is None:
+            seed = np.random.randint(0, 2**31)
+        key = random.PRNGKey(seed)
+
+        item_var_list = self._item_var_list()
+
+        if theta_grid is not None:
+            grid_desc = f"{len(theta_grid)} points (uniform)"
+        else:
+            grid_desc = "31-point Gauss-Hermite"
+
+        if verbose:
+            print(f"Marginal MCMC (Rao-Blackwellized abilities)")
+            print(f"  Item params: {item_var_list}")
+            key, tmp_key = random.split(key)
+            n_params = sum(
+                np.prod(self.joint_prior_distribution.sample(
+                    seed=tmp_key)[v].shape)
+                for v in item_var_list
+            )
+            print(f"  Total dimensions: {n_params}")
+            print(f"  Quadrature: {grid_desc}")
+            print(f"  Chains: {num_chains}, Warmup: {num_warmup}, "
+                  f"Samples: {num_samples}")
+            sys.stdout.flush()
+
+        # Target log density
+        def logdensity_fn(params_dict):
+            return self.marginal_log_prob(
+                data, theta_grid=theta_grid, **params_dict
+            )
+
+        # Initialize from ADVI solution or prior
+        key, init_key = random.split(key)
+        initial_positions = []
+        for c in range(num_chains):
+            pos = {}
+            for var in item_var_list:
+                loc_key = None
+                if self.params is not None:
+                    for pk in self.params:
+                        if pk.startswith(var) and pk.endswith('loc'):
+                            loc_key = pk
+                            break
+                if loc_key is not None:
+                    val = self.params[loc_key]
+                    pos[var] = val + 0.01 * random.normal(
+                        random.fold_in(init_key, c), val.shape)
+                else:
+                    prior_sample = self.joint_prior_distribution.sample(
+                        seed=random.fold_in(init_key, c))
+                    pos[var] = prior_sample[var]
+            initial_positions.append(pos)
+
+        if verbose and self.params is not None:
+            print("  Initializing from ADVI solution")
+            sys.stdout.flush()
+
+        # BlackJAX NUTS with window adaptation
+        all_samples = {var: [] for var in item_var_list}
+        all_accept = []
+
+        for chain_idx in range(num_chains):
+            key, chain_key = random.split(key)
+            if verbose:
+                print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
+                sys.stdout.flush()
+
+            init_pos = initial_positions[chain_idx]
+
+            # Window adaptation (warmup)
+            if verbose:
+                print(f"    Adapting ({num_warmup} steps)...")
+                sys.stdout.flush()
+
+            warmup = blackjax.window_adaptation(
+                blackjax.nuts,
+                logdensity_fn,
+                target_acceptance_rate=target_accept_prob,
+                initial_step_size=step_size,
+            )
+            chain_key, warmup_key = random.split(chain_key)
+            (state, parameters), adapt_info = warmup.run(
+                warmup_key, init_pos, num_steps=num_warmup
+            )
+
+            if verbose:
+                print(f"    Adapted step size: "
+                      f"{float(parameters['step_size']):.4f}")
+                sys.stdout.flush()
+
+            # Build sampling kernel with adapted parameters
+            kernel = blackjax.nuts(logdensity_fn, **parameters).step
+
+            @jax.jit
+            def nuts_step(state, step_key):
+                return kernel(step_key, state)
+
+            # Sampling
+            if verbose:
+                print(f"    Sampling ({num_samples} steps)...")
+                sys.stdout.flush()
+
+            chain_positions = []
+            n_accepted = 0
+            for step in range(num_samples):
+                chain_key, step_key = random.split(chain_key)
+                state, info = nuts_step(state, step_key)
+                chain_positions.append(state.position)
+                # BlackJAX NUTS: divergence indicator
+                n_accepted += int(1 - info.is_divergent)
+                if verbose and (step + 1) % 50 == 0:
+                    ar = n_accepted / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      step {step + 1}/{num_samples} "
+                          f"non-divergent={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            accept_ratio = n_accepted / num_samples
+            if verbose:
+                print(f"    Non-divergent ratio: {accept_ratio:.3f}")
+                sys.stdout.flush()
+
+            if accept_ratio > 0.5:
+                for var in item_var_list:
+                    stacked = jnp.stack(
+                        [p[var] for p in chain_positions], axis=0)
+                    all_samples[var].append(stacked)
+                all_accept.append(accept_ratio)
+            else:
+                if verbose:
+                    print(f"    Chain discarded (too many divergences)")
+
+        # Stack chains: (num_chains, num_samples, ...)
+        result = {}
+        for var in item_var_list:
+            if all_samples[var]:
+                result[var] = jnp.stack(all_samples[var], axis=0)
+
+        if verbose:
+            print(f"\n  Kept {len(all_accept)}/{num_chains} chains")
+            if all_accept:
+                print(f"  Mean non-divergent: {np.mean(all_accept):.3f}")
+            for var in item_var_list:
+                if var in result:
+                    flat = result[var].reshape(-1, *result[var].shape[2:])
+                    print(f"  {var}: mean={float(jnp.mean(flat)):.4f}, "
+                          f"std={float(jnp.std(flat)):.4f}")
+
+        self.mcmc_samples = result
+        return result
+
+    def compute_eap_abilities(self, data, item_params=None, theta_grid=None,
+                              theta_log_weights=None):
+        """Compute Expected A Posteriori (EAP) ability estimates.
+
+        Given fixed item parameters, computes the posterior mean ability
+        for each person by numerical integration on a theta grid:
+
+            E[theta | x_p, Xi] = sum_q theta_q * P(x_p | theta_q, Xi) * pi(theta_q)
+                                 / sum_q P(x_p | theta_q, Xi) * pi(theta_q)
+
+        If ``item_params`` is None, uses MCMC posterior means from
+        ``self.mcmc_samples`` (averaging over chains and samples).
+
+        Args:
+            data: Data dict with item response columns and person key.
+            item_params: Dict of item parameter arrays. If None, uses
+                posterior means from ``self.mcmc_samples``.
+            theta_grid: (Q,) quadrature points. Defaults to Gauss-Hermite.
+            theta_log_weights: (Q,) log quadrature weights.
+
+        Returns:
+            Dict with:
+                - ``eap``: (N,) posterior mean abilities
+                - ``psd``: (N,) posterior standard deviations
+                - ``posterior``: (N, Q) full posterior on grid
+        """
+        if theta_grid is None:
+            theta_grid, theta_log_weights = self._make_gauss_hermite_grid(61)
+        elif theta_log_weights is None:
+            dtheta = theta_grid[1] - theta_grid[0]
+            theta_log_weights = (
+                -0.5 * theta_grid ** 2
+                - 0.5 * jnp.log(2 * jnp.pi)
+                + jnp.log(dtheta)
+            )
+
+        if item_params is None:
+            if not hasattr(self, 'mcmc_samples') or self.mcmc_samples is None:
+                raise ValueError(
+                    "No item_params provided and no mcmc_samples available. "
+                    "Run fit_marginal_mcmc first or pass item_params."
+                )
+            item_params = {}
+            for var, samples in self.mcmc_samples.items():
+                # (chains, samples, ...) → mean over chains and samples
+                item_params[var] = jnp.mean(
+                    samples.reshape(-1, *samples.shape[2:]), axis=0
+                )
+
+        # (Q, I, K)
+        response_probs = self._response_probs_grid(theta_grid, **item_params)
+        log_rp = jnp.log(jnp.clip(response_probs, 1e-30, None))
+
+        # Observed responses
+        choices = jnp.concat(
+            [data[k][:, jnp.newaxis] for k in self.item_keys], axis=-1
+        )
+        bad = (choices < 0) | (choices >= self.response_cardinality) | jnp.isnan(choices)
+        choices_int = jnp.where(bad, 0, choices).astype(jnp.int32)
+
+        # Imputation
+        imputation_pmfs = data.get('_imputation_pmfs')
+        imputation_weights = data.get('_imputation_weights')
+        has_imputation = imputation_pmfs is not None
+
+        if has_imputation:
+            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))
+            imp_w = (jnp.asarray(imputation_weights)
+                     if imputation_weights is not None
+                     else jnp.ones(len(self.item_keys), dtype=self.dtype))
+
+        n_items = len(self.item_keys)
+
+        def person_posterior(person_idx):
+            c_p = choices_int[person_idx]
+            bad_p = bad[person_idx]
+            log_obs_p = log_rp[:, jnp.arange(n_items), c_p]
+
+            if has_imputation:
+                log_q_p = log_q[person_idx]
+                rb_p = jax.scipy.special.logsumexp(
+                    log_rp + log_q_p[None, :, :], axis=-1
+                )
+                weighted_rb_p = imp_w[None, :] * rb_p
+                log_obs_p = jnp.where(bad_p[None, :], weighted_rb_p, log_obs_p)
+            else:
+                log_obs_p = jnp.where(bad_p[None, :], 0.0, log_obs_p)
+
+            # Unnormalized log posterior on grid: (Q,)
+            log_unnorm = jnp.sum(log_obs_p, axis=-1) + theta_log_weights
+            # Normalize
+            log_norm = jax.scipy.special.logsumexp(log_unnorm)
+            log_post = log_unnorm - log_norm
+            post = jnp.exp(log_post)
+
+            eap = jnp.sum(post * theta_grid)
+            psd = jnp.sqrt(jnp.sum(post * (theta_grid - eap) ** 2))
+            return eap, psd, post
+
+        n_people = choices.shape[0]
+        eap, psd, posterior = jax.lax.map(
+            person_posterior, jnp.arange(n_people)
+        )
+
+        return {
+            'eap': eap,
+            'psd': psd,
+            'posterior': posterior,
+            'theta_grid': theta_grid,
         }
