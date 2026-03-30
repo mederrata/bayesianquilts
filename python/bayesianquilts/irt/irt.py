@@ -1386,41 +1386,42 @@ class IRTModel(BayesianModel):
         bad = (choices < 0) | (choices >= self.response_cardinality) | jnp.isnan(choices)
         choices_int = jnp.where(bad, 0, choices).astype(jnp.int32)
 
-        # Imputation
+        n_items = len(self.item_keys)
+        n_people = choices.shape[0]
+
+        # Vectorized over people: gather log P(observed | theta_q)
+        # log_rp: (Q, I, K) → (Q, 1, I, K), choices_int: (N, I) → (1, N, I, 1)
+        log_obs = jnp.take_along_axis(
+            log_rp[:, None, :, :],
+            choices_int[None, :, :, None],
+            axis=-1
+        ).squeeze(-1)  # (Q, N, I)
+
+        # Handle missing items
         imputation_pmfs = data.get('_imputation_pmfs')
         imputation_weights = data.get('_imputation_weights')
-        has_imputation = imputation_pmfs is not None
 
-        if has_imputation:
-            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))
+        if imputation_pmfs is not None:
+            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))  # (N, I, K)
             imp_w = (jnp.asarray(imputation_weights)
                      if imputation_weights is not None
-                     else jnp.ones(len(self.item_keys), dtype=self.dtype))
+                     else jnp.ones(n_items, dtype=self.dtype))
 
-        n_items = len(self.item_keys)
+            # RB: log sum_k q(k|x) * P(k|theta, Xi) for each (Q, N, I)
+            # log_rp: (Q, I, K) → (Q, 1, I, K), log_q: (N, I, K) → (1, N, I, K)
+            rb = jax.scipy.special.logsumexp(
+                log_rp[:, None, :, :] + log_q[None, :, :, :], axis=-1
+            )  # (Q, N, I)
+            weighted_rb = imp_w[None, None, :] * rb
+            log_obs = jnp.where(bad[None, :, :], weighted_rb, log_obs)
+        else:
+            log_obs = jnp.where(bad[None, :, :], 0.0, log_obs)
 
-        def person_marginal_ll(person_idx):
-            c_p = choices_int[person_idx]
-            bad_p = bad[person_idx]
-            log_obs_p = log_rp[:, jnp.arange(n_items), c_p]  # (Q, I)
-
-            if has_imputation:
-                log_q_p = log_q[person_idx]
-                rb_p = jax.scipy.special.logsumexp(
-                    log_rp + log_q_p[None, :, :], axis=-1
-                )
-                weighted_rb_p = imp_w[None, :] * rb_p
-                log_obs_p = jnp.where(bad_p[None, :], weighted_rb_p, log_obs_p)
-            else:
-                log_obs_p = jnp.where(bad_p[None, :], 0.0, log_obs_p)
-
-            log_lik_q = jnp.sum(log_obs_p, axis=-1)
-            return jax.scipy.special.logsumexp(log_lik_q + theta_log_weights)
-
-        n_people = choices.shape[0]
-        marginal_ll_per_person = jax.lax.map(
-            person_marginal_ll, jnp.arange(n_people)
-        )
+        # Sum over items → (Q, N), then logsumexp over grid → (N,)
+        log_lik_per_grid = jnp.sum(log_obs, axis=-1)  # (Q, N)
+        marginal_ll_per_person = jax.scipy.special.logsumexp(
+            log_lik_per_grid + theta_log_weights[:, None], axis=0
+        )  # (N,)
 
         if 'sample_weights' in data:
             sw = jnp.asarray(data['sample_weights'], dtype=marginal_ll_per_person.dtype)
@@ -1643,7 +1644,20 @@ class IRTModel(BayesianModel):
             print("  Initializing from ADVI solution")
             sys.stdout.flush()
 
-        # BlackJAX NUTS with window adaptation
+        from jax.flatten_util import ravel_pytree
+
+        # Flatten position dict → 1D vector for BlackJAX
+        ref_pos = initial_positions[0]
+        _, unravel_fn = ravel_pytree(ref_pos)
+
+        def logdensity_flat(x):
+            return logdensity_fn(unravel_fn(x))
+
+        n_flat = sum(np.prod(ref_pos[v].shape) for v in item_var_list)
+        if verbose:
+            print(f"  Flat parameter vector: {n_flat} elements")
+            sys.stdout.flush()
+
         all_samples = {var: [] for var in item_var_list}
         all_accept = []
 
@@ -1653,48 +1667,77 @@ class IRTModel(BayesianModel):
                 print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
                 sys.stdout.flush()
 
-            init_pos = initial_positions[chain_idx]
+            init_flat, _ = ravel_pytree(initial_positions[chain_idx])
 
-            # Window adaptation (warmup)
+            # Identity mass matrix (flat 1D)
+            inv_mass_matrix = jnp.ones(n_flat)
+
+            warmup_kernel = blackjax.nuts(
+                logdensity_flat,
+                step_size=step_size,
+                inverse_mass_matrix=inv_mass_matrix,
+            )
+            state = warmup_kernel.init(init_flat)
+
+            # Step-by-step warmup
             if verbose:
-                print(f"    Adapting ({num_warmup} steps)...")
+                print(f"    Warmup ({num_warmup} steps, step-by-step)...")
                 sys.stdout.flush()
 
-            warmup = blackjax.window_adaptation(
-                blackjax.nuts,
-                logdensity_fn,
-                target_acceptance_rate=target_accept_prob,
-                initial_step_size=step_size,
-            )
-            chain_key, warmup_key = random.split(chain_key)
-            (state, parameters), adapt_info = warmup.run(
-                warmup_key, init_pos, num_steps=num_warmup
-            )
-
-            if verbose:
-                print(f"    Adapted step size: "
-                      f"{float(parameters['step_size']):.4f}")
-                sys.stdout.flush()
-
-            # Build sampling kernel with adapted parameters
-            kernel = blackjax.nuts(logdensity_fn, **parameters).step
+            warmup_flats = []
+            n_accepted_warmup = 0
 
             @jax.jit
-            def nuts_step(state, step_key):
-                return kernel(step_key, state)
+            def warmup_step(state, step_key):
+                return warmup_kernel.step(step_key, state)
+
+            for step in range(num_warmup):
+                chain_key, step_key = random.split(chain_key)
+                state, info = warmup_step(state, step_key)
+                is_good = int(1 - info.is_divergent)
+                n_accepted_warmup += is_good
+                warmup_flats.append(state.position)
+
+                if verbose and (step + 1) % 50 == 0:
+                    ar = n_accepted_warmup / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      warmup {step + 1}/{num_warmup} "
+                          f"non-div={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            # Estimate diagonal mass matrix from warmup
+            half = max(len(warmup_flats) // 2, 1)
+            warmup_stack = jnp.stack(warmup_flats[half:])  # (M, D)
+            var_est = jnp.var(warmup_stack, axis=0)
+            inv_mass_matrix = jnp.maximum(var_est, 1e-6)
+
+            if verbose:
+                print(f"    Estimated mass matrix from "
+                      f"{len(warmup_flats) - half} warmup samples")
+                sys.stdout.flush()
+
+            # Build sampling kernel with adapted mass matrix
+            sampling_kernel = blackjax.nuts(
+                logdensity_flat,
+                step_size=step_size,
+                inverse_mass_matrix=inv_mass_matrix,
+            )
+
+            @jax.jit
+            def sample_step(state, step_key):
+                return sampling_kernel.step(step_key, state)
 
             # Sampling
             if verbose:
                 print(f"    Sampling ({num_samples} steps)...")
                 sys.stdout.flush()
 
-            chain_positions = []
+            sample_flats = []
             n_accepted = 0
             for step in range(num_samples):
                 chain_key, step_key = random.split(chain_key)
-                state, info = nuts_step(state, step_key)
-                chain_positions.append(state.position)
-                # BlackJAX NUTS: divergence indicator
+                state, info = sample_step(state, step_key)
+                sample_flats.append(state.position)
                 n_accepted += int(1 - info.is_divergent)
                 if verbose and (step + 1) % 50 == 0:
                     ar = n_accepted / (step + 1)
@@ -1709,9 +1752,11 @@ class IRTModel(BayesianModel):
                 sys.stdout.flush()
 
             if accept_ratio > 0.5:
+                # Unravel flat samples back to dict
+                positions = [unravel_fn(f) for f in sample_flats]
                 for var in item_var_list:
                     stacked = jnp.stack(
-                        [p[var] for p in chain_positions], axis=0)
+                        [p[var] for p in positions], axis=0)
                     all_samples[var].append(stacked)
                 all_accept.append(accept_ratio)
             else:
@@ -1809,41 +1854,40 @@ class IRTModel(BayesianModel):
                      else jnp.ones(len(self.item_keys), dtype=self.dtype))
 
         n_items = len(self.item_keys)
-
-        def person_posterior(person_idx):
-            c_p = choices_int[person_idx]
-            bad_p = bad[person_idx]
-            log_obs_p = log_rp[:, jnp.arange(n_items), c_p]
-
-            if has_imputation:
-                log_q_p = log_q[person_idx]
-                rb_p = jax.scipy.special.logsumexp(
-                    log_rp + log_q_p[None, :, :], axis=-1
-                )
-                weighted_rb_p = imp_w[None, :] * rb_p
-                log_obs_p = jnp.where(bad_p[None, :], weighted_rb_p, log_obs_p)
-            else:
-                log_obs_p = jnp.where(bad_p[None, :], 0.0, log_obs_p)
-
-            # Unnormalized log posterior on grid: (Q,)
-            log_unnorm = jnp.sum(log_obs_p, axis=-1) + theta_log_weights
-            # Normalize
-            log_norm = jax.scipy.special.logsumexp(log_unnorm)
-            log_post = log_unnorm - log_norm
-            post = jnp.exp(log_post)
-
-            eap = jnp.sum(post * theta_grid)
-            psd = jnp.sqrt(jnp.sum(post * (theta_grid - eap) ** 2))
-            return eap, psd, post
-
         n_people = choices.shape[0]
-        eap, psd, posterior = jax.lax.map(
-            person_posterior, jnp.arange(n_people)
-        )
+
+        # Vectorized: log P(observed | theta_q) for all people
+        # log_rp: (Q, I, K), choices_int: (N, I)
+        log_obs = log_rp[:, jnp.arange(n_items)[None, :],
+                         choices_int[None, :, :]]  # (Q, N, I)
+
+        if has_imputation:
+            rb = jax.scipy.special.logsumexp(
+                log_rp[:, None, :, :] + log_q[None, :, :, :], axis=-1
+            )  # (Q, N, I)
+            weighted_rb = imp_w[None, None, :] * rb
+            log_obs = jnp.where(bad[None, :, :], weighted_rb, log_obs)
+        else:
+            log_obs = jnp.where(bad[None, :, :], 0.0, log_obs)
+
+        # Sum over items → (Q, N)
+        log_lik = jnp.sum(log_obs, axis=-1)
+
+        # Unnormalized log posterior: (Q, N)
+        log_unnorm = log_lik + theta_log_weights[:, None]
+        log_norm = jax.scipy.special.logsumexp(log_unnorm, axis=0)  # (N,)
+        log_post = log_unnorm - log_norm[None, :]
+        posterior = jnp.exp(log_post)  # (Q, N)
+
+        # EAP and PSD
+        eap = jnp.sum(posterior * theta_grid[:, None], axis=0)  # (N,)
+        psd = jnp.sqrt(
+            jnp.sum(posterior * (theta_grid[:, None] - eap[None, :]) ** 2, axis=0)
+        )  # (N,)
 
         return {
             'eap': eap,
             'psd': psd,
-            'posterior': posterior,
+            'posterior': posterior.T,  # (N, Q)
             'theta_grid': theta_grid,
         }
