@@ -561,11 +561,11 @@ class BayesianModel(nnx.Module, ABC):
                     grp = f.create_group(name)
                     for k, v in val.items():
                         arr = np.array(v)
-                        if arr.size > 0:
+                        if arr.size > 0 and arr.dtype.kind in ('f', 'i', 'u', 'b'):
                             grp.create_dataset(k, data=arr)
                 else:
                     arr = np.array(val)
-                    if arr.size > 0:
+                    if arr.size > 0 and arr.dtype.kind in ('f', 'i', 'u', 'b'):
                         f.create_dataset(name, data=arr)
 
     @staticmethod
