@@ -1302,6 +1302,114 @@ class IRTModel(BayesianModel):
 
         return prior_weight * log_prior_items + total_marginal_ll
 
+    def fit_marginal_advi(
+        self,
+        data,
+        theta_grid=None,
+        num_samples=25,
+        num_epochs=2000,
+        learning_rate=0.01,
+        rank=0,
+        seed=42,
+        verbose=True,
+        **training_kwargs,
+    ):
+        """Fit item parameters via ADVI with abilities Rao-Blackwellized out.
+
+        Builds an item-only surrogate posterior (excluding abilities) and
+        optimizes the ELBO against ``marginal_log_prob``.
+
+        Args:
+            data: Full data dict (all people, not batched).
+            theta_grid: Quadrature grid (defaults to Gauss-Hermite).
+            num_samples: Number of surrogate draws per ELBO estimate.
+            num_epochs: Training epochs.
+            learning_rate: Adam learning rate.
+            rank: Low-rank covariance rank for the surrogate.
+                0 = mean-field, >0 = low-rank + diagonal.
+            seed: Random seed.
+            verbose: Print progress.
+            **training_kwargs: Additional kwargs for training_loop.
+
+        Returns:
+            (losses, params) tuple.
+        """
+        from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
+        from bayesianquilts.util import training_loop
+        from tensorflow_probability.substrates.jax import bijectors as tfb
+
+        item_var_list = self._item_var_list()
+
+        # Build item-only prior
+        prior_dict = {}
+        bijectors = {}
+        for v in item_var_list:
+            # Extract the marginal prior for this variable
+            prior_dict[v] = self.joint_prior_distribution.model[v]
+            if hasattr(self, 'bijectors') and v in self.bijectors:
+                bijectors[v] = self.bijectors[v]
+            else:
+                bijectors[v] = tfb.Identity()
+
+        item_prior = tfd.JointDistributionNamed(prior_dict)
+
+        # Build item-only surrogate
+        surrogate_gen, surrogate_init = build_factored_surrogate_posterior_generator(
+            item_prior,
+            bijectors=bijectors,
+            dtype=self.dtype,
+            rank=rank,
+        )
+        marginal_params = surrogate_init()
+
+        if verbose:
+            n_params = sum(np.prod(v.shape) for v in marginal_params.values())
+            print(f"Marginal ADVI (Rao-Blackwellized abilities)")
+            print(f"  Item vars: {item_var_list}")
+            print(f"  Surrogate params: {n_params}")
+            print(f"  Rank: {rank} ({'mean-field' if rank == 0 else 'low-rank'})")
+            sys.stdout.flush()
+
+        key = jax.random.PRNGKey(seed)
+
+        def loss_fn(params):
+            surrogate = surrogate_gen(params)
+            samples = surrogate.sample(num_samples, seed=key)
+            # ELBO = E_q[log p(data, Xi)] - E_q[log q(Xi)]
+            log_probs = []
+            for s_idx in range(num_samples):
+                sample = {v: samples[v][s_idx] for v in item_var_list}
+                lp = self.marginal_log_prob(
+                    data, theta_grid=theta_grid, **sample
+                )
+                log_probs.append(lp)
+            log_joint = jnp.mean(jnp.stack(log_probs))
+            entropy = surrogate.entropy()
+            return -(log_joint + entropy)
+
+        losses, trained_params = training_loop(
+            initial_values=marginal_params,
+            loss_fn=loss_fn,
+            num_epochs=num_epochs,
+            learning_rate=learning_rate,
+            **training_kwargs,
+        )
+
+        self.marginal_params = trained_params
+        self.marginal_surrogate_generator = surrogate_gen
+
+        if verbose:
+            print(f"  Final ELBO: {-float(losses[-1]):.1f}")
+            # Sample posterior means
+            surrogate = surrogate_gen(trained_params)
+            post_samples = surrogate.sample(100, seed=key)
+            for v in item_var_list:
+                m = float(jnp.mean(post_samples[v]))
+                s = float(jnp.std(post_samples[v]))
+                print(f"  {v}: mean={m:.4f}, std={s:.4f}")
+
+        return losses, trained_params
+
     def fit_marginal_mcmc(
         self,
         data,
