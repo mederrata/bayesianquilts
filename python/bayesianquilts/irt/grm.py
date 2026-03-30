@@ -943,3 +943,294 @@ class GRModel(IRTModel):
         else:
             weighted_ll = jnp.sum(log_likelihood, axis=-1)
         return jnp.astype(prior_weight, log_prior.dtype) * (log_prior - entropy) + weighted_ll
+
+    def marginal_log_prob(self, data, theta_grid=None, prior_weight=1.0,
+                          **item_params):
+        """Rao-Blackwellized log posterior over item parameters only.
+
+        Integrates out person abilities on a grid, yielding the marginal
+        log posterior over discriminations and difficulties:
+
+            log p(Xi | data) = log p(Xi) + sum_p log int P(x_p | theta, Xi) pi(theta) dtheta
+
+        Args:
+            data: Data dict with item response columns and person key.
+            theta_grid: 1D array of quadrature points for ability integration.
+                Defaults to 200 points on [-6, 6].
+            prior_weight: Weight on the log prior.
+            **item_params: Item parameters (discriminations, difficulties0,
+                ddifficulties, mu). Must NOT include abilities.
+
+        Returns:
+            Scalar log marginal posterior.
+        """
+        if theta_grid is None:
+            theta_grid = jnp.linspace(-6, 6, 200, dtype=self.dtype)
+
+        n_grid = len(theta_grid)
+        people = data[self.person_key].astype(jnp.int32)
+        n_people_batch = len(people)
+
+        # Build abilities tensor: (n_grid, n_people, 1, 1, 1)
+        # Each grid point is a "sample" — abilities are constant across people
+        # within each grid point (shared ability for integration)
+        # Shape: (n_grid, n_people, dim=1, 1, 1)
+        abilities_grid = jnp.broadcast_to(
+            theta_grid[:, None, None, None, None],
+            (n_grid, n_people_batch, 1, 1, 1)
+        )
+
+        # Prepare difficulties
+        discriminations = item_params['discriminations']
+        difficulties0 = item_params['difficulties0']
+        ddifficulties = item_params.get('ddifficulties')
+
+        if ddifficulties is not None and ddifficulties.shape[-1] > 0:
+            ddifficulties_safe = jnp.where(
+                ddifficulties < 1e-1,
+                1e-1 * jnp.ones_like(ddifficulties),
+                ddifficulties
+            )
+            difficulties = jnp.concat([difficulties0, ddifficulties_safe], axis=-1)
+        else:
+            difficulties = difficulties0
+        difficulties = jnp.cumsum(difficulties, axis=-1)
+
+        # Compute P(x_pi = k | theta, Xi) for all grid points
+        # grm_model_prob expects: abilities (n_grid, n_people, D, 1, 1)
+        #                         disc     (1, D, I, 1)
+        #                         diff     (1, D, I, K-1)
+        response_probs = self.grm_model_prob(
+            abilities_grid, discriminations, difficulties
+        )  # (n_grid, n_people, I, K)
+
+        # Get observed responses
+        choices = jnp.concat(
+            [data[k][:, jnp.newaxis] for k in self.item_keys], axis=-1
+        )  # (n_people, I)
+        bad = (choices < 0) | (choices >= self.response_cardinality) | jnp.isnan(choices)
+        choices_safe = jnp.where(bad, jnp.zeros_like(choices), choices)
+
+        # P(observed response | theta, Xi) per person per item
+        # response_probs: (n_grid, n_people, I, K)
+        # choices_safe: (n_people, I) -> (1, n_people, I, 1)
+        obs_probs = jnp.take_along_axis(
+            response_probs,
+            choices_safe[None, :, :, None].astype(jnp.int32),
+            axis=-1
+        ).squeeze(-1)  # (n_grid, n_people, I)
+
+        # For missing items, set prob to 1 (ignorable)
+        obs_probs = jnp.where(bad[None, :, :], 1.0, obs_probs)
+
+        # Log-likelihood per person per grid point
+        # sum over items, then logsumexp over grid
+        log_lik_per_grid = jnp.sum(
+            jnp.log(jnp.clip(obs_probs, 1e-30, None)), axis=-1
+        )  # (n_grid, n_people)
+
+        # Prior on theta: N(0, 1)
+        log_prior_theta = -0.5 * theta_grid ** 2 - 0.5 * jnp.log(2 * jnp.pi)
+        # Add log prior and log grid spacing
+        dtheta = theta_grid[1] - theta_grid[0]
+        log_integrand = log_lik_per_grid + log_prior_theta[:, None] + jnp.log(dtheta)
+
+        # Marginal log-likelihood per person: log sum_theta exp(log_integrand)
+        marginal_ll_per_person = jax.scipy.special.logsumexp(
+            log_integrand, axis=0
+        )  # (n_people,)
+
+        # Handle sample weights
+        if 'sample_weights' in data:
+            sw = jnp.asarray(data['sample_weights'], dtype=marginal_ll_per_person.dtype)
+            total_marginal_ll = jnp.sum(sw * marginal_ll_per_person)
+        else:
+            total_marginal_ll = jnp.sum(marginal_ll_per_person)
+
+        # Log prior on item parameters
+        # Build a dict with just item params for the prior
+        full_params = dict(item_params)
+        # Add dummy abilities for the joint prior (it expects all params)
+        full_params['abilities'] = jnp.zeros(
+            (self.num_people, 1, 1, 1), dtype=self.dtype
+        )
+        log_prior_items = self.joint_prior_distribution.log_prob(full_params)
+
+        return prior_weight * log_prior_items + total_marginal_ll
+
+    def fit_marginal_mcmc(
+        self,
+        data,
+        theta_grid=None,
+        num_chains=4,
+        num_warmup=500,
+        num_samples=500,
+        target_accept_prob=0.85,
+        max_tree_depth=10,
+        step_size=0.01,
+        seed=None,
+        verbose=True,
+    ):
+        """Run NUTS on item parameters with abilities Rao-Blackwellized out.
+
+        Targets the marginal posterior over item parameters (discriminations,
+        difficulties) by integrating out person abilities on a grid. Much
+        lower-dimensional than joint MCMC.
+
+        Args:
+            data: Full data dict (all people).
+            theta_grid: Quadrature grid for ability integration.
+            num_chains: Number of NUTS chains.
+            num_warmup: Warmup steps per chain.
+            num_samples: Post-warmup samples per chain.
+            target_accept_prob: NUTS target acceptance.
+            max_tree_depth: Max NUTS tree depth.
+            step_size: Initial step size.
+            seed: Random seed.
+            verbose: Print progress.
+
+        Returns:
+            Dict mapping item param names to arrays of shape
+            (num_chains, num_samples, ...).
+        """
+        import jax
+        from jax import random
+        import tensorflow_probability.substrates.jax.mcmc as tfmcmc
+
+        if theta_grid is None:
+            theta_grid = jnp.linspace(-6, 6, 200, dtype=self.dtype)
+
+        if seed is None:
+            seed = np.random.randint(0, 2**31)
+        key = random.PRNGKey(seed)
+
+        # Item parameter names (everything except abilities)
+        item_var_list = [v for v in self.var_list if v != 'abilities']
+
+        if verbose:
+            print(f"Marginal MCMC (Rao-Blackwellized abilities)")
+            print(f"  Item params: {item_var_list}")
+            n_params = sum(
+                np.prod(self.joint_prior_distribution.sample(
+                    seed=key)[v].shape)
+                for v in item_var_list
+            )
+            print(f"  Total dimensions: {n_params}")
+            print(f"  Theta grid: {len(theta_grid)} points")
+            print(f"  Chains: {num_chains}, Warmup: {num_warmup}, "
+                  f"Samples: {num_samples}")
+
+        # Target log prob: marginal over abilities
+        def target_log_prob_fn(*params_flat):
+            params_dict = {k: v for k, v in zip(item_var_list, params_flat)}
+            return self.marginal_log_prob(
+                data, theta_grid=theta_grid, **params_dict
+            )
+
+        # Initialize from ADVI solution if available
+        key, init_key = random.split(key)
+        if self.params is not None:
+            if verbose:
+                print("  Initializing from ADVI solution")
+            initial_states = {}
+            for var in item_var_list:
+                # Find the loc parameter in the surrogate
+                loc_key = None
+                for pk in self.params:
+                    if pk.startswith(var) and pk.endswith('loc'):
+                        loc_key = pk
+                        break
+                if loc_key is not None:
+                    val = self.params[loc_key]
+                    # Tile across chains with small perturbation
+                    initial_states[var] = jnp.stack([
+                        val + 0.01 * random.normal(
+                            random.fold_in(init_key, c), val.shape)
+                        for c in range(num_chains)
+                    ], axis=0)
+                else:
+                    prior_sample = self.joint_prior_distribution.sample(
+                        seed=random.fold_in(init_key, 0))
+                    initial_states[var] = jnp.stack([
+                        prior_sample[var] + 0.01 * random.normal(
+                            random.fold_in(init_key, c),
+                            prior_sample[var].shape)
+                        for c in range(num_chains)
+                    ], axis=0)
+        else:
+            if verbose:
+                print("  Initializing from prior")
+            initial_states = {}
+            for var in item_var_list:
+                samples = self.joint_prior_distribution.sample(
+                    num_chains, seed=init_key)
+                initial_states[var] = samples[var]
+
+        # Run NUTS per chain
+        all_samples = {var: [] for var in item_var_list}
+        all_accept = []
+
+        for chain_idx in range(num_chains):
+            key, chain_key = random.split(key)
+            if verbose:
+                print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
+
+            chain_init = [initial_states[var][chain_idx]
+                          for var in item_var_list]
+
+            nuts_kernel = tfmcmc.NoUTurnSampler(
+                target_log_prob_fn=target_log_prob_fn,
+                step_size=step_size,
+                max_tree_depth=max_tree_depth,
+            )
+            adaptive_kernel = tfmcmc.DualAveragingStepSizeAdaptation(
+                inner_kernel=nuts_kernel,
+                num_adaptation_steps=num_warmup,
+                target_accept_prob=target_accept_prob,
+            )
+
+            @jax.jit
+            def run_chain(init_state, seed):
+                samples, kernel_results = tfmcmc.sample_chain(
+                    num_results=num_samples,
+                    num_burnin_steps=num_warmup,
+                    current_state=init_state,
+                    kernel=adaptive_kernel,
+                    seed=seed,
+                    trace_fn=lambda _, pkr: pkr.inner_results.is_accepted,
+                )
+                return samples, kernel_results
+
+            if verbose:
+                print("    Running warmup and sampling...")
+
+            samples, is_accepted = run_chain(chain_init, chain_key)
+
+            accept_ratio = float(jnp.mean(is_accepted))
+            if verbose:
+                print(f"    Acceptance ratio: {accept_ratio:.3f}")
+
+            if accept_ratio > 1e-6:
+                for var, sample in zip(item_var_list, samples):
+                    all_samples[var].append(sample)
+                all_accept.append(accept_ratio)
+            else:
+                if verbose:
+                    print(f"    Chain discarded (acceptance too low)")
+
+        # Stack chains
+        result = {}
+        for var in item_var_list:
+            if all_samples[var]:
+                result[var] = jnp.stack(all_samples[var], axis=0)
+
+        if verbose:
+            print(f"\n  Mean acceptance: {np.mean(all_accept):.3f}")
+            for var in item_var_list:
+                if var in result:
+                    flat = result[var].reshape(-1, *result[var].shape[2:])
+                    print(f"  {var}: mean={jnp.mean(flat):.4f}, "
+                          f"std={jnp.std(flat):.4f}")
+
+        self.mcmc_samples = result
+        return result
