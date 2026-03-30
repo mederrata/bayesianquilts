@@ -258,6 +258,145 @@ class IRTModel(BayesianModel):
 
         return {'mu': mu, 'sigma': sigma}
 
+    def standardize_marginal(self, data, reference_idx=None, weights=None):
+        """Standardize MCMC item parameters so implied abilities are N(0,1).
+
+        After marginal inference (fit_marginal_mcmc), abilities are not
+        model parameters. This method:
+        1. Computes EAP abilities from current MCMC item params
+        2. Finds mu, sigma of the ability distribution (optionally on
+           a reference subset)
+        3. Rescales all MCMC item param samples in place
+
+        The GRM is invariant under theta -> (theta - mu) / sigma if:
+          discriminations *= sigma
+          difficulties0 = (difficulties0 - mu) / sigma
+          ddifficulties /= sigma
+
+        After standardization, compute_eap_abilities will return N(0,1)
+        abilities (or N(0,1) on the reference subset).
+
+        Args:
+            data: Full data dict for computing EAP abilities.
+            reference_idx: Optional person indices for the reference
+                subpopulation. If None, uses all people.
+            weights: Optional per-person weights for computing mu/sigma.
+
+        Returns:
+            dict with ``mu`` and ``sigma`` used for rescaling.
+        """
+        if not hasattr(self, 'mcmc_samples') or self.mcmc_samples is None:
+            raise ValueError("No mcmc_samples — run fit_marginal_mcmc first")
+
+        # Compute EAP abilities from current (un-standardized) item params
+        eap_result = self.compute_eap_abilities(data)
+        eap = np.array(eap_result['eap'])  # (N,)
+
+        # Compute mu, sigma on reference subset
+        if reference_idx is not None:
+            ref = np.asarray(reference_idx)
+            eap_ref = eap[ref]
+            w_ref = weights[ref] if weights is not None else None
+        else:
+            eap_ref = eap
+            w_ref = weights
+
+        if w_ref is not None:
+            w = np.asarray(w_ref, dtype=np.float64)
+            w = w / w.sum()
+            mu = float(np.sum(w * eap_ref))
+            sigma = float(np.sqrt(np.sum(w * (eap_ref - mu) ** 2)))
+        else:
+            mu = float(np.mean(eap_ref))
+            sigma = float(np.std(eap_ref))
+
+        if sigma < 1e-8:
+            sigma = 1.0
+
+        print(f"  Standardizing marginal: mu={mu:.4f}, sigma={sigma:.4f}")
+
+        # Rescale MCMC samples in place
+        # Shapes: (chains, samples, 1, 1, I, 1) for disc/diff0
+        #         (chains, samples, 1, 1, I, K-2) for ddiff
+        for key in list(self.mcmc_samples.keys()):
+            if key == 'discriminations' or key.startswith('discriminations_'):
+                self.mcmc_samples[key] = self.mcmc_samples[key] * sigma
+            elif key == 'difficulties0' or key.startswith('difficulties0_'):
+                self.mcmc_samples[key] = (self.mcmc_samples[key] - mu) / sigma
+            elif key == 'ddifficulties' or key.startswith('ddifficulties_'):
+                self.mcmc_samples[key] = self.mcmc_samples[key] / sigma
+            elif key == 'mu' or key.startswith('mu_'):
+                self.mcmc_samples[key] = (self.mcmc_samples[key] - mu) / sigma
+
+        return {'mu': mu, 'sigma': sigma}
+
+    def fit_surrogate_to_mcmc(self, mcmc_samples=None):
+        """Fit the variational surrogate to MCMC samples via moment matching.
+
+        For a mean-field normal surrogate, sets loc = mean, scale = std
+        per coordinate. This populates ``self.params`` so that
+        ``surrogate_distribution_generator`` produces a distribution
+        that approximates the MCMC posterior.
+
+        Also populates ``self.surrogate_sample`` with the MCMC samples
+        (flattened across chains) so that existing downstream code
+        (standardize_abilities, predictive_distribution, etc.) works.
+
+        Args:
+            mcmc_samples: Dict mapping param names to arrays of shape
+                (chains, samples, ...). If None, uses self.mcmc_samples.
+        """
+        if mcmc_samples is None:
+            mcmc_samples = self.mcmc_samples
+        if mcmc_samples is None:
+            raise ValueError("No MCMC samples provided or stored")
+
+        if self.params is None:
+            raise ValueError(
+                "No surrogate params — call create_distributions first"
+            )
+
+        new_params = dict(self.params)
+
+        for var_name, samples in mcmc_samples.items():
+            # Flatten chains: (C, S, ...) → (C*S, ...)
+            flat = samples.reshape(-1, *samples.shape[2:])
+            loc = jnp.mean(flat, axis=0)
+            scale = jnp.std(flat, axis=0)
+            scale = jnp.maximum(scale, 1e-6)
+
+            # Find matching surrogate params
+            for pk in list(new_params.keys()):
+                if pk.startswith(var_name) and pk.endswith('loc'):
+                    new_params[pk] = loc
+                elif pk.startswith(var_name) and pk.endswith('scale'):
+                    # Surrogate scale is in unconstrained space
+                    # (softplus^{-1}(scale) for softplus parameterization)
+                    if self.parameterization == 'log_scale':
+                        new_params[pk] = jnp.log(scale)
+                    else:
+                        # softplus^{-1}(x) = log(exp(x) - 1)
+                        new_params[pk] = jnp.log(jnp.exp(scale) - 1.0)
+
+        self.params = new_params
+
+        # Populate surrogate_sample with flattened MCMC samples
+        self.surrogate_sample = {}
+        for var_name, samples in mcmc_samples.items():
+            self.surrogate_sample[var_name] = samples.reshape(
+                -1, *samples.shape[2:]
+            )
+
+        # For marginal models, abilities aren't in mcmc_samples.
+        # If abilities are needed downstream, caller should run
+        # compute_eap_abilities and inject them.
+
+        print(f"  Surrogate fitted to MCMC ({len(mcmc_samples)} variables)")
+        for var_name, samples in mcmc_samples.items():
+            flat = samples.reshape(-1, *samples.shape[2:])
+            print(f"    {var_name}: loc={float(jnp.mean(flat)):.4f}, "
+                  f"scale={float(jnp.std(flat)):.4f}")
+
     def project_discriminations(self, steps=1000):
         pass
 

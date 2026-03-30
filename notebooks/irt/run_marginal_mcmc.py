@@ -181,7 +181,6 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
                     -1, *mcmc_samples[var_name].shape[2:]),
                 axis=0
             )
-            # Find ADVI loc
             loc_key = None
             for pk in model.params:
                 if pk.startswith(var_name) and pk.endswith('loc'):
@@ -193,6 +192,39 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
                 print(f"  {var_name}:")
                 print(f"    |MCMC - ADVI| mean: {np.mean(diff):.4f}, "
                       f"max: {np.max(diff):.4f}")
+
+    # Standardize so abilities ~ N(0,1)
+    print(f"\n--- Standardizing ---")
+    stats = model.standardize_marginal(data)
+
+    # Recompute EAP after standardization
+    eap_result = model.compute_eap_abilities(data)
+    print(f"  Post-standardization EAP: mean={np.mean(np.array(eap_result['eap'])):.4f}, "
+          f"std={np.std(np.array(eap_result['eap'])):.4f}")
+
+    # Fit surrogate to MCMC samples (for downstream compatibility)
+    print(f"\n--- Fitting surrogate to MCMC ---")
+    model.fit_surrogate_to_mcmc()
+
+    # Inject EAP abilities into surrogate_sample for save_to_disk
+    eap_arr = np.array(eap_result['eap'])
+    model.surrogate_sample['abilities'] = jnp.array(
+        eap_arr[:, np.newaxis, np.newaxis, np.newaxis]
+    )[np.newaxis, ...]  # (1, N, 1, 1, 1) — single "sample"
+
+    # Save the full model to disk (includes MCMC samples + surrogate)
+    mcmc_model_dir = model_path.parent / 'grm_mcmc'
+    print(f"\n--- Saving model to {mcmc_model_dir} ---")
+    model.save_to_disk(str(mcmc_model_dir))
+    print(f"  Model saved (includes mcmc_samples, params, surrogate_sample)")
+
+    # Also save standalone NPZ for quick access
+    save_dict['eap_standardized'] = np.array(eap_result['eap'])
+    save_dict['psd_standardized'] = np.array(eap_result['psd'])
+    save_dict['standardize_mu'] = stats['mu']
+    save_dict['standardize_sigma'] = stats['sigma']
+    np.savez(out_path, **save_dict)
+    print(f"  NPZ updated: {out_path}")
 
     del model, mcmc_samples
     gc.collect()
