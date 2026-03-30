@@ -1020,14 +1020,33 @@ class GRModel(IRTModel):
             axis=-1
         ).squeeze(-1)  # (n_grid, n_people, I)
 
-        # For missing items, set prob to 1 (ignorable)
-        obs_probs = jnp.where(bad[None, :, :], 1.0, obs_probs)
+        # Log observed probs for non-missing items
+        log_obs = jnp.log(jnp.clip(obs_probs, 1e-30, None))  # (n_grid, n_people, I)
+
+        # Handle missing items: imputation or ignorable
+        imputation_pmfs = data.get('_imputation_pmfs')
+        imputation_weights = data.get('_imputation_weights')
+        if imputation_pmfs is not None:
+            # Rao-Blackwellization: log sum_k q(k) * P(k|theta, Xi)
+            log_rp = jnp.log(jnp.maximum(response_probs, 1e-30))  # (n_grid, n_people, I, K)
+            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))  # (n_people, I, K)
+            rb = jax.scipy.special.logsumexp(
+                log_rp + log_q[None, ...], axis=-1
+            )  # (n_grid, n_people, I)
+
+            if imputation_weights is not None:
+                w = jnp.asarray(imputation_weights)  # (I,)
+                weighted_rb = w[None, None, :] * rb  # (n_grid, n_people, I)
+                log_obs = jnp.where(bad[None, :, :], weighted_rb, log_obs)
+            else:
+                log_obs = jnp.where(bad[None, :, :], rb, log_obs)
+        else:
+            # Missing responses are ignorable: contribute log(1) = 0
+            log_obs = jnp.where(bad[None, :, :], 0.0, log_obs)
 
         # Log-likelihood per person per grid point
         # sum over items, then logsumexp over grid
-        log_lik_per_grid = jnp.sum(
-            jnp.log(jnp.clip(obs_probs, 1e-30, None)), axis=-1
-        )  # (n_grid, n_people)
+        log_lik_per_grid = jnp.sum(log_obs, axis=-1)  # (n_grid, n_people)
 
         # Prior on theta: N(0, 1)
         log_prior_theta = -0.5 * theta_grid ** 2 - 0.5 * jnp.log(2 * jnp.pi)
