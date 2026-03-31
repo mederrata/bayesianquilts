@@ -1,3 +1,4 @@
+import sys
 from typing import Any, Dict, Optional
 
 import jax
@@ -256,6 +257,145 @@ class IRTModel(BayesianModel):
                 self.calibrated_sd['ddifficulties'] = self.calibrated_sd['ddifficulties'] / sigma_disc
 
         return {'mu': mu, 'sigma': sigma}
+
+    def standardize_marginal(self, data, reference_idx=None, weights=None):
+        """Standardize MCMC item parameters so implied abilities are N(0,1).
+
+        After marginal inference (fit_marginal_mcmc), abilities are not
+        model parameters. This method:
+        1. Computes EAP abilities from current MCMC item params
+        2. Finds mu, sigma of the ability distribution (optionally on
+           a reference subset)
+        3. Rescales all MCMC item param samples in place
+
+        The GRM is invariant under theta -> (theta - mu) / sigma if:
+          discriminations *= sigma
+          difficulties0 = (difficulties0 - mu) / sigma
+          ddifficulties /= sigma
+
+        After standardization, compute_eap_abilities will return N(0,1)
+        abilities (or N(0,1) on the reference subset).
+
+        Args:
+            data: Full data dict for computing EAP abilities.
+            reference_idx: Optional person indices for the reference
+                subpopulation. If None, uses all people.
+            weights: Optional per-person weights for computing mu/sigma.
+
+        Returns:
+            dict with ``mu`` and ``sigma`` used for rescaling.
+        """
+        if not hasattr(self, 'mcmc_samples') or self.mcmc_samples is None:
+            raise ValueError("No mcmc_samples — run fit_marginal_mcmc first")
+
+        # Compute EAP abilities from current (un-standardized) item params
+        eap_result = self.compute_eap_abilities(data)
+        eap = np.array(eap_result['eap'])  # (N,)
+
+        # Compute mu, sigma on reference subset
+        if reference_idx is not None:
+            ref = np.asarray(reference_idx)
+            eap_ref = eap[ref]
+            w_ref = weights[ref] if weights is not None else None
+        else:
+            eap_ref = eap
+            w_ref = weights
+
+        if w_ref is not None:
+            w = np.asarray(w_ref, dtype=np.float64)
+            w = w / w.sum()
+            mu = float(np.sum(w * eap_ref))
+            sigma = float(np.sqrt(np.sum(w * (eap_ref - mu) ** 2)))
+        else:
+            mu = float(np.mean(eap_ref))
+            sigma = float(np.std(eap_ref))
+
+        if sigma < 1e-8:
+            sigma = 1.0
+
+        print(f"  Standardizing marginal: mu={mu:.4f}, sigma={sigma:.4f}")
+
+        # Rescale MCMC samples in place
+        # Shapes: (chains, samples, 1, 1, I, 1) for disc/diff0
+        #         (chains, samples, 1, 1, I, K-2) for ddiff
+        for key in list(self.mcmc_samples.keys()):
+            if key == 'discriminations' or key.startswith('discriminations_'):
+                self.mcmc_samples[key] = self.mcmc_samples[key] * sigma
+            elif key == 'difficulties0' or key.startswith('difficulties0_'):
+                self.mcmc_samples[key] = (self.mcmc_samples[key] - mu) / sigma
+            elif key == 'ddifficulties' or key.startswith('ddifficulties_'):
+                self.mcmc_samples[key] = self.mcmc_samples[key] / sigma
+            elif key == 'mu' or key.startswith('mu_'):
+                self.mcmc_samples[key] = (self.mcmc_samples[key] - mu) / sigma
+
+        return {'mu': mu, 'sigma': sigma}
+
+    def fit_surrogate_to_mcmc(self, mcmc_samples=None):
+        """Fit the variational surrogate to MCMC samples via moment matching.
+
+        For a mean-field normal surrogate, sets loc = mean, scale = std
+        per coordinate. This populates ``self.params`` so that
+        ``surrogate_distribution_generator`` produces a distribution
+        that approximates the MCMC posterior.
+
+        Also populates ``self.surrogate_sample`` with the MCMC samples
+        (flattened across chains) so that existing downstream code
+        (standardize_abilities, predictive_distribution, etc.) works.
+
+        Args:
+            mcmc_samples: Dict mapping param names to arrays of shape
+                (chains, samples, ...). If None, uses self.mcmc_samples.
+        """
+        if mcmc_samples is None:
+            mcmc_samples = self.mcmc_samples
+        if mcmc_samples is None:
+            raise ValueError("No MCMC samples provided or stored")
+
+        if self.params is None:
+            raise ValueError(
+                "No surrogate params — call create_distributions first"
+            )
+
+        new_params = dict(self.params)
+
+        for var_name, samples in mcmc_samples.items():
+            # Flatten chains: (C, S, ...) → (C*S, ...)
+            flat = samples.reshape(-1, *samples.shape[2:])
+            loc = jnp.mean(flat, axis=0)
+            scale = jnp.std(flat, axis=0)
+            scale = jnp.maximum(scale, 1e-6)
+
+            # Find matching surrogate params
+            for pk in list(new_params.keys()):
+                if pk.startswith(var_name) and pk.endswith('loc'):
+                    new_params[pk] = loc
+                elif pk.startswith(var_name) and pk.endswith('scale'):
+                    # Surrogate scale is in unconstrained space
+                    # (softplus^{-1}(scale) for softplus parameterization)
+                    if self.parameterization == 'log_scale':
+                        new_params[pk] = jnp.log(scale)
+                    else:
+                        # softplus^{-1}(x) = log(exp(x) - 1)
+                        new_params[pk] = jnp.log(jnp.exp(scale) - 1.0)
+
+        self.params = new_params
+
+        # Populate surrogate_sample with flattened MCMC samples
+        self.surrogate_sample = {}
+        for var_name, samples in mcmc_samples.items():
+            self.surrogate_sample[var_name] = samples.reshape(
+                -1, *samples.shape[2:]
+            )
+
+        # For marginal models, abilities aren't in mcmc_samples.
+        # If abilities are needed downstream, caller should run
+        # compute_eap_abilities and inject them.
+
+        print(f"  Surrogate fitted to MCMC ({len(mcmc_samples)} variables)")
+        for var_name, samples in mcmc_samples.items():
+            flat = samples.reshape(-1, *samples.shape[2:])
+            print(f"    {var_name}: loc={float(jnp.mean(flat)):.4f}, "
+                  f"scale={float(jnp.std(flat)):.4f}")
 
     def project_discriminations(self, steps=1000):
         pass
@@ -1162,4 +1302,592 @@ class IRTModel(BayesianModel):
             'ess': ess,
             'abilities_is': abilities_is,
             'samples': samples,
+        }
+
+    # ------------------------------------------------------------------
+    # Marginal inference: integrate out abilities, fit item params only
+    # ------------------------------------------------------------------
+
+    def _response_probs_grid(self, theta_grid, **item_params):
+        """Compute P(Y_i = k | theta_q, Xi) for each quadrature point.
+
+        Subclasses must override this to implement their response model.
+
+        Args:
+            theta_grid: (Q,) array of ability values.
+            **item_params: Item parameters (no abilities).
+
+        Returns:
+            (Q, I, K) array of response probabilities.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _response_probs_grid"
+        )
+
+    def _item_var_list(self):
+        """Return list of item parameter names (everything except abilities)."""
+        ability_keys = {'abilities'}
+        # FactorizedGRModel has abilities_0, abilities_1, ...
+        for v in self.var_list:
+            if v.startswith('abilities'):
+                ability_keys.add(v)
+        return [v for v in self.var_list if v not in ability_keys]
+
+    def _make_gauss_hermite_grid(self, n_points=31):
+        """Return (theta_grid, theta_log_weights) for Gauss-Hermite quadrature."""
+        nodes, weights = np.polynomial.hermite.hermgauss(n_points)
+        theta_grid = jnp.asarray(np.sqrt(2) * nodes, dtype=self.dtype)
+        theta_log_weights = jnp.asarray(
+            np.log(weights) - 0.5 * np.log(np.pi), dtype=self.dtype
+        )
+        return theta_grid, theta_log_weights
+
+    def marginal_log_prob(self, data, theta_grid=None, theta_log_weights=None,
+                          prior_weight=1.0, **item_params):
+        """Rao-Blackwellized log posterior over item parameters only.
+
+        Integrates out person abilities on a quadrature grid:
+
+            log p(Xi | data) = log p(Xi)
+                + sum_p log int P(x_p | theta, Xi) pi(theta) dtheta
+
+        Uses Gauss-Hermite quadrature by default (31 nodes).
+        Processes people via ``jax.lax.map`` to keep compilation tractable.
+
+        Args:
+            data: Data dict with item response columns and person key.
+            theta_grid: (Q,) quadrature points. Defaults to Gauss-Hermite.
+            theta_log_weights: (Q,) log quadrature weights. If None and
+                theta_grid is also None, uses Gauss-Hermite weights.
+            prior_weight: Weight on the log prior.
+            **item_params: Item parameters (no abilities).
+
+        Returns:
+            Scalar log marginal posterior.
+        """
+        if theta_grid is None:
+            theta_grid, theta_log_weights = self._make_gauss_hermite_grid()
+        elif theta_log_weights is None:
+            dtheta = theta_grid[1] - theta_grid[0]
+            theta_log_weights = (
+                -0.5 * theta_grid ** 2
+                - 0.5 * jnp.log(2 * jnp.pi)
+                + jnp.log(dtheta)
+            )
+
+        # (Q, I, K)
+        response_probs = self._response_probs_grid(theta_grid, **item_params)
+        log_rp = jnp.log(jnp.clip(response_probs, 1e-30, None))
+
+        # Observed responses (N, I)
+        choices = jnp.concat(
+            [data[k][:, jnp.newaxis] for k in self.item_keys], axis=-1
+        )
+        bad = (choices < 0) | (choices >= self.response_cardinality) | jnp.isnan(choices)
+        choices_int = jnp.where(bad, 0, choices).astype(jnp.int32)
+
+        n_items = len(self.item_keys)
+        n_people = choices.shape[0]
+
+        # Vectorized over people: gather log P(observed | theta_q)
+        # log_rp: (Q, I, K) → (Q, 1, I, K), choices_int: (N, I) → (1, N, I, 1)
+        log_obs = jnp.take_along_axis(
+            log_rp[:, None, :, :],
+            choices_int[None, :, :, None],
+            axis=-1
+        ).squeeze(-1)  # (Q, N, I)
+
+        # Handle missing items
+        imputation_pmfs = data.get('_imputation_pmfs')
+        imputation_weights = data.get('_imputation_weights')
+
+        if imputation_pmfs is not None:
+            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))  # (N, I, K)
+            imp_w = (jnp.asarray(imputation_weights)
+                     if imputation_weights is not None
+                     else jnp.ones(n_items, dtype=self.dtype))
+
+            # RB: log sum_k q(k|x) * P(k|theta, Xi) for each (Q, N, I)
+            # log_rp: (Q, I, K) → (Q, 1, I, K), log_q: (N, I, K) → (1, N, I, K)
+            rb = jax.scipy.special.logsumexp(
+                log_rp[:, None, :, :] + log_q[None, :, :, :], axis=-1
+            )  # (Q, N, I)
+            weighted_rb = imp_w[None, None, :] * rb
+            log_obs = jnp.where(bad[None, :, :], weighted_rb, log_obs)
+        else:
+            log_obs = jnp.where(bad[None, :, :], 0.0, log_obs)
+
+        # Sum over items → (Q, N), then logsumexp over grid → (N,)
+        log_lik_per_grid = jnp.sum(log_obs, axis=-1)  # (Q, N)
+        marginal_ll_per_person = jax.scipy.special.logsumexp(
+            log_lik_per_grid + theta_log_weights[:, None], axis=0
+        )  # (N,)
+
+        if 'sample_weights' in data:
+            sw = jnp.asarray(data['sample_weights'], dtype=marginal_ll_per_person.dtype)
+            total_marginal_ll = jnp.sum(sw * marginal_ll_per_person)
+        else:
+            total_marginal_ll = jnp.sum(marginal_ll_per_person)
+
+        # Log prior on item parameters
+        full_params = dict(item_params)
+        # Add dummy abilities so the joint prior can compute
+        for v in self.var_list:
+            if v not in full_params:
+                shape = self.joint_prior_distribution.sample(
+                    seed=jax.random.PRNGKey(0)
+                )[v].shape
+                full_params[v] = jnp.zeros(shape, dtype=self.dtype)
+        log_prior_items = self.joint_prior_distribution.log_prob(full_params)
+
+        return prior_weight * log_prior_items + total_marginal_ll
+
+    def fit_marginal_advi(
+        self,
+        data,
+        theta_grid=None,
+        num_samples=25,
+        num_epochs=2000,
+        learning_rate=0.01,
+        rank=0,
+        seed=42,
+        verbose=True,
+        **training_kwargs,
+    ):
+        """Fit item parameters via ADVI with abilities Rao-Blackwellized out.
+
+        Builds an item-only surrogate posterior (excluding abilities) and
+        optimizes the ELBO against ``marginal_log_prob``.
+
+        Args:
+            data: Full data dict (all people, not batched).
+            theta_grid: Quadrature grid (defaults to Gauss-Hermite).
+            num_samples: Number of surrogate draws per ELBO estimate.
+            num_epochs: Training epochs.
+            learning_rate: Adam learning rate.
+            rank: Low-rank covariance rank for the surrogate.
+                0 = mean-field, >0 = low-rank + diagonal.
+            seed: Random seed.
+            verbose: Print progress.
+            **training_kwargs: Additional kwargs for training_loop.
+
+        Returns:
+            (losses, params) tuple.
+        """
+        from bayesianquilts.vi.advi import build_factored_surrogate_posterior_generator
+        from bayesianquilts.util import training_loop
+        from tensorflow_probability.substrates.jax import bijectors as tfb
+
+        item_var_list = self._item_var_list()
+
+        # Build item-only prior
+        prior_dict = {}
+        bijectors = {}
+        for v in item_var_list:
+            # Extract the marginal prior for this variable
+            prior_dict[v] = self.joint_prior_distribution.model[v]
+            if hasattr(self, 'bijectors') and v in self.bijectors:
+                bijectors[v] = self.bijectors[v]
+            else:
+                bijectors[v] = tfb.Identity()
+
+        item_prior = tfd.JointDistributionNamed(prior_dict)
+
+        # Build item-only surrogate
+        surrogate_gen, surrogate_init = build_factored_surrogate_posterior_generator(
+            item_prior,
+            bijectors=bijectors,
+            dtype=self.dtype,
+            rank=rank,
+        )
+        marginal_params = surrogate_init()
+
+        if verbose:
+            n_params = sum(np.prod(v.shape) for v in marginal_params.values())
+            print(f"Marginal ADVI (Rao-Blackwellized abilities)")
+            print(f"  Item vars: {item_var_list}")
+            print(f"  Surrogate params: {n_params}")
+            print(f"  Rank: {rank} ({'mean-field' if rank == 0 else 'low-rank'})")
+            sys.stdout.flush()
+
+        key = jax.random.PRNGKey(seed)
+
+        def loss_fn(params):
+            surrogate = surrogate_gen(params)
+            samples = surrogate.sample(num_samples, seed=key)
+            # ELBO = E_q[log p(data, Xi)] - E_q[log q(Xi)]
+            log_probs = []
+            for s_idx in range(num_samples):
+                sample = {v: samples[v][s_idx] for v in item_var_list}
+                lp = self.marginal_log_prob(
+                    data, theta_grid=theta_grid, **sample
+                )
+                log_probs.append(lp)
+            log_joint = jnp.mean(jnp.stack(log_probs))
+            entropy = surrogate.entropy()
+            return -(log_joint + entropy)
+
+        losses, trained_params = training_loop(
+            initial_values=marginal_params,
+            loss_fn=loss_fn,
+            num_epochs=num_epochs,
+            learning_rate=learning_rate,
+            **training_kwargs,
+        )
+
+        self.marginal_params = trained_params
+        self.marginal_surrogate_generator = surrogate_gen
+
+        if verbose:
+            print(f"  Final ELBO: {-float(losses[-1]):.1f}")
+            # Sample posterior means
+            surrogate = surrogate_gen(trained_params)
+            post_samples = surrogate.sample(100, seed=key)
+            for v in item_var_list:
+                m = float(jnp.mean(post_samples[v]))
+                s = float(jnp.std(post_samples[v]))
+                print(f"  {v}: mean={m:.4f}, std={s:.4f}")
+
+        return losses, trained_params
+
+    def fit_marginal_mcmc(
+        self,
+        data,
+        theta_grid=None,
+        num_chains=4,
+        num_warmup=500,
+        num_samples=500,
+        target_accept_prob=0.85,
+        step_size=0.01,
+        seed=None,
+        verbose=True,
+    ):
+        """Run NUTS on item parameters with abilities Rao-Blackwellized out.
+
+        Uses BlackJAX NUTS with window adaptation. Targets the marginal
+        posterior over item parameters by integrating out abilities on a
+        quadrature grid.
+
+        Args:
+            data: Full data dict (all people).
+            theta_grid: Quadrature grid for ability integration.
+            num_chains: Number of NUTS chains.
+            num_warmup: Warmup steps per chain.
+            num_samples: Post-warmup samples per chain.
+            target_accept_prob: NUTS target acceptance.
+            step_size: Initial step size.
+            seed: Random seed.
+            verbose: Print progress.
+
+        Returns:
+            Dict mapping item param names to posterior sample arrays of
+            shape (num_chains, num_samples, ...).
+        """
+        import blackjax
+        from jax import random
+
+        if seed is None:
+            seed = np.random.randint(0, 2**31)
+        key = random.PRNGKey(seed)
+
+        item_var_list = self._item_var_list()
+
+        if theta_grid is not None:
+            grid_desc = f"{len(theta_grid)} points (uniform)"
+        else:
+            grid_desc = "31-point Gauss-Hermite"
+
+        if verbose:
+            print(f"Marginal MCMC (Rao-Blackwellized abilities)")
+            print(f"  Item params: {item_var_list}")
+            key, tmp_key = random.split(key)
+            n_params = sum(
+                np.prod(self.joint_prior_distribution.sample(
+                    seed=tmp_key)[v].shape)
+                for v in item_var_list
+            )
+            print(f"  Total dimensions: {n_params}")
+            print(f"  Quadrature: {grid_desc}")
+            print(f"  Chains: {num_chains}, Warmup: {num_warmup}, "
+                  f"Samples: {num_samples}")
+            sys.stdout.flush()
+
+        # Target log density
+        def logdensity_fn(params_dict):
+            return self.marginal_log_prob(
+                data, theta_grid=theta_grid, **params_dict
+            )
+
+        # Initialize from ADVI solution or prior
+        key, init_key = random.split(key)
+        initial_positions = []
+        for c in range(num_chains):
+            pos = {}
+            for var in item_var_list:
+                loc_key = None
+                if self.params is not None:
+                    for pk in self.params:
+                        if pk.startswith(var) and pk.endswith('loc'):
+                            loc_key = pk
+                            break
+                if loc_key is not None:
+                    val = self.params[loc_key]
+                    pos[var] = val + 0.01 * random.normal(
+                        random.fold_in(init_key, c), val.shape)
+                else:
+                    prior_sample = self.joint_prior_distribution.sample(
+                        seed=random.fold_in(init_key, c))
+                    pos[var] = prior_sample[var]
+            initial_positions.append(pos)
+
+        if verbose and self.params is not None:
+            print("  Initializing from ADVI solution")
+            sys.stdout.flush()
+
+        from jax.flatten_util import ravel_pytree
+
+        # Flatten position dict → 1D vector for BlackJAX
+        ref_pos = initial_positions[0]
+        _, unravel_fn = ravel_pytree(ref_pos)
+
+        def logdensity_flat(x):
+            return logdensity_fn(unravel_fn(x))
+
+        n_flat = sum(np.prod(ref_pos[v].shape) for v in item_var_list)
+        if verbose:
+            print(f"  Flat parameter vector: {n_flat} elements")
+            sys.stdout.flush()
+
+        all_samples = {var: [] for var in item_var_list}
+        all_accept = []
+
+        for chain_idx in range(num_chains):
+            key, chain_key = random.split(key)
+            if verbose:
+                print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
+                sys.stdout.flush()
+
+            init_flat, _ = ravel_pytree(initial_positions[chain_idx])
+
+            # Identity mass matrix (flat 1D)
+            inv_mass_matrix = jnp.ones(n_flat)
+
+            warmup_kernel = blackjax.nuts(
+                logdensity_flat,
+                step_size=step_size,
+                inverse_mass_matrix=inv_mass_matrix,
+            )
+            state = warmup_kernel.init(init_flat)
+
+            # Step-by-step warmup
+            if verbose:
+                print(f"    Warmup ({num_warmup} steps, step-by-step)...")
+                sys.stdout.flush()
+
+            warmup_flats = []
+            n_accepted_warmup = 0
+
+            @jax.jit
+            def warmup_step(state, step_key):
+                return warmup_kernel.step(step_key, state)
+
+            for step in range(num_warmup):
+                chain_key, step_key = random.split(chain_key)
+                state, info = warmup_step(state, step_key)
+                is_good = int(1 - info.is_divergent)
+                n_accepted_warmup += is_good
+                warmup_flats.append(state.position)
+
+                if verbose and (step + 1) % 50 == 0:
+                    ar = n_accepted_warmup / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      warmup {step + 1}/{num_warmup} "
+                          f"non-div={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            # Estimate diagonal mass matrix from warmup
+            half = max(len(warmup_flats) // 2, 1)
+            warmup_stack = jnp.stack(warmup_flats[half:])  # (M, D)
+            var_est = jnp.var(warmup_stack, axis=0)
+            inv_mass_matrix = jnp.maximum(var_est, 1e-6)
+
+            if verbose:
+                print(f"    Estimated mass matrix from "
+                      f"{len(warmup_flats) - half} warmup samples")
+                sys.stdout.flush()
+
+            # Build sampling kernel with adapted mass matrix
+            sampling_kernel = blackjax.nuts(
+                logdensity_flat,
+                step_size=step_size,
+                inverse_mass_matrix=inv_mass_matrix,
+            )
+
+            @jax.jit
+            def sample_step(state, step_key):
+                return sampling_kernel.step(step_key, state)
+
+            # Sampling
+            if verbose:
+                print(f"    Sampling ({num_samples} steps)...")
+                sys.stdout.flush()
+
+            sample_flats = []
+            n_accepted = 0
+            for step in range(num_samples):
+                chain_key, step_key = random.split(chain_key)
+                state, info = sample_step(state, step_key)
+                sample_flats.append(state.position)
+                n_accepted += int(1 - info.is_divergent)
+                if verbose and (step + 1) % 50 == 0:
+                    ar = n_accepted / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      step {step + 1}/{num_samples} "
+                          f"non-divergent={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            accept_ratio = n_accepted / num_samples
+            if verbose:
+                print(f"    Non-divergent ratio: {accept_ratio:.3f}")
+                sys.stdout.flush()
+
+            if accept_ratio > 0.5:
+                # Unravel flat samples back to dict
+                positions = [unravel_fn(f) for f in sample_flats]
+                for var in item_var_list:
+                    stacked = jnp.stack(
+                        [p[var] for p in positions], axis=0)
+                    all_samples[var].append(stacked)
+                all_accept.append(accept_ratio)
+            else:
+                if verbose:
+                    print(f"    Chain discarded (too many divergences)")
+
+        # Stack chains: (num_chains, num_samples, ...)
+        result = {}
+        for var in item_var_list:
+            if all_samples[var]:
+                result[var] = jnp.stack(all_samples[var], axis=0)
+
+        if verbose:
+            print(f"\n  Kept {len(all_accept)}/{num_chains} chains")
+            if all_accept:
+                print(f"  Mean non-divergent: {np.mean(all_accept):.3f}")
+            for var in item_var_list:
+                if var in result:
+                    flat = result[var].reshape(-1, *result[var].shape[2:])
+                    print(f"  {var}: mean={float(jnp.mean(flat)):.4f}, "
+                          f"std={float(jnp.std(flat)):.4f}")
+
+        self.mcmc_samples = result
+        return result
+
+    def compute_eap_abilities(self, data, item_params=None, theta_grid=None,
+                              theta_log_weights=None):
+        """Compute Expected A Posteriori (EAP) ability estimates.
+
+        Given fixed item parameters, computes the posterior mean ability
+        for each person by numerical integration on a theta grid:
+
+            E[theta | x_p, Xi] = sum_q theta_q * P(x_p | theta_q, Xi) * pi(theta_q)
+                                 / sum_q P(x_p | theta_q, Xi) * pi(theta_q)
+
+        If ``item_params`` is None, uses MCMC posterior means from
+        ``self.mcmc_samples`` (averaging over chains and samples).
+
+        Args:
+            data: Data dict with item response columns and person key.
+            item_params: Dict of item parameter arrays. If None, uses
+                posterior means from ``self.mcmc_samples``.
+            theta_grid: (Q,) quadrature points. Defaults to Gauss-Hermite.
+            theta_log_weights: (Q,) log quadrature weights.
+
+        Returns:
+            Dict with:
+                - ``eap``: (N,) posterior mean abilities
+                - ``psd``: (N,) posterior standard deviations
+                - ``posterior``: (N, Q) full posterior on grid
+        """
+        if theta_grid is None:
+            theta_grid, theta_log_weights = self._make_gauss_hermite_grid(61)
+        elif theta_log_weights is None:
+            dtheta = theta_grid[1] - theta_grid[0]
+            theta_log_weights = (
+                -0.5 * theta_grid ** 2
+                - 0.5 * jnp.log(2 * jnp.pi)
+                + jnp.log(dtheta)
+            )
+
+        if item_params is None:
+            if not hasattr(self, 'mcmc_samples') or self.mcmc_samples is None:
+                raise ValueError(
+                    "No item_params provided and no mcmc_samples available. "
+                    "Run fit_marginal_mcmc first or pass item_params."
+                )
+            item_params = {}
+            for var, samples in self.mcmc_samples.items():
+                # (chains, samples, ...) → mean over chains and samples
+                item_params[var] = jnp.mean(
+                    samples.reshape(-1, *samples.shape[2:]), axis=0
+                )
+
+        # (Q, I, K)
+        response_probs = self._response_probs_grid(theta_grid, **item_params)
+        log_rp = jnp.log(jnp.clip(response_probs, 1e-30, None))
+
+        # Observed responses
+        choices = jnp.concat(
+            [data[k][:, jnp.newaxis] for k in self.item_keys], axis=-1
+        )
+        bad = (choices < 0) | (choices >= self.response_cardinality) | jnp.isnan(choices)
+        choices_int = jnp.where(bad, 0, choices).astype(jnp.int32)
+
+        # Imputation
+        imputation_pmfs = data.get('_imputation_pmfs')
+        imputation_weights = data.get('_imputation_weights')
+        has_imputation = imputation_pmfs is not None
+
+        if has_imputation:
+            log_q = jnp.log(jnp.maximum(imputation_pmfs, 1e-30))
+            imp_w = (jnp.asarray(imputation_weights)
+                     if imputation_weights is not None
+                     else jnp.ones(len(self.item_keys), dtype=self.dtype))
+
+        n_items = len(self.item_keys)
+        n_people = choices.shape[0]
+
+        # Vectorized: log P(observed | theta_q) for all people
+        # log_rp: (Q, I, K), choices_int: (N, I)
+        log_obs = log_rp[:, jnp.arange(n_items)[None, :],
+                         choices_int[None, :, :]]  # (Q, N, I)
+
+        if has_imputation:
+            rb = jax.scipy.special.logsumexp(
+                log_rp[:, None, :, :] + log_q[None, :, :, :], axis=-1
+            )  # (Q, N, I)
+            weighted_rb = imp_w[None, None, :] * rb
+            log_obs = jnp.where(bad[None, :, :], weighted_rb, log_obs)
+        else:
+            log_obs = jnp.where(bad[None, :, :], 0.0, log_obs)
+
+        # Sum over items → (Q, N)
+        log_lik = jnp.sum(log_obs, axis=-1)
+
+        # Unnormalized log posterior: (Q, N)
+        log_unnorm = log_lik + theta_log_weights[:, None]
+        log_norm = jax.scipy.special.logsumexp(log_unnorm, axis=0)  # (N,)
+        log_post = log_unnorm - log_norm[None, :]
+        posterior = jnp.exp(log_post)  # (Q, N)
+
+        # EAP and PSD
+        eap = jnp.sum(posterior * theta_grid[:, None], axis=0)  # (N,)
+        psd = jnp.sqrt(
+            jnp.sum(posterior * (theta_grid[:, None] - eap[None, :]) ** 2, axis=0)
+        )  # (N,)
+
+        return {
+            'eap': eap,
+            'psd': psd,
+            'posterior': posterior.T,  # (N, Q)
+            'theta_grid': theta_grid,
         }

@@ -56,7 +56,7 @@ def attach_imputation_pmfs(model, data, pairwise_model):
 
 
 def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
-             theta_grid_size, use_imputation, seed):
+             use_imputation, seed):
     import importlib
     import inspect
     from pathlib import Path
@@ -71,7 +71,6 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     print(f"Marginal MCMC: {dataset_name.upper()}")
     print(f"  Items: {len(item_keys)}, K: {response_cardinality}")
     print(f"  Chains: {num_chains}, Warmup: {num_warmup}, Samples: {num_samples}")
-    print(f"  Theta grid: {theta_grid_size} points")
     print(f"  Imputation: {'yes' if use_imputation else 'no'}")
     print(f"{'='*60}")
 
@@ -111,23 +110,26 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
             print(f"  WARNING: No pairwise stacking model found at {stacking_path}")
             print(f"  Running without imputation")
 
-    # Set up theta grid
-    theta_grid = jnp.linspace(-6, 6, theta_grid_size, dtype=jnp.float64)
-
-    # Run marginal MCMC
+    # Run marginal MCMC (uses Gauss-Hermite quadrature by default)
     print(f"\nStarting NUTS...")
     mcmc_samples = model.fit_marginal_mcmc(
         data,
-        theta_grid=theta_grid,
+        theta_grid=None,
         num_chains=num_chains,
         num_warmup=num_warmup,
         num_samples=num_samples,
         target_accept_prob=0.85,
-        max_tree_depth=10,
         step_size=0.01,
         seed=seed,
         verbose=True,
     )
+
+    # Compute EAP abilities from MCMC item params
+    print(f"\nComputing EAP abilities...")
+    eap_result = model.compute_eap_abilities(data)
+    print(f"  EAP mean: {np.mean(np.array(eap_result['eap'])):.4f}")
+    print(f"  EAP std:  {np.std(np.array(eap_result['eap'])):.4f}")
+    print(f"  Mean PSD: {np.mean(np.array(eap_result['psd'])):.4f}")
 
     # Save MCMC samples
     output_dir = model_path.parent / 'mcmc_samples'
@@ -136,7 +138,8 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     save_dict = {}
     for var_name, samples in mcmc_samples.items():
         save_dict[var_name] = np.array(samples)
-    save_dict['theta_grid'] = np.array(theta_grid)
+    save_dict['eap'] = np.array(eap_result['eap'])
+    save_dict['psd'] = np.array(eap_result['psd'])
     save_dict['num_chains'] = num_chains
     save_dict['num_warmup'] = num_warmup
     save_dict['num_samples'] = num_samples
@@ -178,7 +181,6 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
                     -1, *mcmc_samples[var_name].shape[2:]),
                 axis=0
             )
-            # Find ADVI loc
             loc_key = None
             for pk in model.params:
                 if pk.startswith(var_name) and pk.endswith('loc'):
@@ -190,6 +192,39 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
                 print(f"  {var_name}:")
                 print(f"    |MCMC - ADVI| mean: {np.mean(diff):.4f}, "
                       f"max: {np.max(diff):.4f}")
+
+    # Standardize so abilities ~ N(0,1)
+    print(f"\n--- Standardizing ---")
+    stats = model.standardize_marginal(data)
+
+    # Recompute EAP after standardization
+    eap_result = model.compute_eap_abilities(data)
+    print(f"  Post-standardization EAP: mean={np.mean(np.array(eap_result['eap'])):.4f}, "
+          f"std={np.std(np.array(eap_result['eap'])):.4f}")
+
+    # Fit surrogate to MCMC samples (for downstream compatibility)
+    print(f"\n--- Fitting surrogate to MCMC ---")
+    model.fit_surrogate_to_mcmc()
+
+    # Inject EAP abilities into surrogate_sample for save_to_disk
+    eap_arr = np.array(eap_result['eap'])
+    model.surrogate_sample['abilities'] = jnp.array(
+        eap_arr[:, np.newaxis, np.newaxis, np.newaxis]
+    )[np.newaxis, ...]  # (1, N, 1, 1, 1) — single "sample"
+
+    # Save the full model to disk (includes MCMC samples + surrogate)
+    mcmc_model_dir = model_path.parent / 'grm_mcmc'
+    print(f"\n--- Saving model to {mcmc_model_dir} ---")
+    model.save_to_disk(str(mcmc_model_dir))
+    print(f"  Model saved (includes mcmc_samples, params, surrogate_sample)")
+
+    # Also save standalone NPZ for quick access
+    save_dict['eap_standardized'] = np.array(eap_result['eap'])
+    save_dict['psd_standardized'] = np.array(eap_result['psd'])
+    save_dict['standardize_mu'] = stats['mu']
+    save_dict['standardize_sigma'] = stats['sigma']
+    np.savez(out_path, **save_dict)
+    print(f"  NPZ updated: {out_path}")
 
     del model, mcmc_samples
     gc.collect()
@@ -207,7 +242,6 @@ def main():
     parser.add_argument('--num-chains', type=int, default=4)
     parser.add_argument('--num-warmup', type=int, default=500)
     parser.add_argument('--num-samples', type=int, default=500)
-    parser.add_argument('--theta-grid-size', type=int, default=200)
     parser.add_argument('--no-imputation', action='store_true',
                         help='Skip imputation model (treat missing as ignorable)')
     parser.add_argument('--seed', type=int, default=42)
@@ -228,7 +262,6 @@ def main():
         num_chains=args.num_chains,
         num_warmup=args.num_warmup,
         num_samples=args.num_samples,
-        theta_grid_size=args.theta_grid_size,
         use_imputation=not args.no_imputation,
         seed=args.seed,
     )

@@ -183,6 +183,31 @@ class NeuralLogisticModel(IRTModel):
         # We need to return shape compatible with the function
         return z[..., jnp.newaxis]  # (..., N, I, 1)
 
+    def _response_probs_grid(self, theta_grid, **item_params):
+        """Compute P(Y_i = k | theta_q) for the binary neural logistic model."""
+        nn_scales = item_params['nn_scales']
+        nn_shifts = item_params['nn_shifts']
+        nn_logit_weights = item_params['nn_logit_weights']
+        discriminations = item_params.get('discriminations')
+
+        # theta_grid: (Q,) → (Q, 1, 1, 1) for _project_abilities
+        theta = theta_grid[:, None, None, None]  # (Q, 1, 1, 1)
+        if self.dimensions > 1:
+            theta = jnp.broadcast_to(
+                theta_grid[:, None, None, None, None],
+                (len(theta_grid), 1, self.dimensions, 1, 1)
+            )
+
+        theta_proj = self._project_abilities(theta, discriminations)
+
+        p = _mixture_of_logits_binary(
+            theta_proj, nn_scales, nn_shifts, nn_logit_weights
+        )
+        p = jnp.clip(p, 1e-7, 1.0 - 1e-7)
+        # p: (Q, I) → stack to (Q, I, 2) for binary
+        probs = jnp.stack([1.0 - p, p], axis=-1)
+        return probs  # (Q, I, 2)
+
     def predictive_distribution(self, data, abilities, nn_scales, nn_shifts,
                                 nn_logit_weights, discriminations=None, **kwargs):
         """Compute log-likelihood for binary responses."""
