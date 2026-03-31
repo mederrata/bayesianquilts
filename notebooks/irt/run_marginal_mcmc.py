@@ -56,7 +56,7 @@ def attach_imputation_pmfs(model, data, pairwise_model):
 
 
 def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
-             use_imputation, seed):
+             use_imputation, seed, step_size=0.01):
     import importlib
     import inspect
     from pathlib import Path
@@ -119,7 +119,7 @@ def run_mcmc(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         num_warmup=num_warmup,
         num_samples=num_samples,
         target_accept_prob=0.85,
-        step_size=0.01,
+        step_size=step_size,
         seed=seed,
         verbose=True,
     )
@@ -242,6 +242,8 @@ def main():
     parser.add_argument('--num-chains', type=int, default=4)
     parser.add_argument('--num-warmup', type=int, default=500)
     parser.add_argument('--num-samples', type=int, default=500)
+    parser.add_argument('--step-size', type=float, default=0.01,
+                        help='Initial NUTS step size')
     parser.add_argument('--no-imputation', action='store_true',
                         help='Skip imputation model (treat missing as ignorable)')
     parser.add_argument('--seed', type=int, default=42)
@@ -263,6 +265,7 @@ def main():
         num_warmup=args.num_warmup,
         num_samples=args.num_samples,
         use_imputation=not args.no_imputation,
+        step_size=args.step_size,
         seed=args.seed,
     )
 
