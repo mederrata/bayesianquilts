@@ -32,7 +32,12 @@ class FactorizedGRModel(IRTModel):
             discrimination_prior_scale (float): HalfNormal scale for the
                 discrimination prior (default 2.0).
         """
-        self.scale_indices = scale_indices
+        if isinstance(scale_indices, dict):
+            self.scale_names = list(scale_indices.keys())
+            self.scale_indices = list(scale_indices.values())
+        else:
+            self.scale_names = None
+            self.scale_indices = scale_indices
         super(FactorizedGRModel, self).__init__(*args, **kwargs)
         self.discrimination_prior_scale = discrimination_prior_scale
         self.dimensions = len(scale_indices)
