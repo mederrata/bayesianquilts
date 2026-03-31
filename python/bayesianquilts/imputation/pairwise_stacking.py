@@ -1850,7 +1850,7 @@ class PairwiseOrdinalStackingModel:
         """Load a fitted model from a YAML file."""
         path = Path(path)
         with open(path, "r") as f:
-            state = yaml.safe_load(f)
+            state = yaml.unsafe_load(f)
 
         cfg = state["config"]
         instance = cls(

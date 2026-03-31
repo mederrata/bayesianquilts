@@ -99,8 +99,25 @@ class IrtMixedImputationModel:
         This makes the IRT ELPD directly comparable to the MICE conditional
         predictive density, since both measure p(y_ni | y_{n,-i}).
 
+        For factorized models (multiple dimensions), each dimension's items
+        are processed independently with 1D quadrature over that dimension's
+        latent trait.
+
         Stores per-item ELPD and per-observation LOO scores.
         """
+        from bayesianquilts.irt.factorizedgrm import FactorizedGRModel
+
+        model = self.irt_model
+        item_keys = model.item_keys
+        K = model.response_cardinality
+
+        if isinstance(model, FactorizedGRModel):
+            self._compute_irt_elpd_factorized(data_factory)
+        else:
+            self._compute_irt_elpd_single(data_factory)
+
+    def _compute_irt_elpd_single(self, data_factory):
+        """ELPD computation for single-dimension GRM models."""
         from numpy.polynomial.hermite import hermgauss
 
         model = self.irt_model
@@ -191,6 +208,121 @@ class IrtMixedImputationModel:
 
                 item_loo_scores[item_key].append(log_cond_pred[mask_i])
 
+        self._finalize_irt_elpd(item_keys, item_loo_scores)
+
+    def _compute_irt_elpd_factorized(self, data_factory):
+        """ELPD computation for factorized (multi-dimension) GRM models.
+
+        Each dimension's items are conditionally independent given that
+        dimension's latent trait, so we do 1D quadrature per dimension
+        using only items from that dimension for LOO.
+        """
+        from numpy.polynomial.hermite import hermgauss
+        from bayesianquilts.irt.grm import GRModel
+
+        model = self.irt_model
+        item_keys = model.item_keys
+        K = model.response_cardinality
+
+        # Gauss-Hermite quadrature
+        n_quad = 61
+        nodes, weights = hermgauss(n_quad)
+        quad_points = nodes * np.sqrt(2)
+        quad_weights = weights / np.sqrt(np.pi)
+        log_quad_w = np.log(quad_weights)
+
+        # Get per-dimension item parameters from surrogate samples
+        samples = model.surrogate_sample
+
+        # Build per-dimension log-prob tables
+        # For each dimension d, compute probs at quad points for that dim's items
+        dim_log_probs = {}  # dim_idx -> (Q, n_items_d, K)
+        dim_item_indices = {}  # dim_idx -> list of global item indices
+
+        for d, indices in enumerate(model.scale_indices):
+            n_items_d = len(indices)
+            dim_item_indices[d] = indices
+
+            # Extract per-dimension parameters (already separate in surrogate)
+            disc_d = np.asarray(samples[f"discriminations_{d}"]).mean(0)
+            diff0_d = np.asarray(samples[f"difficulties0_{d}"]).mean(0)
+            ddiff_d = (np.asarray(samples[f"ddifficulties_{d}"]).mean(0)
+                       if f"ddifficulties_{d}" in samples else None)
+
+            # Construct 1D abilities: (Q, 1, 1, 1)
+            theta_q = np.zeros((n_quad, 1, 1, 1), dtype=np.float64)
+            theta_q[:, 0, 0, 0] = quad_points
+
+            # Use a temporary 1D GRM to compute probs
+            probs_d = np.asarray(GRModel.grm_model_prob_d(
+                model,
+                jnp.asarray(theta_q),
+                jnp.asarray(disc_d),
+                jnp.asarray(diff0_d),
+                jnp.asarray(ddiff_d) if ddiff_d is not None else None,
+            ))
+            probs_d = np.clip(probs_d, 1e-30, None)
+            # Squeeze singleton dimensions: (Q, 1, n_items_d, K) -> (Q, n_items_d, K)
+            while probs_d.ndim > 3:
+                for ax in range(1, probs_d.ndim - 2):
+                    if probs_d.shape[ax] == 1:
+                        probs_d = probs_d.squeeze(axis=ax)
+                        break
+                else:
+                    break
+            dim_log_probs[d] = np.log(probs_d)  # (Q, n_items_d, K)
+
+        # Map global item index -> (dimension, local index within dimension)
+        item_to_dim = {}
+        for d, indices in enumerate(model.scale_indices):
+            for local_idx, global_idx in enumerate(indices):
+                item_to_dim[global_idx] = (d, local_idx)
+
+        # Accumulate per-item LOO scores
+        item_loo_scores: Dict[str, List[np.ndarray]] = {k: [] for k in item_keys}
+
+        for batch in data_factory():
+            # Process each dimension independently
+            for d, indices in enumerate(model.scale_indices):
+                dim_keys = [item_keys[i] for i in indices]
+                log_probs = dim_log_probs[d]  # (Q, n_items_d, K)
+
+                responses = np.stack(
+                    [np.asarray(batch[k], dtype=np.float64) for k in dim_keys],
+                    axis=-1,
+                )  # (N_batch, n_items_d)
+                observed = ~np.isnan(responses) & (responses >= 0) & (responses < K)
+                responses_int = np.where(observed, responses.astype(np.int64), 0)
+
+                # log p(y_nj | θ_q): (Q, N_batch, n_items_d)
+                log_lik_per_item = log_probs[:, np.newaxis, :, :]  # (Q, 1, n_d, K)
+                resp_idx = responses_int[np.newaxis, :, :, np.newaxis]  # (1, N, n_d, 1)
+                log_lik_qi = np.take_along_axis(
+                    log_lik_per_item, resp_idx, axis=-1
+                )[..., 0]  # (Q, N_batch, n_items_d)
+
+                log_lik_qi = np.where(observed[np.newaxis, :, :], log_lik_qi, 0.0)
+                total_ll = np.sum(log_lik_qi, axis=-1)  # (Q, N_batch)
+
+                for local_idx, item_key in enumerate(dim_keys):
+                    mask_i = observed[:, local_idx]
+                    if not np.any(mask_i):
+                        continue
+
+                    loo_ll = total_ll - log_lik_qi[:, :, local_idx]
+                    log_posterior = log_quad_w[:, np.newaxis] + loo_ll
+                    log_Z = np.logaddexp.reduce(log_posterior, axis=0)
+                    log_post_norm = log_posterior - log_Z[np.newaxis, :]
+
+                    log_pred = log_post_norm + log_lik_qi[:, :, local_idx]
+                    log_cond_pred = np.logaddexp.reduce(log_pred, axis=0)
+
+                    item_loo_scores[item_key].append(log_cond_pred[mask_i])
+
+        self._finalize_irt_elpd(item_keys, item_loo_scores)
+
+    def _finalize_irt_elpd(self, item_keys, item_loo_scores):
+        """Aggregate per-item LOO scores into ELPD estimates."""
         # Aggregate per-item
         self._irt_khat_per_item: Dict[str, float] = {}
         self._irt_elpd_loo_per_obs: Dict[str, np.ndarray] = {}
