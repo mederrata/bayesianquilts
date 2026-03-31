@@ -1856,38 +1856,64 @@ class IRTModel(BayesianModel):
         n_items = len(self.item_keys)
         n_people = choices.shape[0]
 
-        # Vectorized: log P(observed | theta_q) for all people
-        # log_rp: (Q, I, K), choices_int: (N, I)
-        log_obs = log_rp[:, jnp.arange(n_items)[None, :],
-                         choices_int[None, :, :]]  # (Q, N, I)
+        def _compute_eap_on_grid(theta_g, theta_lw):
+            """Compute EAP/PSD on a given grid."""
+            rp = self._response_probs_grid(theta_g, **item_params)
+            lrp = jnp.log(jnp.clip(rp, 1e-30, None))
 
-        if has_imputation:
-            rb = jax.scipy.special.logsumexp(
-                log_rp[:, None, :, :] + log_q[None, :, :, :], axis=-1
-            )  # (Q, N, I)
-            weighted_rb = imp_w[None, None, :] * rb
-            log_obs = jnp.where(bad[None, :, :], weighted_rb, log_obs)
-        else:
-            log_obs = jnp.where(bad[None, :, :], 0.0, log_obs)
+            log_obs_g = jnp.take_along_axis(
+                lrp[:, None, :, :],
+                choices_int[None, :, :, None],
+                axis=-1
+            ).squeeze(-1)  # (Q, N, I)
 
-        # Sum over items → (Q, N)
-        log_lik = jnp.sum(log_obs, axis=-1)
+            if has_imputation:
+                rb = jax.scipy.special.logsumexp(
+                    lrp[:, None, :, :] + log_q[None, :, :, :], axis=-1
+                )
+                weighted_rb = imp_w[None, None, :] * rb
+                log_obs_g = jnp.where(bad[None, :, :], weighted_rb, log_obs_g)
+            else:
+                log_obs_g = jnp.where(bad[None, :, :], 0.0, log_obs_g)
 
-        # Unnormalized log posterior: (Q, N)
-        log_unnorm = log_lik + theta_log_weights[:, None]
-        log_norm = jax.scipy.special.logsumexp(log_unnorm, axis=0)  # (N,)
-        log_post = log_unnorm - log_norm[None, :]
-        posterior = jnp.exp(log_post)  # (Q, N)
+            log_lik_g = jnp.sum(log_obs_g, axis=-1)  # (Q, N)
+            log_unnorm = log_lik_g + theta_lw[:, None]
+            log_norm = jax.scipy.special.logsumexp(log_unnorm, axis=0)
+            post = jnp.exp(log_unnorm - log_norm[None, :])  # (Q, N)
 
-        # EAP and PSD
-        eap = jnp.sum(posterior * theta_grid[:, None], axis=0)  # (N,)
-        psd = jnp.sqrt(
-            jnp.sum(posterior * (theta_grid[:, None] - eap[None, :]) ** 2, axis=0)
-        )  # (N,)
+            eap_g = jnp.sum(post * theta_g[:, None], axis=0)
+            psd_g = jnp.sqrt(
+                jnp.sum(post * (theta_g[:, None] - eap_g[None, :]) ** 2, axis=0)
+            )
+            return eap_g, psd_g, post
+
+        # Pass 1: coarse grid to find approximate EAP
+        eap_coarse, psd_coarse, _ = _compute_eap_on_grid(
+            theta_grid, theta_log_weights)
+
+        # Pass 2: refined grid centered on each person's EAP
+        # Use a uniform grid of width ±4*max(psd, 0.5) around the coarse EAP
+        # For efficiency, use a single grid centered on the population mean
+        # with width covering the full range of abilities
+        eap_mean = jnp.mean(eap_coarse)
+        eap_range = jnp.maximum(jnp.std(eap_coarse), 0.5)
+        fine_lo = eap_mean - 5 * eap_range
+        fine_hi = eap_mean + 5 * eap_range
+        n_fine = 201
+        fine_grid = jnp.linspace(fine_lo, fine_hi, n_fine)
+        dtheta = fine_grid[1] - fine_grid[0]
+        fine_log_weights = (
+            -0.5 * fine_grid ** 2
+            - 0.5 * jnp.log(2 * jnp.pi)
+            + jnp.log(dtheta)
+        )
+
+        eap, psd, posterior = _compute_eap_on_grid(
+            fine_grid, fine_log_weights)
 
         return {
             'eap': eap,
             'psd': psd,
             'posterior': posterior.T,  # (N, Q)
-            'theta_grid': theta_grid,
+            'theta_grid': fine_grid,
         }
