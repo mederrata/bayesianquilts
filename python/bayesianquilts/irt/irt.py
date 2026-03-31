@@ -1751,17 +1751,14 @@ class IRTModel(BayesianModel):
                 print(f"    Non-divergent ratio: {accept_ratio:.3f}")
                 sys.stdout.flush()
 
-            if accept_ratio > 0.5:
-                # Unravel flat samples back to dict
-                positions = [unravel_fn(f) for f in sample_flats]
-                for var in item_var_list:
-                    stacked = jnp.stack(
-                        [p[var] for p in positions], axis=0)
-                    all_samples[var].append(stacked)
-                all_accept.append(accept_ratio)
-            else:
-                if verbose:
-                    print(f"    Chain discarded (too many divergences)")
+            # Keep all chains — divergent samples are still informative
+            # for posterior mean estimation, and the user can filter post-hoc
+            positions = [unravel_fn(f) for f in sample_flats]
+            for var in item_var_list:
+                stacked = jnp.stack(
+                    [p[var] for p in positions], axis=0)
+                all_samples[var].append(stacked)
+            all_accept.append(accept_ratio)
 
         # Stack chains: (num_chains, num_samples, ...)
         result = {}
