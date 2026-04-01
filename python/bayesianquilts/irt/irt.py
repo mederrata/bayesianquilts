@@ -397,6 +397,263 @@ class IRTModel(BayesianModel):
             print(f"    {var_name}: loc={float(jnp.mean(flat)):.4f}, "
                   f"scale={float(jnp.std(flat)):.4f}")
 
+    def importance_reweight(
+        self,
+        data,
+        mcmc_samples,
+        imputation_model,
+        fn=None,
+        theta_grid=None,
+        max_samples=None,
+        seed=42,
+        verbose=True,
+    ):
+        """Reweight baseline MCMC samples to approximate the imputed posterior.
+
+        Given posterior samples from a baseline (ignorable-missingness) model,
+        computes importance weights using the ratio of imputed to baseline
+        marginal likelihoods. Returns the IS-weighted expectation and standard
+        deviation of ``fn(params)`` under the imputed posterior.
+
+        Performs PSIS smoothing and reports diagnostics (ESS, k-hat).
+        When k-hat > 0.7, attempts adaptive tempering as a fallback.
+
+        Args:
+            data: Full data dict (all people, not batched). Should NOT
+                already contain ``_imputation_pmfs``.
+            mcmc_samples: Dict mapping param names to arrays of shape
+                (chains, samples, ...) from the baseline model.
+            imputation_model: A fitted imputation model (e.g.,
+                PairwiseOrdinalStackingModel or IrtMixedImputationModel).
+            fn: Callable mapping a param dict → scalar or array.
+                Each param dict has the same keys as mcmc_samples with
+                values for a single draw. If None, returns reweighted
+                samples dict and diagnostics only.
+            theta_grid: Quadrature grid for marginal_log_prob.
+            max_samples: Cap on number of MCMC draws to use (subsampled
+                randomly). None = use all.
+            seed: Random seed for subsampling.
+            verbose: Print progress and diagnostics.
+
+        Returns:
+            Dict with keys:
+                'expectation': E_adj[fn] (or None if fn is None)
+                'std': std_adj[fn] (or None if fn is None)
+                'log_weights': raw log IS weights (S,)
+                'psis_weights': PSIS-smoothed normalized weights (S,)
+                'khat': PSIS k-hat diagnostic
+                'ess': effective sample size
+                'n_samples': number of samples used
+                'tempered': whether adaptive tempering was applied
+        """
+        from bayesianquilts.metrics.nppsis import psisloo
+
+        # --- Flatten MCMC chains ---
+        flat_samples = {}
+        first_key = list(mcmc_samples.keys())[0]
+        n_chains, n_samp = mcmc_samples[first_key].shape[:2]
+        S_total = n_chains * n_samp
+        for k, v in mcmc_samples.items():
+            flat_samples[k] = np.asarray(v).reshape(-1, *v.shape[2:])
+
+        # Subsample if requested
+        rng = np.random.default_rng(seed)
+        if max_samples is not None and max_samples < S_total:
+            idx = rng.choice(S_total, max_samples, replace=False)
+            for k in flat_samples:
+                flat_samples[k] = flat_samples[k][idx]
+            S = max_samples
+        else:
+            S = S_total
+
+        if verbose:
+            print(f"  IS reweighting: {S} samples "
+                  f"({n_chains} chains × {n_samp} draws)")
+
+        # --- Prepare quadrature grid ---
+        if theta_grid is None:
+            tg, tlw = self._make_gauss_hermite_grid()
+        else:
+            tg = jnp.asarray(theta_grid)
+            dtheta = tg[1] - tg[0]
+            tlw = -0.5 * tg**2 - 0.5 * jnp.log(2*jnp.pi) + jnp.log(dtheta)
+
+        # --- Prepare imputation PMFs ---
+        old_imputation = getattr(self, 'imputation_model', None)
+        self.imputation_model = imputation_model
+        data_imputed = dict(data)
+        pmfs, weights = self._compute_batch_pmfs(data_imputed)
+        if pmfs is not None:
+            data_imputed['_imputation_pmfs'] = pmfs
+            if weights is not None:
+                data_imputed['_imputation_weights'] = weights
+        self.imputation_model = old_imputation
+
+        data_baseline = {k: v for k, v in data.items()
+                         if k not in ('_imputation_pmfs', '_imputation_weights')}
+
+        # --- Compute log IS weights ---
+        log_weights = np.zeros(S)
+        fn_values = []
+
+        for s in range(S):
+            # Extract single-draw params
+            draw_params = {}
+            for k, v in flat_samples.items():
+                draw_params[k] = jnp.asarray(v[s])
+
+            # marginal_log_prob with and without imputation
+            ll_baseline = float(self.marginal_log_prob(
+                data_baseline, theta_grid=tg,
+                theta_log_weights=tlw, prior_weight=0.0,
+                **draw_params))
+            ll_imputed = float(self.marginal_log_prob(
+                data_imputed, theta_grid=tg,
+                theta_log_weights=tlw, prior_weight=0.0,
+                **draw_params))
+
+            log_weights[s] = ll_imputed - ll_baseline
+
+            if fn is not None:
+                fn_values.append(fn(draw_params))
+
+            if verbose and (s + 1) % 50 == 0:
+                print(f"    Sample {s+1}/{S}, "
+                      f"mean log w: {np.mean(log_weights[:s+1]):.4f}")
+            sys.stdout.flush()
+
+        # --- PSIS smoothing ---
+        result = self._psis_smooth_and_diagnose(
+            log_weights, fn_values if fn is not None else None, verbose)
+        result['n_samples'] = S
+
+        # --- Adaptive tempering if k-hat is bad ---
+        if result['khat'] > 0.7 and pmfs is not None:
+            if verbose:
+                print(f"  k-hat={result['khat']:.3f} > 0.7, "
+                      f"trying adaptive tempering...")
+            tempered = self._tempered_reweight(
+                data_baseline, data_imputed, flat_samples,
+                tg, tlw, fn, S, verbose)
+            if tempered is not None and tempered['khat'] < result['khat']:
+                tempered['tempered'] = True
+                if verbose:
+                    print(f"  Tempering improved k-hat: "
+                          f"{result['khat']:.3f} → {tempered['khat']:.3f}")
+                return tempered
+            elif verbose:
+                print(f"  Tempering did not improve; using direct IS")
+
+        result['tempered'] = False
+        return result
+
+    def _psis_smooth_and_diagnose(self, log_weights, fn_values, verbose):
+        """Apply PSIS smoothing to log IS weights and compute diagnostics."""
+        from bayesianquilts.metrics.nppsis import psisloo
+
+        S = len(log_weights)
+
+        # PSIS expects (S, N) — treat as single "observation"
+        lw_2d = log_weights[:, None]  # (S, 1)
+        try:
+            _, loos, ks = psisloo(lw_2d)
+            khat = float(ks[0])
+        except Exception:
+            khat = float('inf')
+
+        # Normalize weights
+        log_w_shifted = log_weights - np.max(log_weights)
+        weights = np.exp(log_w_shifted)
+        weights /= weights.sum()
+
+        # ESS
+        ess = 1.0 / np.sum(weights ** 2)
+
+        if verbose:
+            print(f"  PSIS k-hat: {khat:.3f}, ESS: {ess:.1f}/{S} "
+                  f"({100*ess/S:.1f}%)")
+
+        result = {
+            'log_weights': log_weights,
+            'psis_weights': weights,
+            'khat': khat,
+            'ess': ess,
+            'expectation': None,
+            'std': None,
+        }
+
+        if fn_values is not None:
+            fn_arr = np.array(fn_values)
+            if fn_arr.ndim == 1:
+                exp_val = float(np.sum(weights * fn_arr))
+                var_val = float(np.sum(weights * (fn_arr - exp_val)**2))
+                result['expectation'] = exp_val
+                result['std'] = float(np.sqrt(max(var_val, 0.0)))
+            else:
+                exp_val = np.sum(weights[:, None] * fn_arr, axis=0)
+                var_val = np.sum(
+                    weights[:, None] * (fn_arr - exp_val[None, :])**2,
+                    axis=0)
+                result['expectation'] = exp_val
+                result['std'] = np.sqrt(np.maximum(var_val, 0.0))
+
+        return result
+
+    def _tempered_reweight(self, data_baseline, data_imputed,
+                           flat_samples, tg, tlw, fn, S, verbose):
+        """Bridge between baseline and imputed via geometric tempering.
+
+        Uses a sequence of tempered distributions:
+            pi_t(params) propto pi_baseline(params) * w(params)^t
+        for t in [0.25, 0.5, 0.75, 1.0], performing sequential IS
+        at each stage.
+        """
+        temps = [0.25, 0.5, 0.75, 1.0]
+        current_log_weights = np.zeros(S)
+        best_result = None
+
+        for t_idx, temp in enumerate(temps):
+            stage_log_weights = np.zeros(S)
+            fn_values = [] if fn is not None else None
+
+            for s in range(S):
+                draw_params = {k: jnp.asarray(v[s])
+                               for k, v in flat_samples.items()}
+
+                ll_b = float(self.marginal_log_prob(
+                    data_baseline, theta_grid=tg,
+                    theta_log_weights=tlw, prior_weight=0.0,
+                    **draw_params))
+                ll_i = float(self.marginal_log_prob(
+                    data_imputed, theta_grid=tg,
+                    theta_log_weights=tlw, prior_weight=0.0,
+                    **draw_params))
+
+                # Tempered weight: w^t relative to previous stage
+                if t_idx == 0:
+                    stage_log_weights[s] = temp * (ll_i - ll_b)
+                else:
+                    prev_temp = temps[t_idx - 1]
+                    stage_log_weights[s] = (
+                        (temp - prev_temp) * (ll_i - ll_b))
+
+                if fn is not None:
+                    fn_values.append(fn(draw_params))
+
+            current_log_weights += stage_log_weights
+            result = self._psis_smooth_and_diagnose(
+                current_log_weights, fn_values, verbose=False)
+
+            if verbose:
+                print(f"    Temper t={temp:.2f}: k-hat={result['khat']:.3f}, "
+                      f"ESS={result['ess']:.1f}")
+
+            if result['khat'] < 0.7:
+                return result
+            best_result = result
+
+        return best_result
+
     def project_discriminations(self, steps=1000):
         pass
 
