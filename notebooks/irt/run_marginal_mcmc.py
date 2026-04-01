@@ -139,9 +139,15 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     from bayesianquilts.irt.grm import GRModel
 
     config = DATASET_CONFIGS[dataset_name]
+    is_factorized = config.get('factorized', False)
     mod = importlib.import_module(config['module'])
     item_keys = mod.item_keys
     response_cardinality = mod.response_cardinality
+
+    if is_factorized:
+        from bayesianquilts.irt.factorizedgrm import FactorizedGRModel as ModelClass
+    else:
+        ModelClass = GRModel
 
     model_path = Path(model_dir)
     output_dir = model_path.parent
@@ -172,7 +178,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
 
     # ---- Baseline: no imputation ----
     if 'baseline' in variants:
-        model = GRModel.load_from_disk(str(model_path))
+        model = ModelClass.load_from_disk(str(model_path))
         data = dict(base_data)  # no imputation PMFs
         run_single_variant(model, data, 'baseline', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed)
@@ -181,7 +187,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
 
     # ---- Pairwise: pairwise stacking only ----
     if 'pairwise' in variants and pairwise_model is not None:
-        model = GRModel.load_from_disk(str(model_path))
+        model = ModelClass.load_from_disk(str(model_path))
         model.imputation_model = pairwise_model
         data = dict(base_data)
         pmfs, weights = model._compute_batch_pmfs(data)
@@ -197,7 +203,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     # ---- Mixed: pairwise + IRT baseline blend ----
     if 'mixed' in variants and pairwise_model is not None:
         from bayesianquilts.imputation.mixed import IrtMixedImputationModel
-        model = GRModel.load_from_disk(str(model_path))
+        model = ModelClass.load_from_disk(str(model_path))
 
         # Build mixed imputation model from pairwise + baseline
         # Need calibrated expectations for the IRT component
