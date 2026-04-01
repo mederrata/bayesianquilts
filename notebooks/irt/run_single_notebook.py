@@ -61,6 +61,14 @@ DATASET_CONFIGS = {
         'module': 'bayesianquilts.data.bouldering',
         'n_top_features': 40,
     },
+    'promis_sleep': {
+        'module': 'bayesianquilts.data.promis_sleep',
+        'n_top_features': 30,
+    },
+    'promis_substance_use': {
+        'module': 'bayesianquilts.data.promis_substance_use',
+        'n_top_features': 30,
+    },
 }
 
 
