@@ -1672,17 +1672,20 @@ class IRTModel(BayesianModel):
             # Identity mass matrix (flat 1D)
             inv_mass_matrix = jnp.ones(n_flat)
 
-            # Step-by-step warmup with automatic step size reduction
+            # Two-phase warmup:
+            # Phase 1: identity mass matrix → estimate diagonal mass matrix
+            # Phase 2: adapted mass matrix → proper warmup for sampling
             current_step_size = step_size
-            warmup_flats = []
-            n_accepted_warmup = 0
+            phase1_steps = num_warmup // 2
+            phase2_steps = num_warmup - phase1_steps
 
+            # Phase 1: explore with identity mass matrix
             if verbose:
-                print(f"    Warmup ({num_warmup} steps, "
-                      f"step_size={current_step_size})...")
+                print(f"    Phase 1: {phase1_steps} steps, "
+                      f"step_size={current_step_size}, identity mass...")
                 sys.stdout.flush()
 
-            for attempt in range(3):  # up to 3 attempts with smaller step size
+            for attempt in range(3):
                 warmup_kernel = blackjax.nuts(
                     logdensity_flat,
                     step_size=current_step_size,
@@ -1691,49 +1694,91 @@ class IRTModel(BayesianModel):
                 state = warmup_kernel.init(init_flat)
 
                 @jax.jit
-                def warmup_step(state, step_key):
+                def warmup_step_p1(state, step_key):
                     return warmup_kernel.step(step_key, state)
 
-                warmup_flats = []
-                n_accepted_warmup = 0
+                phase1_flats = []
+                n_accepted_p1 = 0
 
-                for step in range(num_warmup):
+                for step in range(phase1_steps):
                     chain_key, step_key = random.split(chain_key)
-                    state, info = warmup_step(state, step_key)
-                    is_good = int(1 - info.is_divergent)
-                    n_accepted_warmup += is_good
-                    warmup_flats.append(state.position)
+                    state, info = warmup_step_p1(state, step_key)
+                    n_accepted_p1 += int(1 - info.is_divergent)
+                    phase1_flats.append(state.position)
 
                     if verbose and (step + 1) % 50 == 0:
-                        ar = n_accepted_warmup / (step + 1)
+                        ar = n_accepted_p1 / (step + 1)
                         lp = float(state.logdensity)
-                        print(f"      warmup {step + 1}/{num_warmup} "
+                        print(f"      p1 {step + 1}/{phase1_steps} "
                               f"non-div={ar:.3f} lp={lp:.1f}")
                         sys.stdout.flush()
 
-                warmup_rate = n_accepted_warmup / num_warmup
-                if warmup_rate >= 0.1:
-                    break  # good enough
+                p1_rate = n_accepted_p1 / max(phase1_steps, 1)
+                if p1_rate >= 0.1:
+                    break
 
-                # Reduce step size and retry
                 current_step_size *= 0.1
                 if verbose:
-                    print(f"    Warmup non-div rate {warmup_rate:.3f} too low, "
-                          f"retrying with step_size={current_step_size}")
+                    print(f"    Phase 1 non-div {p1_rate:.3f} too low, "
+                          f"retrying step_size={current_step_size}")
                     sys.stdout.flush()
 
-            # Estimate diagonal mass matrix from warmup
-            half = max(len(warmup_flats) // 2, 1)
-            warmup_stack = jnp.stack(warmup_flats[half:])  # (M, D)
-            var_est = jnp.var(warmup_stack, axis=0)
+            # Estimate mass matrix from phase 1
+            quarter = max(len(phase1_flats) // 4, 1)
+            p1_stack = jnp.stack(phase1_flats[quarter:])
+            var_est = jnp.var(p1_stack, axis=0)
             inv_mass_matrix = jnp.maximum(var_est, 1e-6)
 
             if verbose:
                 print(f"    Estimated mass matrix from "
-                      f"{len(warmup_flats) - half} warmup samples")
+                      f"{len(phase1_flats) - quarter} phase-1 samples")
+
+            # Phase 2: warmup with adapted mass matrix
+            if verbose:
+                print(f"    Phase 2: {phase2_steps} steps, "
+                      f"adapted mass matrix...")
                 sys.stdout.flush()
 
-            # Build sampling kernel with adapted mass matrix
+            warmup_kernel_p2 = blackjax.nuts(
+                logdensity_flat,
+                step_size=current_step_size,
+                inverse_mass_matrix=inv_mass_matrix,
+            )
+
+            @jax.jit
+            def warmup_step_p2(state, step_key):
+                return warmup_kernel_p2.step(step_key, state)
+
+            phase2_flats = []
+            n_accepted_p2 = 0
+
+            for step in range(phase2_steps):
+                chain_key, step_key = random.split(chain_key)
+                state, info = warmup_step_p2(state, step_key)
+                n_accepted_p2 += int(1 - info.is_divergent)
+                phase2_flats.append(state.position)
+
+                if verbose and (step + 1) % 50 == 0:
+                    ar = n_accepted_p2 / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      p2 {step + 1}/{phase2_steps} "
+                          f"non-div={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            # Re-estimate mass matrix from phase 2 (better estimate)
+            p2_half = max(len(phase2_flats) // 2, 1)
+            p2_stack = jnp.stack(phase2_flats[p2_half:])
+            var_est = jnp.var(p2_stack, axis=0)
+            inv_mass_matrix = jnp.maximum(var_est, 1e-6)
+
+            if verbose:
+                p2_rate = n_accepted_p2 / max(phase2_steps, 1)
+                print(f"    Phase 2 non-div: {p2_rate:.3f}, "
+                      f"re-estimated mass matrix from "
+                      f"{len(phase2_flats) - p2_half} samples")
+                sys.stdout.flush()
+
+            # Build sampling kernel with final mass matrix
             sampling_kernel = blackjax.nuts(
                 logdensity_flat,
                 step_size=current_step_size,
