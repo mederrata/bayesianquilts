@@ -211,7 +211,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         mixed_model = IrtMixedImputationModel(
             irt_model=model,
             mice_model=pairwise_model,
-            data_factory=_data_factory(),
+            data_factory=_data_factory,
         )
         model.imputation_model = mixed_model
 
