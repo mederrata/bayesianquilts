@@ -1926,35 +1926,93 @@ class IRTModel(BayesianModel):
 
             init_flat, _ = ravel_pytree(initial_positions[chain_idx])
 
-            # Use BlackJAX window adaptation (dual averaging for step size
-            # + mass matrix adaptation, like Stan's warmup)
-            warmup = blackjax.window_adaptation(
-                blackjax.nuts,
-                logdensity_flat,
-                is_mass_matrix_diagonal=True,
-                initial_step_size=step_size,
-                target_acceptance_rate=target_accept_prob,
-                progress_bar=False,
-            )
+            # Step-by-step warmup with dual averaging for step size
+            # and diagonal mass matrix adaptation.
+            # Phase 1: warmup with identity mass, adapt step size
+            # Phase 2: warmup with estimated mass, re-adapt step size
+            from blackjax.optimizers.dual_averaging import dual_averaging
 
-            chain_key, warmup_key = random.split(chain_key)
-            if verbose:
-                print(f"    Window adaptation ({num_warmup} steps)...")
-                sys.stdout.flush()
+            inv_mass_matrix = jnp.ones(n_flat)
+            current_step_size = step_size
+            phase1_steps = num_warmup // 2
+            phase2_steps = num_warmup - phase1_steps
 
-            (state, parameters), adapt_info = warmup.run(
-                warmup_key, init_flat, num_warmup
-            )
+            for phase, n_steps in [(1, phase1_steps), (2, phase2_steps)]:
+                if verbose:
+                    print(f"    Phase {phase}: {n_steps} steps, "
+                          f"step_size={current_step_size:.6f}...")
+                    sys.stdout.flush()
 
-            adapted_step = float(parameters['step_size'])
-            if verbose:
-                print(f"    Adapted step size: {adapted_step:.6f}")
-                sys.stdout.flush()
+                kernel = blackjax.nuts(
+                    logdensity_flat,
+                    step_size=current_step_size,
+                    inverse_mass_matrix=inv_mass_matrix,
+                )
+                if phase == 1:
+                    state = kernel.init(init_flat)
 
-            # Build sampling kernel with adapted parameters
+                # Dual averaging for step size
+                da_init, da_update, da_final = dual_averaging()
+                da_state = da_init(jnp.log(current_step_size))
+
+                @jax.jit
+                def warmup_step_fn(state, step_key, da_state, log_step):
+                    _kernel = blackjax.nuts(
+                        logdensity_flat,
+                        step_size=jnp.exp(log_step),
+                        inverse_mass_matrix=inv_mass_matrix,
+                    )
+                    new_state, info = _kernel.step(step_key, state)
+                    # acceptance probability for dual averaging
+                    accept_prob = jnp.where(
+                        info.is_divergent, 0.0,
+                        jnp.minimum(1.0, jnp.exp(
+                            info.proposal.logdensity - state.logdensity
+                        ))
+                    )
+                    new_da_state = da_update(da_state, target_accept_prob - accept_prob)
+                    return new_state, info, new_da_state
+
+                phase_flats = []
+                n_nondiv = 0
+
+                for step in range(n_steps):
+                    chain_key, step_key = random.split(chain_key)
+                    log_step = da_state.log_x_avg if step > 10 else da_state.log_x
+                    state, info, da_state = warmup_step_fn(
+                        state, step_key, da_state, log_step
+                    )
+                    n_nondiv += int(1 - info.is_divergent)
+                    phase_flats.append(state.position)
+
+                    if verbose and (step + 1) % 100 == 0:
+                        ar = n_nondiv / (step + 1)
+                        lp = float(state.logdensity)
+                        ss = float(jnp.exp(da_state.log_x_avg))
+                        print(f"      p{phase} {step + 1}/{n_steps} "
+                              f"non-div={ar:.3f} lp={lp:.1f} "
+                              f"step_size={ss:.6f}")
+                        sys.stdout.flush()
+
+                # Adapt step size from dual averaging
+                current_step_size = float(jnp.exp(da_final(da_state)))
+                if verbose:
+                    rate = n_nondiv / max(n_steps, 1)
+                    print(f"    Phase {phase} done: non-div={rate:.3f}, "
+                          f"adapted step_size={current_step_size:.6f}")
+                    sys.stdout.flush()
+
+                # Estimate mass matrix from this phase
+                half = max(len(phase_flats) // 2, 1)
+                p_stack = jnp.stack(phase_flats[half:])
+                var_est = jnp.var(p_stack, axis=0)
+                inv_mass_matrix = jnp.maximum(var_est, 1e-6)
+
+            # Build sampling kernel with final adapted parameters
             sampling_kernel = blackjax.nuts(
                 logdensity_flat,
-                **parameters,
+                step_size=current_step_size,
+                inverse_mass_matrix=inv_mass_matrix,
             )
 
             @jax.jit
@@ -1963,7 +2021,8 @@ class IRTModel(BayesianModel):
 
             # Sampling
             if verbose:
-                print(f"    Sampling ({num_samples} steps)...")
+                print(f"    Sampling ({num_samples} steps, "
+                      f"step_size={current_step_size:.6f})...")
                 sys.stdout.flush()
 
             sample_flats = []
