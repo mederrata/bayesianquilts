@@ -161,10 +161,14 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     print(f"{'='*60}")
 
     # Load data
-    get_data_kwargs = {'polars_out': True}
-    if 'reorient' in inspect.signature(mod.get_data).parameters:
-        get_data_kwargs['reorient'] = True
-    df, num_people = mod.get_data(**get_data_kwargs)
+    if is_factorized and hasattr(mod, 'get_multidomain_data'):
+        df, num_people, scale_indices = mod.get_multidomain_data(
+            polars_out=True, min_items=10)
+    else:
+        get_data_kwargs = {'polars_out': True}
+        if 'reorient' in inspect.signature(mod.get_data).parameters:
+            get_data_kwargs['reorient'] = True
+        df, num_people = mod.get_data(**get_data_kwargs)
     base_data = make_data_dict(df, num_people)
     print(f"  People: {num_people}")
 
