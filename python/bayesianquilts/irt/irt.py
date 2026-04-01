@@ -1672,37 +1672,54 @@ class IRTModel(BayesianModel):
             # Identity mass matrix (flat 1D)
             inv_mass_matrix = jnp.ones(n_flat)
 
-            warmup_kernel = blackjax.nuts(
-                logdensity_flat,
-                step_size=step_size,
-                inverse_mass_matrix=inv_mass_matrix,
-            )
-            state = warmup_kernel.init(init_flat)
-
-            # Step-by-step warmup
-            if verbose:
-                print(f"    Warmup ({num_warmup} steps, step-by-step)...")
-                sys.stdout.flush()
-
+            # Step-by-step warmup with automatic step size reduction
+            current_step_size = step_size
             warmup_flats = []
             n_accepted_warmup = 0
 
-            @jax.jit
-            def warmup_step(state, step_key):
-                return warmup_kernel.step(step_key, state)
+            if verbose:
+                print(f"    Warmup ({num_warmup} steps, "
+                      f"step_size={current_step_size})...")
+                sys.stdout.flush()
 
-            for step in range(num_warmup):
-                chain_key, step_key = random.split(chain_key)
-                state, info = warmup_step(state, step_key)
-                is_good = int(1 - info.is_divergent)
-                n_accepted_warmup += is_good
-                warmup_flats.append(state.position)
+            for attempt in range(3):  # up to 3 attempts with smaller step size
+                warmup_kernel = blackjax.nuts(
+                    logdensity_flat,
+                    step_size=current_step_size,
+                    inverse_mass_matrix=inv_mass_matrix,
+                )
+                state = warmup_kernel.init(init_flat)
 
-                if verbose and (step + 1) % 50 == 0:
-                    ar = n_accepted_warmup / (step + 1)
-                    lp = float(state.logdensity)
-                    print(f"      warmup {step + 1}/{num_warmup} "
-                          f"non-div={ar:.3f} lp={lp:.1f}")
+                @jax.jit
+                def warmup_step(state, step_key):
+                    return warmup_kernel.step(step_key, state)
+
+                warmup_flats = []
+                n_accepted_warmup = 0
+
+                for step in range(num_warmup):
+                    chain_key, step_key = random.split(chain_key)
+                    state, info = warmup_step(state, step_key)
+                    is_good = int(1 - info.is_divergent)
+                    n_accepted_warmup += is_good
+                    warmup_flats.append(state.position)
+
+                    if verbose and (step + 1) % 50 == 0:
+                        ar = n_accepted_warmup / (step + 1)
+                        lp = float(state.logdensity)
+                        print(f"      warmup {step + 1}/{num_warmup} "
+                              f"non-div={ar:.3f} lp={lp:.1f}")
+                        sys.stdout.flush()
+
+                warmup_rate = n_accepted_warmup / num_warmup
+                if warmup_rate >= 0.1:
+                    break  # good enough
+
+                # Reduce step size and retry
+                current_step_size *= 0.1
+                if verbose:
+                    print(f"    Warmup non-div rate {warmup_rate:.3f} too low, "
+                          f"retrying with step_size={current_step_size}")
                     sys.stdout.flush()
 
             # Estimate diagonal mass matrix from warmup
@@ -1719,7 +1736,7 @@ class IRTModel(BayesianModel):
             # Build sampling kernel with adapted mass matrix
             sampling_kernel = blackjax.nuts(
                 logdensity_flat,
-                step_size=step_size,
+                step_size=current_step_size,
                 inverse_mass_matrix=inv_mass_matrix,
             )
 
