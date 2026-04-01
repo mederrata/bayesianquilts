@@ -38,6 +38,10 @@ DATASET_CONFIGS = {
     'tma': {'module': 'bayesianquilts.data.tma'},
     'wpi': {'module': 'bayesianquilts.data.wpi'},
     'eqsq': {'module': 'bayesianquilts.data.eqsq'},
+    'promis_sleep': {'module': 'bayesianquilts.data.promis_sleep'},
+    'promis_substance_use': {'module': 'bayesianquilts.data.promis_substance_use'},
+    'promis_neuropathic_pain': {'module': 'bayesianquilts.data.promis_neuropathic_pain', 'factorized': True},
+    'promis_copd': {'module': 'bayesianquilts.data.promis_copd', 'factorized': True},
 }
 
 

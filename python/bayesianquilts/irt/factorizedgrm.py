@@ -32,7 +32,12 @@ class FactorizedGRModel(IRTModel):
             discrimination_prior_scale (float): HalfNormal scale for the
                 discrimination prior (default 2.0).
         """
-        self.scale_indices = scale_indices
+        if isinstance(scale_indices, dict):
+            self.scale_names = list(scale_indices.keys())
+            self.scale_indices = list(scale_indices.values())
+        else:
+            self.scale_names = None
+            self.scale_indices = scale_indices
         super(FactorizedGRModel, self).__init__(*args, **kwargs)
         self.discrimination_prior_scale = discrimination_prior_scale
         self.dimensions = len(scale_indices)
@@ -535,32 +540,68 @@ class FactorizedGRModel(IRTModel):
     def _response_probs_grid(self, theta_grid, **item_params):
         """Compute response probs on a theta grid for the factorized model.
 
-        For D dimensions, this uses a 1D grid (assumes dimensions are
-        independent and identically distributed a priori). Each dimension
-        gets the same theta value — valid when fitting per-dimension via
-        fit_dim (which creates a GRModel that has its own override).
-
-        For multi-dimensional marginal inference, use fit_dim to run
-        MCMC on each scale independently.
+        For D dimensions, uses 1D quadrature with discrimination-weighted
+        averaging across dimensions. Computes per-dimension GRM probs
+        directly without calling transform().
         """
-        params = dict(item_params)
-        params = self.transform(params)
-        discriminations = params['discriminations']
-        difficulties = params['difficulties']
+        Q = len(theta_grid)
+        I = self.num_items
+        K = self.response_cardinality
 
-        # theta_grid: (Q,) → (Q, 1, D, 1, 1)
-        D = self.dimensions
-        theta_col = jnp.broadcast_to(
-            theta_grid[:, None, None, None, None],
-            (len(theta_grid), 1, D, 1, 1)
-        )
-        probs = self.grm_model_prob(theta_col, discriminations, difficulties)
-        # Weight by discrimination and sum over dimensions
-        disc_weights = jnp.abs(discriminations) / jnp.sum(
-            jnp.abs(discriminations), axis=-3, keepdims=True
-        )
-        probs = jnp.sum(probs * disc_weights, axis=-3)
-        return probs.squeeze(1)  # (Q, I, K)
+        # Accumulate per-dimension probs and disc weights
+        all_probs = jnp.zeros((Q, I, K))
+        all_disc = jnp.zeros((I,))
+
+        for d, indices in enumerate(self.scale_indices):
+            idx = jnp.array(indices)
+            disc_d = item_params[f"discriminations_{d}"].squeeze()
+            diff0_d = item_params[f"difficulties0_{d}"].squeeze()
+            ddiff_key = f"ddifficulties_{d}"
+            if ddiff_key in item_params:
+                ddiff_d = item_params[ddiff_key]
+                # Squeeze all but the last dim for multi-category diffs
+                while ddiff_d.ndim > 2:
+                    ddiff_d = ddiff_d.squeeze(0)
+                if ddiff_d.ndim == 1:
+                    ddiff_d = ddiff_d[..., jnp.newaxis]
+                ddiff_safe = jnp.where(ddiff_d < 1e-1, 1e-1, ddiff_d)
+                difficulties_d = jnp.concat(
+                    [diff0_d[..., jnp.newaxis], ddiff_safe], axis=-1
+                )
+            else:
+                difficulties_d = diff0_d[..., jnp.newaxis]
+            difficulties_d = jnp.cumsum(difficulties_d, axis=-1)
+
+            # theta_grid: (Q,) → (Q, 1, 1), disc: (n_d,) → (1, n_d, 1)
+            # difficulties: (n_d, K-1) → (1, n_d, K-1)
+            theta_col = theta_grid[:, None, None]
+            disc_col = jnp.abs(disc_d)[None, :, None]
+            diff_col = difficulties_d[None, :, :]
+
+            logits = diff_col - theta_col  # (Q, n_d, K-1)
+            logits = logits * disc_col
+            cum_probs = jax.nn.sigmoid(-logits)
+            cum_probs = jnp.pad(
+                cum_probs,
+                [(0, 0), (0, 0), (1, 0)],
+                constant_values=1.0,
+            )
+            cum_probs = jnp.pad(
+                cum_probs,
+                [(0, 0), (0, 0), (0, 1)],
+                constant_values=0.0,
+            )
+            probs_d = cum_probs[..., :-1] - cum_probs[..., 1:]  # (Q, n_d, K)
+            probs_d = jnp.clip(probs_d, 1e-30, None)
+
+            # Scatter into full item array
+            mean_disc = jnp.mean(jnp.abs(disc_d))
+            all_probs = all_probs.at[:, idx, :].set(probs_d * mean_disc)
+            all_disc = all_disc.at[idx].set(mean_disc)
+
+        # Normalize by total discrimination weight
+        all_probs = all_probs / jnp.maximum(all_disc[None, :, None], 1e-30)
+        return all_probs  # (Q, I, K)
 
     def predictive_distribution(
         self, data, discriminations, difficulties0, ddifficulties, abilities, **kwargs

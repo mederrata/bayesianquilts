@@ -1926,120 +1926,35 @@ class IRTModel(BayesianModel):
 
             init_flat, _ = ravel_pytree(initial_positions[chain_idx])
 
-            # Identity mass matrix (flat 1D)
-            inv_mass_matrix = jnp.ones(n_flat)
-
-            # Two-phase warmup:
-            # Phase 1: identity mass matrix → estimate diagonal mass matrix
-            # Phase 2: adapted mass matrix → proper warmup for sampling
-            current_step_size = step_size
-            phase1_steps = num_warmup // 2
-            phase2_steps = num_warmup - phase1_steps
-
-            # Phase 1: explore with identity mass matrix
-            if verbose:
-                print(f"    Phase 1: {phase1_steps} steps, "
-                      f"step_size={current_step_size}, identity mass...")
-                sys.stdout.flush()
-
-            for attempt in range(3):
-                warmup_kernel = blackjax.nuts(
-                    logdensity_flat,
-                    step_size=current_step_size,
-                    inverse_mass_matrix=inv_mass_matrix,
-                )
-                state = warmup_kernel.init(init_flat)
-
-                @jax.jit
-                def warmup_step_p1(state, step_key):
-                    return warmup_kernel.step(step_key, state)
-
-                phase1_flats = []
-                n_accepted_p1 = 0
-
-                for step in range(phase1_steps):
-                    chain_key, step_key = random.split(chain_key)
-                    state, info = warmup_step_p1(state, step_key)
-                    n_accepted_p1 += int(1 - info.is_divergent)
-                    phase1_flats.append(state.position)
-
-                    if verbose and (step + 1) % 50 == 0:
-                        ar = n_accepted_p1 / (step + 1)
-                        lp = float(state.logdensity)
-                        print(f"      p1 {step + 1}/{phase1_steps} "
-                              f"non-div={ar:.3f} lp={lp:.1f}")
-                        sys.stdout.flush()
-
-                p1_rate = n_accepted_p1 / max(phase1_steps, 1)
-                if p1_rate >= 0.1:
-                    break
-
-                current_step_size *= 0.1
-                if verbose:
-                    print(f"    Phase 1 non-div {p1_rate:.3f} too low, "
-                          f"retrying step_size={current_step_size}")
-                    sys.stdout.flush()
-
-            # Estimate mass matrix from phase 1
-            quarter = max(len(phase1_flats) // 4, 1)
-            p1_stack = jnp.stack(phase1_flats[quarter:])
-            var_est = jnp.var(p1_stack, axis=0)
-            inv_mass_matrix = jnp.maximum(var_est, 1e-6)
-
-            if verbose:
-                print(f"    Estimated mass matrix from "
-                      f"{len(phase1_flats) - quarter} phase-1 samples")
-
-            # Phase 2: warmup with adapted mass matrix
-            if verbose:
-                print(f"    Phase 2: {phase2_steps} steps, "
-                      f"adapted mass matrix...")
-                sys.stdout.flush()
-
-            warmup_kernel_p2 = blackjax.nuts(
+            # Use BlackJAX window adaptation (dual averaging for step size
+            # + mass matrix adaptation, like Stan's warmup)
+            warmup = blackjax.window_adaptation(
+                blackjax.nuts,
                 logdensity_flat,
-                step_size=current_step_size,
-                inverse_mass_matrix=inv_mass_matrix,
+                is_mass_matrix_diagonal=True,
+                initial_step_size=step_size,
+                target_acceptance_rate=target_accept_prob,
+                progress_bar=False,
             )
 
-            @jax.jit
-            def warmup_step_p2(state, step_key):
-                return warmup_kernel_p2.step(step_key, state)
-
-            phase2_flats = []
-            n_accepted_p2 = 0
-
-            for step in range(phase2_steps):
-                chain_key, step_key = random.split(chain_key)
-                state, info = warmup_step_p2(state, step_key)
-                n_accepted_p2 += int(1 - info.is_divergent)
-                phase2_flats.append(state.position)
-
-                if verbose and (step + 1) % 50 == 0:
-                    ar = n_accepted_p2 / (step + 1)
-                    lp = float(state.logdensity)
-                    print(f"      p2 {step + 1}/{phase2_steps} "
-                          f"non-div={ar:.3f} lp={lp:.1f}")
-                    sys.stdout.flush()
-
-            # Re-estimate mass matrix from phase 2 (better estimate)
-            p2_half = max(len(phase2_flats) // 2, 1)
-            p2_stack = jnp.stack(phase2_flats[p2_half:])
-            var_est = jnp.var(p2_stack, axis=0)
-            inv_mass_matrix = jnp.maximum(var_est, 1e-6)
-
+            chain_key, warmup_key = random.split(chain_key)
             if verbose:
-                p2_rate = n_accepted_p2 / max(phase2_steps, 1)
-                print(f"    Phase 2 non-div: {p2_rate:.3f}, "
-                      f"re-estimated mass matrix from "
-                      f"{len(phase2_flats) - p2_half} samples")
+                print(f"    Window adaptation ({num_warmup} steps)...")
                 sys.stdout.flush()
 
-            # Build sampling kernel with final mass matrix
+            (state, parameters), adapt_info = warmup.run(
+                warmup_key, init_flat, num_warmup
+            )
+
+            adapted_step = float(parameters['step_size'])
+            if verbose:
+                print(f"    Adapted step size: {adapted_step:.6f}")
+                sys.stdout.flush()
+
+            # Build sampling kernel with adapted parameters
             sampling_kernel = blackjax.nuts(
                 logdensity_flat,
-                step_size=current_step_size,
-                inverse_mass_matrix=inv_mass_matrix,
+                **parameters,
             )
 
             @jax.jit
@@ -2070,8 +1985,6 @@ class IRTModel(BayesianModel):
                 print(f"    Non-divergent ratio: {accept_ratio:.3f}")
                 sys.stdout.flush()
 
-            # Keep all chains — divergent samples are still informative
-            # for posterior mean estimation, and the user can filter post-hoc
             positions = [unravel_fn(f) for f in sample_flats]
             for var in item_var_list:
                 stacked = jnp.stack(
