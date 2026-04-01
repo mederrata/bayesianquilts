@@ -1939,8 +1939,10 @@ class IRTModel(BayesianModel):
             phase2_steps = num_warmup - phase1_steps
 
             for phase, n_steps in [(1, phase1_steps), (2, phase2_steps)]:
-                # Try up to 3 step size reductions if non-div rate too low
-                for attempt in range(3):
+                # Single attempt per phase — no step size retries.
+                # Phase 1 may have divergences; the mass matrix from those
+                # samples still captures the right scale for phase 2.
+                for attempt in range(1):
                     if verbose:
                         print(f"    Phase {phase}: {n_steps} steps, "
                               f"step_size={current_step_size:.6f}...")
