@@ -2063,6 +2063,193 @@ class IRTModel(BayesianModel):
         self.mcmc_samples = result
         return result
 
+    def fit_marginal_mala(
+        self,
+        data,
+        theta_grid=None,
+        num_chains=2,
+        num_warmup=2000,
+        num_samples=2000,
+        step_size=1e-4,
+        seed=None,
+        verbose=True,
+    ):
+        """Run MALA on item parameters with abilities Rao-Blackwellized out.
+
+        Uses BlackJAX MALA (Metropolis-Adjusted Langevin Algorithm) which
+        avoids the NUTS divergence problem for stiff posteriors. Each step
+        uses exactly one gradient evaluation (no tree building).
+
+        MALA is less efficient per sample than NUTS but works reliably on
+        posteriors where NUTS diverges due to extreme stiffness.
+
+        Args:
+            data: Full data dict (all people).
+            theta_grid: Quadrature grid for ability integration.
+            num_chains: Number of MALA chains.
+            num_warmup: Warmup steps per chain.
+            num_samples: Post-warmup samples per chain.
+            step_size: MALA step size (typically 1e-5 to 1e-3).
+            seed: Random seed.
+            verbose: Print progress.
+
+        Returns:
+            Dict mapping item param names to posterior sample arrays of
+            shape (num_chains, num_samples, ...).
+        """
+        import blackjax
+        from jax import random
+
+        if seed is None:
+            seed = np.random.randint(0, 2**31)
+        key = random.PRNGKey(seed)
+
+        item_var_list = self._item_var_list()
+
+        if verbose:
+            print(f"Marginal MALA (Rao-Blackwellized abilities)")
+            print(f"  Item params: {item_var_list}")
+            key, tmp_key = random.split(key)
+            n_params = sum(
+                np.prod(self.joint_prior_distribution.sample(
+                    seed=tmp_key)[v].shape)
+                for v in item_var_list
+            )
+            print(f"  Total dimensions: {n_params}")
+            print(f"  Chains: {num_chains}, Warmup: {num_warmup}, "
+                  f"Samples: {num_samples}, Step size: {step_size}")
+            sys.stdout.flush()
+
+        # Target log density
+        def logdensity_fn(params_dict):
+            return self.marginal_log_prob(
+                data, theta_grid=theta_grid, **params_dict
+            )
+
+        # Initialize from ADVI solution or prior
+        key, init_key = random.split(key)
+        initial_positions = []
+        for c in range(num_chains):
+            pos = {}
+            for var in item_var_list:
+                loc_key = None
+                if self.params is not None:
+                    for pk in self.params:
+                        if pk.startswith(var) and pk.endswith('loc'):
+                            loc_key = pk
+                            break
+                if loc_key is not None:
+                    val = self.params[loc_key]
+                    pos[var] = val + 0.01 * random.normal(
+                        random.fold_in(init_key, c), val.shape)
+                else:
+                    prior_sample = self.joint_prior_distribution.sample(
+                        seed=random.fold_in(init_key, c))
+                    pos[var] = prior_sample[var]
+            initial_positions.append(pos)
+
+        if verbose and self.params is not None:
+            print("  Initializing from ADVI solution")
+            sys.stdout.flush()
+
+        from jax.flatten_util import ravel_pytree
+
+        ref_pos = initial_positions[0]
+        _, unravel_fn = ravel_pytree(ref_pos)
+
+        def logdensity_flat(x):
+            return logdensity_fn(unravel_fn(x))
+
+        n_flat = sum(np.prod(ref_pos[v].shape) for v in item_var_list)
+        if verbose:
+            print(f"  Flat parameter vector: {n_flat} elements")
+            sys.stdout.flush()
+
+        all_samples = {var: [] for var in item_var_list}
+        all_accept = []
+
+        for chain_idx in range(num_chains):
+            key, chain_key = random.split(key)
+            if verbose:
+                print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
+                sys.stdout.flush()
+
+            init_flat, _ = ravel_pytree(initial_positions[chain_idx])
+
+            kernel = blackjax.mala(logdensity_flat, step_size=step_size)
+            state = kernel.init(init_flat)
+
+            @jax.jit
+            def step_fn(state, step_key):
+                return kernel.step(step_key, state)
+
+            # Warmup
+            if verbose:
+                print(f"    Warmup ({num_warmup} steps)...")
+                sys.stdout.flush()
+
+            n_acc = 0
+            for step in range(num_warmup):
+                chain_key, step_key = random.split(chain_key)
+                state, info = step_fn(state, step_key)
+                n_acc += int(info.is_accepted)
+                if verbose and (step + 1) % 500 == 0:
+                    ar = n_acc / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      warmup {step + 1}/{num_warmup} "
+                          f"accept={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            # Sampling
+            if verbose:
+                print(f"    Sampling ({num_samples} steps)...")
+                sys.stdout.flush()
+
+            sample_flats = []
+            n_acc = 0
+            for step in range(num_samples):
+                chain_key, step_key = random.split(chain_key)
+                state, info = step_fn(state, step_key)
+                sample_flats.append(state.position)
+                n_acc += int(info.is_accepted)
+                if verbose and (step + 1) % 500 == 0:
+                    ar = n_acc / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      step {step + 1}/{num_samples} "
+                          f"accept={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            accept_ratio = n_acc / num_samples
+            if verbose:
+                print(f"    Accept ratio: {accept_ratio:.3f}")
+                sys.stdout.flush()
+
+            positions = [unravel_fn(f) for f in sample_flats]
+            for var in item_var_list:
+                stacked = jnp.stack(
+                    [p[var] for p in positions], axis=0)
+                all_samples[var].append(stacked)
+            all_accept.append(accept_ratio)
+
+        # Stack chains: (num_chains, num_samples, ...)
+        result = {}
+        for var in item_var_list:
+            if all_samples[var]:
+                result[var] = jnp.stack(all_samples[var], axis=0)
+
+        if verbose:
+            print(f"\n  Kept {len(all_accept)}/{num_chains} chains")
+            if all_accept:
+                print(f"  Mean accept: {np.mean(all_accept):.3f}")
+            for var in item_var_list:
+                if var in result:
+                    flat = result[var].reshape(-1, *result[var].shape[2:])
+                    print(f"  {var}: mean={float(jnp.mean(flat)):.4f}, "
+                          f"std={float(jnp.std(flat)):.4f}")
+
+        self.mcmc_samples = result
+        return result
+
     def compute_eap_abilities(self, data, item_params=None, theta_grid=None,
                               theta_log_weights=None):
         """Compute Expected A Posteriori (EAP) ability estimates.
