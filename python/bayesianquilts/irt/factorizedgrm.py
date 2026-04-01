@@ -564,7 +564,7 @@ class FactorizedGRModel(IRTModel):
                     ddiff_d = ddiff_d.squeeze(0)
                 if ddiff_d.ndim == 1:
                     ddiff_d = ddiff_d[..., jnp.newaxis]
-                ddiff_safe = jnp.where(ddiff_d < 1e-1, 1e-1, ddiff_d)
+                ddiff_safe = jax.nn.softplus(ddiff_d)
                 difficulties_d = jnp.concat(
                     [diff0_d[..., jnp.newaxis], ddiff_safe], axis=-1
                 )
