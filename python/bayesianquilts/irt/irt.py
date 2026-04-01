@@ -1582,13 +1582,18 @@ class IRTModel(BayesianModel):
         )
 
     def _item_var_list(self):
-        """Return list of item parameter names (everything except abilities)."""
-        ability_keys = {'abilities'}
-        # FactorizedGRModel has abilities_0, abilities_1, ...
+        """Return list of item parameter names (everything except abilities and mu).
+
+        The ``mu`` parameters are location shifts for difficulties that are
+        partially non-identified with ``difficulties0``, creating ridges in
+        the posterior that make NUTS very inefficient.  They are held fixed
+        at their ADVI values during MCMC.
+        """
+        exclude = {'abilities'}
         for v in self.var_list:
-            if v.startswith('abilities'):
-                ability_keys.add(v)
-        return [v for v in self.var_list if v not in ability_keys]
+            if v.startswith('abilities') or v.startswith('mu'):
+                exclude.add(v)
+        return [v for v in self.var_list if v not in exclude]
 
     def _make_gauss_hermite_grid(self, n_points=31):
         """Return (theta_grid, theta_log_weights) for Gauss-Hermite quadrature."""
