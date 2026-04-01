@@ -1931,10 +1931,30 @@ class IRTModel(BayesianModel):
 
             init_flat, _ = ravel_pytree(initial_positions[chain_idx])
 
-            # Two-phase warmup with step size adaptation between phases.
-            # Phase 1: identity mass matrix, fixed step size → estimate mass
-            # Phase 2: adapted mass matrix, adjusted step size → final params
-            inv_mass_matrix = jnp.ones(n_flat)
+            # Initialize mass matrix from ADVI posterior variance if available.
+            # This gives NUTS the right scale from the start, avoiding
+            # divergences caused by identity mass on poorly-scaled posteriors.
+            advi_var = []
+            for var in item_var_list:
+                scale_key = None
+                for pk in self.params:
+                    if pk.startswith(var) and pk.endswith('scale'):
+                        scale_key = pk
+                        break
+                if scale_key is not None:
+                    var_est = jnp.array(self.params[scale_key]).flatten() ** 2
+                    advi_var.append(var_est)
+                else:
+                    # Fall back to small variance
+                    loc_key = [pk for pk in self.params
+                               if pk.startswith(var) and pk.endswith('loc')][0]
+                    advi_var.append(0.01 * jnp.ones(
+                        jnp.array(self.params[loc_key]).flatten().shape))
+            inv_mass_matrix = jnp.maximum(jnp.concatenate(advi_var), 1e-6)
+            if verbose:
+                print(f"    Init mass matrix from ADVI variance: "
+                      f"median={float(jnp.median(inv_mass_matrix)):.6f}")
+                sys.stdout.flush()
             current_step_size = step_size
             phase1_steps = num_warmup // 2
             phase2_steps = num_warmup - phase1_steps
