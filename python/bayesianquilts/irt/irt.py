@@ -1026,15 +1026,20 @@ class IRTModel(BayesianModel):
                             observed_items, target=item_key, n_categories=K,
                         )
                     else:
+                        # Only pass person_idx if the model accepts it
+                        import inspect as _inspect
+                        _sig = _inspect.signature(
+                            self.imputation_model.predict_pmf)
                         kwargs = {}
-                        if person_idx is not None:
+                        if (person_idx is not None
+                                and 'person_idx' in _sig.parameters):
                             kwargs['person_idx'] = person_idx
                         pmf = self.imputation_model.predict_pmf(
                             observed_items, target=item_key, n_categories=K,
                             **kwargs,
                         )
                     pmfs[row_idx, i, :] = pmf
-                except (ValueError, KeyError, AttributeError, TypeError):
+                except (ValueError, KeyError, AttributeError):
                     pmfs[row_idx, i, :] = 1.0 / K
 
         return pmfs, weights
