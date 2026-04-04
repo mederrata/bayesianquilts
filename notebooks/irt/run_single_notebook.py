@@ -25,6 +25,14 @@ import jax.numpy as jnp
 
 
 DATASET_CONFIGS = {
+    'scs': {
+        'module': 'bayesianquilts.data.scs',
+        'n_top_features': 10,
+    },
+    'gcbs': {
+        'module': 'bayesianquilts.data.gcbs',
+        'n_top_features': 15,
+    },
     'grit': {
         'module': 'bayesianquilts.data.grit',
         'n_top_features': 12,

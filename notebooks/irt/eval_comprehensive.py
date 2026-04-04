@@ -54,9 +54,12 @@ def eval_dataset(dataset_name):
 
     results = []
 
-    for label, model_dir in [('Baseline', 'grm_baseline'),
-                              ('MICE-only', 'grm_mice_only'),
-                              ('Mixed', 'grm_imputed')]:
+    models_to_eval = [('Baseline', 'grm_baseline'),
+                      ('MICE-only', 'grm_mice_only'),
+                      ('Pairwise', 'grm_pairwise'),
+                      ('Mixed', 'grm_imputed'),
+                      ('MCMC', 'grm_mcmc')]
+    for label, model_dir in models_to_eval:
         model_path = work_dir / model_dir
         if not (model_path / 'params.h5').exists():
             results.append({
@@ -152,7 +155,7 @@ def main():
     args = parser.parse_args()
 
     all_results = {}
-    datasets = ['grit', 'tma', 'rwa', 'npi', 'wpi'] if args.dataset == 'all' else [args.dataset]
+    datasets = ['scs', 'gcbs', 'grit', 'rwa', 'tma', 'npi', 'wpi', 'eqsq'] if args.dataset == 'all' else [args.dataset]
 
     for ds in datasets:
         try:

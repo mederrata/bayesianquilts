@@ -139,9 +139,15 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     from bayesianquilts.irt.grm import GRModel
 
     config = DATASET_CONFIGS[dataset_name]
+    is_factorized = config.get('factorized', False)
     mod = importlib.import_module(config['module'])
     item_keys = mod.item_keys
     response_cardinality = mod.response_cardinality
+
+    if is_factorized:
+        from bayesianquilts.irt.factorizedgrm import FactorizedGRModel as ModelClass
+    else:
+        ModelClass = GRModel
 
     model_path = Path(model_dir)
     output_dir = model_path.parent
@@ -155,10 +161,14 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     print(f"{'='*60}")
 
     # Load data
-    get_data_kwargs = {'polars_out': True}
-    if 'reorient' in inspect.signature(mod.get_data).parameters:
-        get_data_kwargs['reorient'] = True
-    df, num_people = mod.get_data(**get_data_kwargs)
+    if is_factorized and hasattr(mod, 'get_multidomain_data'):
+        df, num_people, scale_indices = mod.get_multidomain_data(
+            polars_out=True, min_items=10)
+    else:
+        get_data_kwargs = {'polars_out': True}
+        if 'reorient' in inspect.signature(mod.get_data).parameters:
+            get_data_kwargs['reorient'] = True
+        df, num_people = mod.get_data(**get_data_kwargs)
     base_data = make_data_dict(df, num_people)
     print(f"  People: {num_people}")
 
@@ -172,7 +182,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
 
     # ---- Baseline: no imputation ----
     if 'baseline' in variants:
-        model = GRModel.load_from_disk(str(model_path))
+        model = ModelClass.load_from_disk(str(model_path))
         data = dict(base_data)  # no imputation PMFs
         run_single_variant(model, data, 'baseline', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed)
@@ -181,7 +191,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
 
     # ---- Pairwise: pairwise stacking only ----
     if 'pairwise' in variants and pairwise_model is not None:
-        model = GRModel.load_from_disk(str(model_path))
+        model = ModelClass.load_from_disk(str(model_path))
         model.imputation_model = pairwise_model
         data = dict(base_data)
         pmfs, weights = model._compute_batch_pmfs(data)
@@ -197,7 +207,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     # ---- Mixed: pairwise + IRT baseline blend ----
     if 'mixed' in variants and pairwise_model is not None:
         from bayesianquilts.imputation.mixed import IrtMixedImputationModel
-        model = GRModel.load_from_disk(str(model_path))
+        model = ModelClass.load_from_disk(str(model_path))
 
         # Build mixed imputation model from pairwise + baseline
         # Need calibrated expectations for the IRT component
@@ -209,9 +219,13 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
             k: jnp.mean(v, axis=0) for k, v in samples.items()
         }
 
+        def _data_factory():
+            yield base_data
+
         mixed_model = IrtMixedImputationModel(
             irt_model=model,
-            pairwise_model=pairwise_model,
+            mice_model=pairwise_model,
+            data_factory=_data_factory,
         )
         model.imputation_model = mixed_model
 

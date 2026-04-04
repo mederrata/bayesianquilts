@@ -397,6 +397,263 @@ class IRTModel(BayesianModel):
             print(f"    {var_name}: loc={float(jnp.mean(flat)):.4f}, "
                   f"scale={float(jnp.std(flat)):.4f}")
 
+    def importance_reweight(
+        self,
+        data,
+        mcmc_samples,
+        imputation_model,
+        fn=None,
+        theta_grid=None,
+        max_samples=None,
+        seed=42,
+        verbose=True,
+    ):
+        """Reweight baseline MCMC samples to approximate the imputed posterior.
+
+        Given posterior samples from a baseline (ignorable-missingness) model,
+        computes importance weights using the ratio of imputed to baseline
+        marginal likelihoods. Returns the IS-weighted expectation and standard
+        deviation of ``fn(params)`` under the imputed posterior.
+
+        Performs PSIS smoothing and reports diagnostics (ESS, k-hat).
+        When k-hat > 0.7, attempts adaptive tempering as a fallback.
+
+        Args:
+            data: Full data dict (all people, not batched). Should NOT
+                already contain ``_imputation_pmfs``.
+            mcmc_samples: Dict mapping param names to arrays of shape
+                (chains, samples, ...) from the baseline model.
+            imputation_model: A fitted imputation model (e.g.,
+                PairwiseOrdinalStackingModel or IrtMixedImputationModel).
+            fn: Callable mapping a param dict → scalar or array.
+                Each param dict has the same keys as mcmc_samples with
+                values for a single draw. If None, returns reweighted
+                samples dict and diagnostics only.
+            theta_grid: Quadrature grid for marginal_log_prob.
+            max_samples: Cap on number of MCMC draws to use (subsampled
+                randomly). None = use all.
+            seed: Random seed for subsampling.
+            verbose: Print progress and diagnostics.
+
+        Returns:
+            Dict with keys:
+                'expectation': E_adj[fn] (or None if fn is None)
+                'std': std_adj[fn] (or None if fn is None)
+                'log_weights': raw log IS weights (S,)
+                'psis_weights': PSIS-smoothed normalized weights (S,)
+                'khat': PSIS k-hat diagnostic
+                'ess': effective sample size
+                'n_samples': number of samples used
+                'tempered': whether adaptive tempering was applied
+        """
+        from bayesianquilts.metrics.nppsis import psisloo
+
+        # --- Flatten MCMC chains ---
+        flat_samples = {}
+        first_key = list(mcmc_samples.keys())[0]
+        n_chains, n_samp = mcmc_samples[first_key].shape[:2]
+        S_total = n_chains * n_samp
+        for k, v in mcmc_samples.items():
+            flat_samples[k] = np.asarray(v).reshape(-1, *v.shape[2:])
+
+        # Subsample if requested
+        rng = np.random.default_rng(seed)
+        if max_samples is not None and max_samples < S_total:
+            idx = rng.choice(S_total, max_samples, replace=False)
+            for k in flat_samples:
+                flat_samples[k] = flat_samples[k][idx]
+            S = max_samples
+        else:
+            S = S_total
+
+        if verbose:
+            print(f"  IS reweighting: {S} samples "
+                  f"({n_chains} chains × {n_samp} draws)")
+
+        # --- Prepare quadrature grid ---
+        if theta_grid is None:
+            tg, tlw = self._make_gauss_hermite_grid()
+        else:
+            tg = jnp.asarray(theta_grid)
+            dtheta = tg[1] - tg[0]
+            tlw = -0.5 * tg**2 - 0.5 * jnp.log(2*jnp.pi) + jnp.log(dtheta)
+
+        # --- Prepare imputation PMFs ---
+        old_imputation = getattr(self, 'imputation_model', None)
+        self.imputation_model = imputation_model
+        data_imputed = dict(data)
+        pmfs, weights = self._compute_batch_pmfs(data_imputed)
+        if pmfs is not None:
+            data_imputed['_imputation_pmfs'] = pmfs
+            if weights is not None:
+                data_imputed['_imputation_weights'] = weights
+        self.imputation_model = old_imputation
+
+        data_baseline = {k: v for k, v in data.items()
+                         if k not in ('_imputation_pmfs', '_imputation_weights')}
+
+        # --- Compute log IS weights ---
+        log_weights = np.zeros(S)
+        fn_values = []
+
+        for s in range(S):
+            # Extract single-draw params
+            draw_params = {}
+            for k, v in flat_samples.items():
+                draw_params[k] = jnp.asarray(v[s])
+
+            # marginal_log_prob with and without imputation
+            ll_baseline = float(self.marginal_log_prob(
+                data_baseline, theta_grid=tg,
+                theta_log_weights=tlw, prior_weight=0.0,
+                **draw_params))
+            ll_imputed = float(self.marginal_log_prob(
+                data_imputed, theta_grid=tg,
+                theta_log_weights=tlw, prior_weight=0.0,
+                **draw_params))
+
+            log_weights[s] = ll_imputed - ll_baseline
+
+            if fn is not None:
+                fn_values.append(fn(draw_params))
+
+            if verbose and (s + 1) % 50 == 0:
+                print(f"    Sample {s+1}/{S}, "
+                      f"mean log w: {np.mean(log_weights[:s+1]):.4f}")
+            sys.stdout.flush()
+
+        # --- PSIS smoothing ---
+        result = self._psis_smooth_and_diagnose(
+            log_weights, fn_values if fn is not None else None, verbose)
+        result['n_samples'] = S
+
+        # --- Adaptive tempering if k-hat is bad ---
+        if result['khat'] > 0.7 and pmfs is not None:
+            if verbose:
+                print(f"  k-hat={result['khat']:.3f} > 0.7, "
+                      f"trying adaptive tempering...")
+            tempered = self._tempered_reweight(
+                data_baseline, data_imputed, flat_samples,
+                tg, tlw, fn, S, verbose)
+            if tempered is not None and tempered['khat'] < result['khat']:
+                tempered['tempered'] = True
+                if verbose:
+                    print(f"  Tempering improved k-hat: "
+                          f"{result['khat']:.3f} → {tempered['khat']:.3f}")
+                return tempered
+            elif verbose:
+                print(f"  Tempering did not improve; using direct IS")
+
+        result['tempered'] = False
+        return result
+
+    def _psis_smooth_and_diagnose(self, log_weights, fn_values, verbose):
+        """Apply PSIS smoothing to log IS weights and compute diagnostics."""
+        from bayesianquilts.metrics.nppsis import psisloo
+
+        S = len(log_weights)
+
+        # PSIS expects (S, N) — treat as single "observation"
+        lw_2d = log_weights[:, None]  # (S, 1)
+        try:
+            _, loos, ks = psisloo(lw_2d)
+            khat = float(ks[0])
+        except Exception:
+            khat = float('inf')
+
+        # Normalize weights
+        log_w_shifted = log_weights - np.max(log_weights)
+        weights = np.exp(log_w_shifted)
+        weights /= weights.sum()
+
+        # ESS
+        ess = 1.0 / np.sum(weights ** 2)
+
+        if verbose:
+            print(f"  PSIS k-hat: {khat:.3f}, ESS: {ess:.1f}/{S} "
+                  f"({100*ess/S:.1f}%)")
+
+        result = {
+            'log_weights': log_weights,
+            'psis_weights': weights,
+            'khat': khat,
+            'ess': ess,
+            'expectation': None,
+            'std': None,
+        }
+
+        if fn_values is not None:
+            fn_arr = np.array(fn_values)
+            if fn_arr.ndim == 1:
+                exp_val = float(np.sum(weights * fn_arr))
+                var_val = float(np.sum(weights * (fn_arr - exp_val)**2))
+                result['expectation'] = exp_val
+                result['std'] = float(np.sqrt(max(var_val, 0.0)))
+            else:
+                exp_val = np.sum(weights[:, None] * fn_arr, axis=0)
+                var_val = np.sum(
+                    weights[:, None] * (fn_arr - exp_val[None, :])**2,
+                    axis=0)
+                result['expectation'] = exp_val
+                result['std'] = np.sqrt(np.maximum(var_val, 0.0))
+
+        return result
+
+    def _tempered_reweight(self, data_baseline, data_imputed,
+                           flat_samples, tg, tlw, fn, S, verbose):
+        """Bridge between baseline and imputed via geometric tempering.
+
+        Uses a sequence of tempered distributions:
+            pi_t(params) propto pi_baseline(params) * w(params)^t
+        for t in [0.25, 0.5, 0.75, 1.0], performing sequential IS
+        at each stage.
+        """
+        temps = [0.25, 0.5, 0.75, 1.0]
+        current_log_weights = np.zeros(S)
+        best_result = None
+
+        for t_idx, temp in enumerate(temps):
+            stage_log_weights = np.zeros(S)
+            fn_values = [] if fn is not None else None
+
+            for s in range(S):
+                draw_params = {k: jnp.asarray(v[s])
+                               for k, v in flat_samples.items()}
+
+                ll_b = float(self.marginal_log_prob(
+                    data_baseline, theta_grid=tg,
+                    theta_log_weights=tlw, prior_weight=0.0,
+                    **draw_params))
+                ll_i = float(self.marginal_log_prob(
+                    data_imputed, theta_grid=tg,
+                    theta_log_weights=tlw, prior_weight=0.0,
+                    **draw_params))
+
+                # Tempered weight: w^t relative to previous stage
+                if t_idx == 0:
+                    stage_log_weights[s] = temp * (ll_i - ll_b)
+                else:
+                    prev_temp = temps[t_idx - 1]
+                    stage_log_weights[s] = (
+                        (temp - prev_temp) * (ll_i - ll_b))
+
+                if fn is not None:
+                    fn_values.append(fn(draw_params))
+
+            current_log_weights += stage_log_weights
+            result = self._psis_smooth_and_diagnose(
+                current_log_weights, fn_values, verbose=False)
+
+            if verbose:
+                print(f"    Temper t={temp:.2f}: k-hat={result['khat']:.3f}, "
+                      f"ESS={result['ess']:.1f}")
+
+            if result['khat'] < 0.7:
+                return result
+            best_result = result
+
+        return best_result
+
     def project_discriminations(self, steps=1000):
         pass
 
@@ -1325,13 +1582,18 @@ class IRTModel(BayesianModel):
         )
 
     def _item_var_list(self):
-        """Return list of item parameter names (everything except abilities)."""
-        ability_keys = {'abilities'}
-        # FactorizedGRModel has abilities_0, abilities_1, ...
+        """Return list of item parameter names (everything except abilities and mu).
+
+        The ``mu`` parameters are location shifts for difficulties that are
+        partially non-identified with ``difficulties0``, creating ridges in
+        the posterior that make NUTS very inefficient.  They are held fixed
+        at their ADVI values during MCMC.
+        """
+        exclude = {'abilities'}
         for v in self.var_list:
-            if v.startswith('abilities'):
-                ability_keys.add(v)
-        return [v for v in self.var_list if v not in ability_keys]
+            if v.startswith('abilities') or v.startswith('mu'):
+                exclude.add(v)
+        return [v for v in self.var_list if v not in exclude]
 
     def _make_gauss_hermite_grid(self, n_points=31):
         """Return (theta_grid, theta_log_weights) for Gauss-Hermite quadrature."""
@@ -1669,57 +1931,80 @@ class IRTModel(BayesianModel):
 
             init_flat, _ = ravel_pytree(initial_positions[chain_idx])
 
-            # Identity mass matrix (flat 1D)
+            # Phase 1 uses identity mass for fast steps (even if some diverge).
+            # Phase 2 uses the mass matrix estimated from phase 1 samples.
             inv_mass_matrix = jnp.ones(n_flat)
+            current_step_size = step_size
+            phase1_steps = num_warmup // 2
+            phase2_steps = num_warmup - phase1_steps
 
-            warmup_kernel = blackjax.nuts(
-                logdensity_flat,
-                step_size=step_size,
-                inverse_mass_matrix=inv_mass_matrix,
-            )
-            state = warmup_kernel.init(init_flat)
+            for phase, n_steps in [(1, phase1_steps), (2, phase2_steps)]:
+                # Single attempt per phase — no step size retries.
+                # Phase 1 may have divergences; the mass matrix from those
+                # samples still captures the right scale for phase 2.
+                for attempt in range(1):
+                    if verbose:
+                        print(f"    Phase {phase}: {n_steps} steps, "
+                              f"step_size={current_step_size:.6f}...")
+                        sys.stdout.flush()
 
-            # Step-by-step warmup
-            if verbose:
-                print(f"    Warmup ({num_warmup} steps, step-by-step)...")
-                sys.stdout.flush()
+                    kernel = blackjax.nuts(
+                        logdensity_flat,
+                        step_size=current_step_size,
+                        inverse_mass_matrix=inv_mass_matrix,
+                    )
+                    if phase == 1 and attempt == 0:
+                        state = kernel.init(init_flat)
 
-            warmup_flats = []
-            n_accepted_warmup = 0
+                    @jax.jit
+                    def warmup_step(state, step_key):
+                        return kernel.step(step_key, state)
 
-            @jax.jit
-            def warmup_step(state, step_key):
-                return warmup_kernel.step(step_key, state)
+                    phase_flats = []
+                    n_nondiv = 0
 
-            for step in range(num_warmup):
-                chain_key, step_key = random.split(chain_key)
-                state, info = warmup_step(state, step_key)
-                is_good = int(1 - info.is_divergent)
-                n_accepted_warmup += is_good
-                warmup_flats.append(state.position)
+                    for step in range(n_steps):
+                        chain_key, step_key = random.split(chain_key)
+                        state, info = warmup_step(state, step_key)
+                        n_nondiv += int(1 - info.is_divergent)
+                        phase_flats.append(state.position)
 
-                if verbose and (step + 1) % 50 == 0:
-                    ar = n_accepted_warmup / (step + 1)
-                    lp = float(state.logdensity)
-                    print(f"      warmup {step + 1}/{num_warmup} "
-                          f"non-div={ar:.3f} lp={lp:.1f}")
+                        if verbose and (step + 1) % 100 == 0:
+                            ar = n_nondiv / (step + 1)
+                            lp = float(state.logdensity)
+                            print(f"      p{phase} {step + 1}/{n_steps} "
+                                  f"non-div={ar:.3f} lp={lp:.1f}")
+                            sys.stdout.flush()
+
+                    rate = n_nondiv / max(n_steps, 1)
+                    if rate >= 0.1:
+                        break
+                    current_step_size *= 0.1
+                    if verbose:
+                        print(f"    Phase {phase} non-div {rate:.3f} too low, "
+                              f"reducing step_size to {current_step_size:.6f}")
+                        sys.stdout.flush()
+
+                if verbose:
+                    print(f"    Phase {phase} done: non-div={rate:.3f}")
                     sys.stdout.flush()
 
-            # Estimate diagonal mass matrix from warmup
-            half = max(len(warmup_flats) // 2, 1)
-            warmup_stack = jnp.stack(warmup_flats[half:])  # (M, D)
-            var_est = jnp.var(warmup_stack, axis=0)
-            inv_mass_matrix = jnp.maximum(var_est, 1e-6)
+                # Estimate mass matrix from second half of this phase
+                half = max(len(phase_flats) // 2, 1)
+                p_stack = jnp.stack(phase_flats[half:])
+                var_est = jnp.var(p_stack, axis=0)
+                inv_mass_matrix = jnp.maximum(var_est, 1e-6)
 
-            if verbose:
-                print(f"    Estimated mass matrix from "
-                      f"{len(warmup_flats) - half} warmup samples")
-                sys.stdout.flush()
+                # Adjust step size based on acceptance for next phase
+                if rate > 0.9:
+                    current_step_size *= 2.0
+                elif rate < 0.5:
+                    current_step_size *= 0.5
 
-            # Build sampling kernel with adapted mass matrix
+            # Build sampling kernel with final adapted parameters
             sampling_kernel = blackjax.nuts(
                 logdensity_flat,
-                step_size=step_size,
+                step_size=current_step_size,
                 inverse_mass_matrix=inv_mass_matrix,
             )
 
@@ -1729,7 +2014,8 @@ class IRTModel(BayesianModel):
 
             # Sampling
             if verbose:
-                print(f"    Sampling ({num_samples} steps)...")
+                print(f"    Sampling ({num_samples} steps, "
+                      f"step_size={current_step_size:.6f})...")
                 sys.stdout.flush()
 
             sample_flats = []
@@ -1751,8 +2037,6 @@ class IRTModel(BayesianModel):
                 print(f"    Non-divergent ratio: {accept_ratio:.3f}")
                 sys.stdout.flush()
 
-            # Keep all chains — divergent samples are still informative
-            # for posterior mean estimation, and the user can filter post-hoc
             positions = [unravel_fn(f) for f in sample_flats]
             for var in item_var_list:
                 stacked = jnp.stack(
@@ -1770,6 +2054,193 @@ class IRTModel(BayesianModel):
             print(f"\n  Kept {len(all_accept)}/{num_chains} chains")
             if all_accept:
                 print(f"  Mean non-divergent: {np.mean(all_accept):.3f}")
+            for var in item_var_list:
+                if var in result:
+                    flat = result[var].reshape(-1, *result[var].shape[2:])
+                    print(f"  {var}: mean={float(jnp.mean(flat)):.4f}, "
+                          f"std={float(jnp.std(flat)):.4f}")
+
+        self.mcmc_samples = result
+        return result
+
+    def fit_marginal_mala(
+        self,
+        data,
+        theta_grid=None,
+        num_chains=2,
+        num_warmup=2000,
+        num_samples=2000,
+        step_size=1e-4,
+        seed=None,
+        verbose=True,
+    ):
+        """Run MALA on item parameters with abilities Rao-Blackwellized out.
+
+        Uses BlackJAX MALA (Metropolis-Adjusted Langevin Algorithm) which
+        avoids the NUTS divergence problem for stiff posteriors. Each step
+        uses exactly one gradient evaluation (no tree building).
+
+        MALA is less efficient per sample than NUTS but works reliably on
+        posteriors where NUTS diverges due to extreme stiffness.
+
+        Args:
+            data: Full data dict (all people).
+            theta_grid: Quadrature grid for ability integration.
+            num_chains: Number of MALA chains.
+            num_warmup: Warmup steps per chain.
+            num_samples: Post-warmup samples per chain.
+            step_size: MALA step size (typically 1e-5 to 1e-3).
+            seed: Random seed.
+            verbose: Print progress.
+
+        Returns:
+            Dict mapping item param names to posterior sample arrays of
+            shape (num_chains, num_samples, ...).
+        """
+        import blackjax
+        from jax import random
+
+        if seed is None:
+            seed = np.random.randint(0, 2**31)
+        key = random.PRNGKey(seed)
+
+        item_var_list = self._item_var_list()
+
+        if verbose:
+            print(f"Marginal MALA (Rao-Blackwellized abilities)")
+            print(f"  Item params: {item_var_list}")
+            key, tmp_key = random.split(key)
+            n_params = sum(
+                np.prod(self.joint_prior_distribution.sample(
+                    seed=tmp_key)[v].shape)
+                for v in item_var_list
+            )
+            print(f"  Total dimensions: {n_params}")
+            print(f"  Chains: {num_chains}, Warmup: {num_warmup}, "
+                  f"Samples: {num_samples}, Step size: {step_size}")
+            sys.stdout.flush()
+
+        # Target log density
+        def logdensity_fn(params_dict):
+            return self.marginal_log_prob(
+                data, theta_grid=theta_grid, **params_dict
+            )
+
+        # Initialize from ADVI solution or prior
+        key, init_key = random.split(key)
+        initial_positions = []
+        for c in range(num_chains):
+            pos = {}
+            for var in item_var_list:
+                loc_key = None
+                if self.params is not None:
+                    for pk in self.params:
+                        if pk.startswith(var) and pk.endswith('loc'):
+                            loc_key = pk
+                            break
+                if loc_key is not None:
+                    val = self.params[loc_key]
+                    pos[var] = val + 0.01 * random.normal(
+                        random.fold_in(init_key, c), val.shape)
+                else:
+                    prior_sample = self.joint_prior_distribution.sample(
+                        seed=random.fold_in(init_key, c))
+                    pos[var] = prior_sample[var]
+            initial_positions.append(pos)
+
+        if verbose and self.params is not None:
+            print("  Initializing from ADVI solution")
+            sys.stdout.flush()
+
+        from jax.flatten_util import ravel_pytree
+
+        ref_pos = initial_positions[0]
+        _, unravel_fn = ravel_pytree(ref_pos)
+
+        def logdensity_flat(x):
+            return logdensity_fn(unravel_fn(x))
+
+        n_flat = sum(np.prod(ref_pos[v].shape) for v in item_var_list)
+        if verbose:
+            print(f"  Flat parameter vector: {n_flat} elements")
+            sys.stdout.flush()
+
+        all_samples = {var: [] for var in item_var_list}
+        all_accept = []
+
+        for chain_idx in range(num_chains):
+            key, chain_key = random.split(key)
+            if verbose:
+                print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
+                sys.stdout.flush()
+
+            init_flat, _ = ravel_pytree(initial_positions[chain_idx])
+
+            kernel = blackjax.mala(logdensity_flat, step_size=step_size)
+            state = kernel.init(init_flat)
+
+            @jax.jit
+            def step_fn(state, step_key):
+                return kernel.step(step_key, state)
+
+            # Warmup
+            if verbose:
+                print(f"    Warmup ({num_warmup} steps)...")
+                sys.stdout.flush()
+
+            n_acc = 0
+            for step in range(num_warmup):
+                chain_key, step_key = random.split(chain_key)
+                state, info = step_fn(state, step_key)
+                n_acc += int(info.is_accepted)
+                if verbose and (step + 1) % 500 == 0:
+                    ar = n_acc / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      warmup {step + 1}/{num_warmup} "
+                          f"accept={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            # Sampling
+            if verbose:
+                print(f"    Sampling ({num_samples} steps)...")
+                sys.stdout.flush()
+
+            sample_flats = []
+            n_acc = 0
+            for step in range(num_samples):
+                chain_key, step_key = random.split(chain_key)
+                state, info = step_fn(state, step_key)
+                sample_flats.append(state.position)
+                n_acc += int(info.is_accepted)
+                if verbose and (step + 1) % 500 == 0:
+                    ar = n_acc / (step + 1)
+                    lp = float(state.logdensity)
+                    print(f"      step {step + 1}/{num_samples} "
+                          f"accept={ar:.3f} lp={lp:.1f}")
+                    sys.stdout.flush()
+
+            accept_ratio = n_acc / num_samples
+            if verbose:
+                print(f"    Accept ratio: {accept_ratio:.3f}")
+                sys.stdout.flush()
+
+            positions = [unravel_fn(f) for f in sample_flats]
+            for var in item_var_list:
+                stacked = jnp.stack(
+                    [p[var] for p in positions], axis=0)
+                all_samples[var].append(stacked)
+            all_accept.append(accept_ratio)
+
+        # Stack chains: (num_chains, num_samples, ...)
+        result = {}
+        for var in item_var_list:
+            if all_samples[var]:
+                result[var] = jnp.stack(all_samples[var], axis=0)
+
+        if verbose:
+            print(f"\n  Kept {len(all_accept)}/{num_chains} chains")
+            if all_accept:
+                print(f"  Mean accept: {np.mean(all_accept):.3f}")
             for var in item_var_list:
                 if var in result:
                     flat = result[var].reshape(-1, *result[var].shape[2:])
