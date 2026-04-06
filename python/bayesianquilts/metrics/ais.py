@@ -18,6 +18,7 @@ Each transformation can be applied to perform importance sampling for
 leave-one-out cross-validation predictions.
 """
 
+import sys
 import time
 import warnings
 
@@ -27,6 +28,15 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable, Tuple, Optional, List
 from functools import partial
 from bayesianquilts.metrics import psis
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 
 # JIT-compiled utility functions for performance
@@ -605,6 +615,12 @@ class SmallStepTransformation(Transformation):
         # h (1, N), div_Q (S, N)
         # h * div_Q -> (S, N)
         term = 1.0 + h * div_Q
+        n_singular = int(jnp.sum(jnp.abs(term) < 1e-30))
+        if n_singular > 0:
+            _warn_fallback(
+                f"Jacobian determinant near zero for {n_singular} entries "
+                f"(|1 + h*div(Q)| < 1e-30), log|J| will be -inf. "
+                f"Consider reducing step size h.")
         log_jacobian = jnp.log(jnp.abs(term))
 
         theta_new_params = theta_new # It IS the params structure now
@@ -2651,6 +2667,11 @@ class AdaptiveImportanceSampler:
 
                     # Update best metrics only for non-adapted points (or all if try_all)
                     khat_safe = jnp.where(jnp.isnan(res["khat"]), jnp.inf, res["khat"])
+                    n_nan_khat = int(jnp.sum(jnp.isnan(res["khat"])))
+                    if n_nan_khat > 0:
+                        _warn_fallback(
+                            f"AIS '{name}': {n_nan_khat} observations produced "
+                            f"NaN k-hat, set to inf")
 
                     # Only consider improvement for points not already adapted
                     if try_all_transformations:
@@ -2680,8 +2701,9 @@ class AdaptiveImportanceSampler:
                         adapted_mask = adapted_mask | newly_adapted
 
                 except Exception as e:
-                    if verbose:
-                        print(f"Failed {name} rho={rho}: {e}")
+                    _warn_fallback(
+                        f"AIS transformation '{name}' rho={rho} failed, "
+                        f"skipping", e)
                     continue
 
             # Block until all JAX computations for this transform are done

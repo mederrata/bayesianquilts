@@ -8,6 +8,15 @@ import os
 import yaml
 import h5py
 
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
+
 import dill
 import jax
 import jax.numpy as jnp
@@ -42,8 +51,10 @@ def FactorizedDistributionMoments(dist, samples=100):
         mean = dist.mean()
         var = dist.variance()
         return mean, var
-    except Exception:
-        # Fallback to sampling
+    except Exception as exc:
+        _warn_fallback(
+            "Analytical moments failed, falling back to sampling-based "
+            f"moments ({samples} samples)", exc)
         s = dist.sample(samples)
         if isinstance(s, dict):
             mean = {k: jnp.mean(v, axis=0) for k, v in s.items()}
@@ -322,7 +333,10 @@ class BayesianModel(nnx.Module, ABC):
                     dist = self.surrogate_distribution_generator(self.params)
                 else:
                     dist = self.surrogate_distribution
-            except Exception:
+            except Exception as exc:
+                _warn_fallback(
+                    "surrogate_distribution_generator failed, "
+                    "falling back to stored surrogate_distribution", exc)
                 dist = self.surrogate_distribution
 
             mean, var = FactorizedDistributionMoments(

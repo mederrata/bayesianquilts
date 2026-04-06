@@ -1,6 +1,16 @@
+import sys
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 def ordinal_one_hot_encode(data_matrix, max_val):
     """
@@ -218,9 +228,10 @@ class MICELogistic:
                             'max_val': max_val
                         }
                             
-                except Exception:
-                    # Fallback on failure: keep previous imputed values
-                    pass
+                except Exception as exc:
+                    _warn_fallback(
+                        f"MICE model fitting failed for column {j}, "
+                        f"keeping previous imputed values", exc)
 
         return X_filled, final_pmfs
 
@@ -309,7 +320,10 @@ class MICELogistic:
                              idx_cls = int(class_val)
                              final_pmfs[mis_idx, j, idx_cls] = probs[:, k].astype(np.float32)
                             
-                except Exception:
+                except Exception as exc:
+                    _warn_fallback(
+                        f"MICE PMF prediction failed for column {j}, "
+                        f"skipping (PMFs will be zero)", exc)
                     continue
                     
         return final_pmfs
