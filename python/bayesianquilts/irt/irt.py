@@ -1780,16 +1780,79 @@ class IRTModel(BayesianModel):
 
         item_var_list = self._item_var_list()
 
-        # Build item-only prior
+        # Build item-only prior.
+        #
+        # Some entries in the joint prior are callables (conditional
+        # distributions) whose signature names parent variables.  When
+        # those parents are not in item_var_list we must either pull
+        # them into the sub-prior or freeze the callable at the current
+        # ADVI point estimate.
+        import inspect as _inspect
+        full_model = self.joint_prior_distribution.model
         prior_dict = {}
         bijectors = {}
+
+        # Collect point estimates for freezing conditionals
+        def _point_estimate(var_name):
+            """Best available point estimate for a variable."""
+            if self.params is not None:
+                for pk in self.params:
+                    if pk.startswith(var_name) and pk.endswith('loc'):
+                        return self.params[pk]
+            return self.joint_prior_distribution.sample(
+                seed=jax.random.PRNGKey(0))[var_name]
+
+        # Resolve each item variable
         for v in item_var_list:
-            # Extract the marginal prior for this variable
-            prior_dict[v] = self.joint_prior_distribution.model[v]
-            if hasattr(self, 'bijectors') and v in self.bijectors:
-                bijectors[v] = self.bijectors[v]
+            entry = full_model[v]
+            if callable(entry) and not isinstance(entry, tfd.Distribution):
+                sig = _inspect.signature(entry)
+                missing = [p for p in sig.parameters if p not in item_var_list]
+                if missing:
+                    # Check if all missing parents themselves have plain
+                    # (non-callable) priors we can include
+                    all_plain = all(
+                        p in full_model
+                        and (not callable(full_model[p])
+                             or isinstance(full_model[p], tfd.Distribution))
+                        for p in missing
+                    )
+                    if all_plain:
+                        # Pull parent(s) into prior_dict
+                        for p in missing:
+                            if p not in prior_dict:
+                                prior_dict[p] = full_model[p]
+                                if hasattr(self, 'bijectors') and p in self.bijectors:
+                                    bijectors[p] = self.bijectors[p]
+                                else:
+                                    bijectors[p] = tfb.Identity()
+                        prior_dict[v] = entry
+                    else:
+                        # Freeze conditional at point estimates
+                        parent_vals = {p: _point_estimate(p) for p in missing}
+                        _warn_fallback(
+                            f"Prior for '{v}' depends on {missing} which "
+                            f"have conditional priors; freezing at point "
+                            f"estimates for marginal ADVI")
+                        # Bind only the missing parents; keep others as
+                        # free parameters in the sub-prior
+                        remaining = [p for p in sig.parameters
+                                     if p not in missing]
+                        if remaining:
+                            prior_dict[v] = lambda _entry=entry, _pv=parent_vals, **kw: _entry(**{**_pv, **kw})
+                        else:
+                            prior_dict[v] = entry(**parent_vals)
+                else:
+                    # All parents are item vars — keep as-is
+                    prior_dict[v] = entry
             else:
-                bijectors[v] = tfb.Identity()
+                prior_dict[v] = entry
+
+            if v not in bijectors:
+                if hasattr(self, 'bijectors') and v in self.bijectors:
+                    bijectors[v] = self.bijectors[v]
+                else:
+                    bijectors[v] = tfb.Identity()
 
         item_prior = tfd.JointDistributionNamed(prior_dict)
 
