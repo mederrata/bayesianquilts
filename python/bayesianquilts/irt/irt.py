@@ -1879,26 +1879,46 @@ class IRTModel(BayesianModel):
         # (e.g. 'mu', 'global_scale') were pulled in.
         surrogate_vars = list(prior_dict.keys())
 
+        # Check if analytical entropy is available
+        _test_surrogate = surrogate_gen(marginal_params)
+        try:
+            _test_entropy = _test_surrogate.entropy()
+            _use_analytical_entropy = jnp.isfinite(_test_entropy)
+        except (NotImplementedError, Exception):
+            _use_analytical_entropy = False
+
+        if verbose:
+            print(f"  Entropy: {'analytical' if _use_analytical_entropy else 'sampling-based'}")
+
+        # Use a mutable counter so each call gets a different PRNG key
+        _call_counter = [0]
+
         def loss_fn(params):
+            _call_counter[0] += 1
+            sample_key = jax.random.PRNGKey(seed + _call_counter[0])
             surrogate = surrogate_gen(params)
-            samples = surrogate.sample(num_samples, seed=key)
+            samples = surrogate.sample(num_samples, seed=sample_key)
             # ELBO = E_q[log p(data, Xi)] - E_q[log q(Xi)]
             log_probs = []
-            log_q_vals = []
             for s_idx in range(num_samples):
                 sample = {v: samples[v][s_idx] for v in surrogate_vars}
                 lp = self.marginal_log_prob(
                     data, theta_grid=theta_grid, **sample
                 )
                 log_probs.append(lp)
-                log_q_vals.append(surrogate.log_prob(
-                    {v: samples[v][s_idx] for v in surrogate_vars}
-                ))
             log_joint = jnp.mean(jnp.stack(log_probs))
-            # Estimate entropy as -E_q[log q] (works even when
-            # analytical entropy is unavailable for TransformedDistributions)
-            neg_entropy = jnp.mean(jnp.stack(log_q_vals))
-            return -(log_joint - neg_entropy)
+
+            if _use_analytical_entropy:
+                entropy = surrogate.entropy()
+            else:
+                # Estimate entropy as -E_q[log q]
+                log_q_vals = []
+                for s_idx in range(num_samples):
+                    log_q_vals.append(surrogate.log_prob(
+                        {v: samples[v][s_idx] for v in surrogate_vars}
+                    ))
+                entropy = -jnp.mean(jnp.stack(log_q_vals))
+            return -(log_joint + entropy)
 
         # training_loop expects a data_iterator and steps_per_epoch even
         # when data is already captured in the loss_fn closure.  Provide
@@ -2474,16 +2494,33 @@ class IRTModel(BayesianModel):
             )
 
         if item_params is None:
-            if not hasattr(self, 'mcmc_samples') or self.mcmc_samples is None:
+            if hasattr(self, 'mcmc_samples') and self.mcmc_samples is not None:
+                item_params = {}
+                for var, samples in self.mcmc_samples.items():
+                    # (chains, samples, ...) → mean over chains and samples
+                    item_params[var] = jnp.mean(
+                        samples.reshape(-1, *samples.shape[2:]), axis=0
+                    )
+            elif (hasattr(self, 'marginal_params')
+                  and self.marginal_params is not None
+                  and hasattr(self, 'marginal_surrogate_generator')
+                  and self.marginal_surrogate_generator is not None):
+                # Use marginal ADVI posterior means
+                surrogate = self.marginal_surrogate_generator(
+                    self.marginal_params)
+                post_samples = surrogate.sample(
+                    100, seed=jax.random.PRNGKey(0))
+                item_var_list = self._item_var_list()
+                item_params = {}
+                for var in item_var_list:
+                    if var in post_samples:
+                        item_params[var] = jnp.mean(
+                            post_samples[var], axis=0)
+            else:
                 raise ValueError(
-                    "No item_params provided and no mcmc_samples available. "
-                    "Run fit_marginal_mcmc first or pass item_params."
-                )
-            item_params = {}
-            for var, samples in self.mcmc_samples.items():
-                # (chains, samples, ...) → mean over chains and samples
-                item_params[var] = jnp.mean(
-                    samples.reshape(-1, *samples.shape[2:]), axis=0
+                    "No item_params provided and no mcmc_samples or "
+                    "marginal ADVI params available. Run fit_marginal_advi "
+                    "or fit_marginal_mcmc first, or pass item_params."
                 )
 
         # (Q, I, K)
