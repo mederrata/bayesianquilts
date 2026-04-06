@@ -1890,9 +1890,25 @@ class IRTModel(BayesianModel):
             entropy = surrogate.entropy()
             return -(log_joint + entropy)
 
+        # training_loop expects a data_iterator and steps_per_epoch even
+        # when data is already captured in the loss_fn closure.  Provide
+        # a single-step dummy iterator so the optimiser takes one gradient
+        # step per epoch (the loss already averages over the full dataset).
+        def _dummy_iterator():
+            while True:
+                yield None
+
+        # Wrap loss_fn to match training_loop's (data, params) signature
+        _orig_loss = loss_fn
+
+        def _batched_loss(data_batch, params):
+            return _orig_loss(params)
+
         losses, trained_params = training_loop(
             initial_values=marginal_params,
-            loss_fn=loss_fn,
+            loss_fn=_batched_loss,
+            data_iterator=_dummy_iterator(),
+            steps_per_epoch=1,
             num_epochs=num_epochs,
             learning_rate=learning_rate,
             **training_kwargs,
