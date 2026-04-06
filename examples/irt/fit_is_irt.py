@@ -1,28 +1,27 @@
 #!/usr/bin/env python
-"""Full marginal IRT pipeline: 3 ADVI variants + 3 MCMC variants with IPW.
+"""IS-based marginal IRT pipeline: ADVI → warm-start MCMC → IS reweight.
 
-Demonstrates the complete marginal inference pipeline for a unidimensional
-GRM, matching the analysis used in journal_article.tex:
+Demonstrates the importance-sampling approach for imputation-based IRT models.
+Instead of running separate MCMC chains for each model variant, we:
 
-1. Fit pairwise stacking imputation model (with optional IPW weights)
-2. Fit all 3 model variants via marginal ADVI:
-   - Baseline (no imputation)
-   - Pairwise (stacking imputation only)
-   - Mixed (pairwise + IRT baseline blend)
-3. Fit all 3 model variants via marginal MCMC (BlackJAX NUTS):
-   - Baseline, Pairwise, Mixed (same as above)
-4. Standardize abilities and compute EAP for each variant
+1. Fit pairwise stacking imputation model
+2. Fit baseline via marginal ADVI (needed for mixed imputation + MCMC init)
+3. Run marginal MCMC on the baseline model only (warm-started from ADVI)
+4. Reweight baseline MCMC samples via IS for pairwise and mixed variants
 5. Produce comparison plots and compute LOO-RMSE / LOO-ELPD
-6. Save all results
+
+This is much cheaper than running independent MCMC for each variant, since
+MCMC is the bottleneck and IS reweighting is O(S × N) per variant.
 
 Usage:
-    uv run python fit_marginal_irt.py --dataset eqsq
-    uv run python fit_marginal_irt.py --dataset rwa --step-size 0.001
-    uv run python fit_marginal_irt.py --dataset npi --skip-advi
+    uv run python fit_is_irt.py --dataset eqsq
+    uv run python fit_is_irt.py --dataset rwa --step-size 0.001
+    uv run python fit_is_irt.py --dataset npi --num-samples 1000
 """
 
 import argparse
 import gc
+import json
 import os
 import sys
 
@@ -79,7 +78,7 @@ def compute_ipw_weights(pandas_df, n_groups=3):
     return weights, groups, ess
 
 
-def compute_max_rhat(mcmc_samples, prefix="  "):
+def compute_max_rhat(mcmc_samples):
     max_rhat_overall = 0.0
     for var_name, samples in mcmc_samples.items():
         if samples.shape[0] > 1:
@@ -94,9 +93,9 @@ def compute_max_rhat(mcmc_samples, prefix="  "):
             )
             max_rhat = float(np.max(r_hat))
             max_rhat_overall = max(max_rhat_overall, max_rhat)
-            print(f"{prefix}{var_name} R-hat: "
+            print(f"  {var_name} R-hat: "
                   f"mean={np.mean(r_hat):.4f}, max={max_rhat:.4f}")
-    print(f"{prefix}Max R-hat (overall): {max_rhat_overall:.4f}")
+    print(f"  Max R-hat (overall): {max_rhat_overall:.4f}")
     return max_rhat_overall
 
 
@@ -108,6 +107,18 @@ def calibrate_model(model, seed=101, n_samples=32):
     model.calibrated_expectations = {
         k: jnp.mean(v, axis=0) for k, v in samples.items()
     }
+
+
+def is_weighted_stats(mcmc_samples, psis_weights):
+    """Compute IS-weighted mean and std for each parameter."""
+    stats = {}
+    for k, v in mcmc_samples.items():
+        flat = np.asarray(v).reshape(-1, *v.shape[2:])
+        w = psis_weights[:, None] if flat.ndim > 1 else psis_weights
+        mean = np.sum(w * flat, axis=0)
+        var = np.sum(w * (flat - mean) ** 2, axis=0)
+        stats[k] = {'mean': mean, 'std': np.sqrt(np.maximum(var, 0.0))}
+    return stats
 
 
 def predictive_rmse(model, data_dict, item_keys, K):
@@ -139,15 +150,19 @@ def _tufte(ax):
     ax.spines['bottom'].set_linewidth(0.5)
 
 
-def plot_forest(item_keys, models, param_key, xlabel, out_path):
+def plot_forest(item_keys, variant_stats, param_key, xlabel, out_path):
+    """Forest plot comparing posterior summaries across variants.
+
+    variant_stats: dict of {label: {'mean': array, 'std': array}}
+    """
     n_items = len(item_keys)
     fig, ax = plt.subplots(figsize=(6, max(4, n_items * 0.3)))
     y_pos = np.arange(n_items)
-    n_models = len(models)
-    for k, (label, mdl) in enumerate(models.items()):
-        vals = np.array(mdl.surrogate_sample[param_key]).reshape(-1, n_items)
+    n_models = len(variant_stats)
+    for k, (label, stats) in enumerate(variant_stats.items()):
         offset = (k - n_models / 2 + 0.5) * 0.2
-        ax.errorbar(vals.mean(0), y_pos + offset, xerr=vals.std(0),
+        ax.errorbar(stats[param_key]['mean'], y_pos + offset,
+                    xerr=stats[param_key]['std'],
                     fmt=MARKERS.get(label, 'o'), capsize=2, markersize=4,
                     elinewidth=1, color=COLORS.get(label, 'gray'),
                     alpha=0.7, label=label)
@@ -196,26 +211,27 @@ def plot_ability_scatter(ab_base, ab_other, label_other, out_path):
 
 
 # ============================================================
-# Variant runners
+# IS Reweighting
 # ============================================================
 
-def run_variant_advi(model, data, variant_name, output_dir,
-                     num_samples=10, num_epochs=2000, learning_rate=0.01,
-                     rank=0, seed=42):
+def run_is_reweight(model, data, mcmc_samples, imputation_model,
+                    variant_name, output_dir, verbose=True):
     print(f"\n{'─'*50}")
-    print(f"  ADVI: {variant_name}")
+    print(f"  IS Reweight: {variant_name}")
     print(f"{'─'*50}")
     sys.stdout.flush()
 
-    losses, params = model.fit_marginal_advi(
-        data,
-        num_samples=num_samples,
-        num_epochs=num_epochs,
-        learning_rate=learning_rate,
-        rank=rank,
-        seed=seed,
-        verbose=True,
+    is_result = model.importance_reweight(
+        data=data,
+        mcmc_samples=mcmc_samples,
+        imputation_model=imputation_model,
+        fn=None,
+        verbose=verbose,
     )
+
+    print(f"  k-hat: {is_result['khat']:.3f}")
+    print(f"  ESS: {is_result['ess']:.1f}/{is_result['n_samples']}")
+    print(f"  Tempered: {is_result['tempered']}")
 
     eap_result = model.compute_eap_abilities(data)
     print(f"  EAP std: {float(jnp.std(eap_result['eap'])):.4f}, "
@@ -223,87 +239,17 @@ def run_variant_advi(model, data, variant_name, output_dir,
 
     os.makedirs(output_dir, exist_ok=True)
     np.savez(
-        os.path.join(output_dir, f'advi_{variant_name}.npz'),
-        losses=np.array(losses),
+        os.path.join(output_dir, f'is_{variant_name}.npz'),
+        log_weights=np.array(is_result['log_weights']),
+        psis_weights=np.array(is_result['psis_weights']),
+        khat=is_result['khat'],
+        ess=is_result['ess'],
+        tempered=is_result['tempered'],
         eap=np.array(eap_result['eap']),
         psd=np.array(eap_result['psd']),
     )
-    return losses, params
 
-
-def run_variant_mcmc(model, data, variant_name, output_dir,
-                     num_chains=2, num_warmup=500, num_samples=500,
-                     step_size=0.01, seed=42):
-    """Run marginal MCMC for one variant, standardize, and save.
-
-    Returns (model, mcmc_samples, eap_result) so caller can use for plots.
-    """
-    print(f"\n{'─'*50}")
-    print(f"  MCMC: {variant_name}")
-    print(f"{'─'*50}")
-    sys.stdout.flush()
-
-    mcmc_samples = model.fit_marginal_mcmc(
-        data,
-        theta_grid=None,
-        num_chains=num_chains,
-        num_warmup=num_warmup,
-        num_samples=num_samples,
-        target_accept_prob=0.85,
-        step_size=step_size,
-        seed=seed,
-        verbose=True,
-    )
-
-    # R-hat check — resume if convergence is poor
-    max_rhat = compute_max_rhat(mcmc_samples)
-    resume_round = 0
-    while max_rhat > 1.05 and resume_round < 3:
-        resume_round += 1
-        print(f"\n  Max R-hat {max_rhat:.4f} > 1.05, "
-              f"extending chains (round {resume_round}/3)...")
-        mcmc_samples = model.fit_marginal_mcmc(
-            data,
-            theta_grid=None,
-            num_samples=num_samples,
-            seed=seed + resume_round * 100,
-            verbose=True,
-            resume=True,
-        )
-        max_rhat = compute_max_rhat(mcmc_samples)
-
-    # Standardize
-    stats = model.standardize_marginal(data)
-
-    # EAP
-    eap_result = model.compute_eap_abilities(data)
-    print(f"  Post-std EAP std: {float(jnp.std(eap_result['eap'])):.4f}, "
-          f"PSD: {float(jnp.mean(eap_result['psd'])):.4f}")
-
-    # Fit surrogate to MCMC
-    model.fit_surrogate_to_mcmc()
-
-    # Inject EAP abilities into surrogate_sample
-    eap_arr = np.array(eap_result['eap'])
-    model.surrogate_sample['abilities'] = jnp.array(
-        eap_arr[:, np.newaxis, np.newaxis, np.newaxis]
-    )[np.newaxis, ...]
-
-    # Save model
-    model_dir = os.path.join(output_dir, f'grm_mcmc_{variant_name}')
-    model.save_to_disk(model_dir)
-
-    # Save NPZ
-    save_dict = {}
-    for var_name, samples in mcmc_samples.items():
-        save_dict[var_name] = np.array(samples)
-    save_dict['eap'] = np.array(eap_result['eap'])
-    save_dict['psd'] = np.array(eap_result['psd'])
-    save_dict['standardize_mu'] = stats['mu']
-    save_dict['standardize_sigma'] = stats['sigma']
-    np.savez(os.path.join(output_dir, f'mcmc_{variant_name}.npz'), **save_dict)
-
-    return model, mcmc_samples, eap_result
+    return is_result, eap_result
 
 
 # ============================================================
@@ -312,7 +258,7 @@ def run_variant_mcmc(model, data, variant_name, output_dir,
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Full marginal IRT pipeline: ADVI + MCMC x 3 variants')
+        description='IS-based marginal IRT: ADVI → MCMC baseline → IS reweight')
     parser.add_argument('--dataset', default='eqsq',
                         choices=list(DATASET_CONFIGS.keys()))
     parser.add_argument('--output-dir', default=None)
@@ -322,8 +268,6 @@ def main():
     parser.add_argument('--step-size', type=float, default=0.01)
     parser.add_argument('--advi-epochs', type=int, default=2000)
     parser.add_argument('--advi-rank', type=int, default=0)
-    parser.add_argument('--skip-advi', action='store_true')
-    parser.add_argument('--skip-mcmc', action='store_true')
     parser.add_argument('--use-ipw', action='store_true', default=True)
     parser.add_argument('--no-ipw', action='store_true')
     parser.add_argument('--seed', type=int, default=42)
@@ -348,7 +292,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"Marginal IRT Pipeline: {args.dataset.upper()}")
+    print(f"IS-based Marginal IRT Pipeline: {args.dataset.upper()}")
     print(f"  Items: {len(item_keys)}, K: {response_cardinality}")
     print(f"{'='*60}")
 
@@ -396,27 +340,11 @@ def main():
         pairwise_model.save(stacking_path)
         print(f"  Saved to {stacking_path}")
 
-    # Precompute imputation PMFs for pairwise variant
-    def make_pairwise_data():
-        model_tmp = GRModel(
-            item_keys=item_keys, num_people=num_people,
-            response_cardinality=response_cardinality, dim=1,
-            imputation_model=pairwise_model, dtype=jnp.float64,
-        )
-        data = dict(base_data)
-        pmfs, _ = model_tmp._compute_batch_pmfs(data)
-        if pmfs is not None:
-            data['_imputation_pmfs'] = pmfs
-        del model_tmp
-        return data
-
-    pairwise_data = make_pairwise_data()
-
     # ================================================================
-    # Step 2: Baseline ADVI (for mixed imputation model)
+    # Step 2: Baseline ADVI
     # ================================================================
     print(f"\n{'='*60}")
-    print(f"Step 2: Baseline ADVI (needed for mixed model)")
+    print(f"Step 2: Baseline ADVI")
     print(f"{'='*60}")
 
     baseline_grm_path = os.path.join(output_dir, 'grm_baseline')
@@ -437,7 +365,7 @@ def main():
             data_factory,
             dataset_size=num_people,
             batch_size=num_people,
-            num_epochs=2000,
+            num_epochs=args.advi_epochs,
             learning_rate=0.01,
         )
         baseline_model.save_to_disk(baseline_grm_path)
@@ -445,7 +373,83 @@ def main():
 
     calibrate_model(baseline_model)
 
-    # Build mixed imputation model
+    # Marginal ADVI for MCMC warm-start
+    print(f"  Running marginal ADVI for MCMC warm-start...")
+    baseline_model.fit_marginal_advi(
+        base_data,
+        num_samples=10,
+        num_epochs=args.advi_epochs,
+        learning_rate=0.01,
+        rank=args.advi_rank,
+        seed=args.seed,
+        verbose=True,
+    )
+
+    # ================================================================
+    # Step 3: Marginal MCMC (baseline only)
+    # ================================================================
+    print(f"\n{'='*60}")
+    print(f"Step 3: Marginal MCMC (baseline only, ADVI warm-start)")
+    print(f"{'='*60}")
+
+    mcmc_samples = baseline_model.fit_marginal_mcmc(
+        base_data,
+        theta_grid=None,
+        num_chains=args.num_chains,
+        num_warmup=args.num_warmup,
+        num_samples=args.num_samples,
+        target_accept_prob=0.85,
+        step_size=args.step_size,
+        seed=args.seed,
+        verbose=True,
+    )
+
+    # R-hat check — resume if convergence is poor
+    max_rhat = compute_max_rhat(mcmc_samples)
+    resume_round = 0
+    while max_rhat > 1.05 and resume_round < 3:
+        resume_round += 1
+        print(f"\n  Max R-hat {max_rhat:.4f} > 1.05, "
+              f"extending chains (round {resume_round}/3)...")
+        mcmc_samples = baseline_model.fit_marginal_mcmc(
+            base_data,
+            theta_grid=None,
+            num_samples=args.num_samples,
+            seed=args.seed + resume_round * 100,
+            verbose=True,
+            resume=True,
+        )
+        max_rhat = compute_max_rhat(mcmc_samples)
+
+    # Standardize and compute EAP
+    stats = baseline_model.standardize_marginal(base_data)
+    baseline_model.fit_surrogate_to_mcmc()
+    eap_baseline = baseline_model.compute_eap_abilities(base_data)
+
+    # Inject EAP into surrogate_sample for ELPD-LOO
+    eap_arr = np.array(eap_baseline['eap'])
+    baseline_model.surrogate_sample['abilities'] = jnp.array(
+        eap_arr[:, np.newaxis, np.newaxis, np.newaxis]
+    )[np.newaxis, ...]
+
+    # Save baseline
+    save_dict = {'eap': np.array(eap_baseline['eap']),
+                 'psd': np.array(eap_baseline['psd']),
+                 'standardize_mu': stats['mu'],
+                 'standardize_sigma': stats['sigma']}
+    for var_name, samples in mcmc_samples.items():
+        save_dict[var_name] = np.array(samples)
+    np.savez(os.path.join(output_dir, 'mcmc_baseline.npz'), **save_dict)
+    baseline_model.save_to_disk(
+        os.path.join(output_dir, 'grm_mcmc_baseline'))
+
+    # ================================================================
+    # Step 4: Build imputation models
+    # ================================================================
+    print(f"\n{'='*60}")
+    print(f"Step 4: Build imputation models")
+    print(f"{'='*60}")
+
     def make_data_factory():
         def factory():
             yield base_data
@@ -456,164 +460,145 @@ def main():
         mice_model=pairwise_model,
         data_factory=make_data_factory(),
     )
+    print(mixed_imputation.summary())
 
-    # Precompute mixed imputation PMFs
-    def make_mixed_data():
-        model_tmp = GRModel(
-            item_keys=item_keys, num_people=num_people,
-            response_cardinality=response_cardinality, dim=1,
-            imputation_model=mixed_imputation, dtype=jnp.float64,
-        )
-        data = dict(base_data)
-        pmfs, weights = model_tmp._compute_batch_pmfs(data)
-        if pmfs is not None:
-            data['_imputation_pmfs'] = pmfs
-            if weights is not None:
-                data['_imputation_weights'] = weights
-        del model_tmp
-        return data
+    with open(os.path.join(output_dir, 'mixed_weights.json'), 'w') as f:
+        json.dump(mixed_imputation.weights, f, indent=2)
 
-    mixed_data = make_mixed_data()
+    pairwise_only = PairwiseOnlyImputationModel(
+        mice_model=pairwise_model,
+    )
 
-    variant_data = {
-        'baseline': dict(base_data),
-        'pairwise': pairwise_data,
-        'mixed': mixed_data,
+    # ================================================================
+    # Step 5: IS reweight for pairwise and mixed
+    # ================================================================
+    print(f"\n{'='*60}")
+    print(f"Step 5: IS Reweighting (pairwise + mixed)")
+    print(f"{'='*60}")
+
+    is_results = {}
+    eap_results = {}
+
+    is_results['pairwise'], eap_results['pairwise'] = run_is_reweight(
+        baseline_model, base_data, mcmc_samples,
+        pairwise_only, 'pairwise', output_dir,
+    )
+    gc.collect()
+
+    is_results['mixed'], eap_results['mixed'] = run_is_reweight(
+        baseline_model, base_data, mcmc_samples,
+        mixed_imputation, 'mixed', output_dir,
+    )
+    gc.collect()
+
+    # ================================================================
+    # Step 6: Compute stats (LOO-RMSE, LOO-ELPD)
+    # ================================================================
+    print(f"\n{'='*60}")
+    print(f"Step 6: Model Evaluation")
+    print(f"{'='*60}")
+
+    # Predictive RMSE for baseline
+    rmse_baseline = predictive_rmse(
+        baseline_model, base_data, item_keys, response_cardinality)
+    print(f"  Baseline RMSE: {rmse_baseline:.4f}")
+
+    # ELPD-LOO for baseline
+    elpd_baseline = np.nan
+    try:
+        def data_factory_elpd():
+            yield base_data
+        baseline_model._compute_elpd_loo(
+            data_factory_elpd, n_samples=100, seed=args.seed, use_ais=True)
+        elpd_baseline = baseline_model.elpd_loo
+        print(f"  Baseline ELPD-LOO: {elpd_baseline:.2f} "
+              f"+/- {baseline_model.elpd_loo_se:.2f}")
+    except Exception as e:
+        print(f"  Baseline ELPD-LOO failed: {e}")
+
+    # ================================================================
+    # Step 7: Plots
+    # ================================================================
+    print(f"\n{'='*60}")
+    print(f"Step 7: Generating plots")
+    print(f"{'='*60}")
+
+    # Compute posterior summaries for each variant
+    # Baseline: unweighted MCMC means/stds
+    baseline_stats = {}
+    for k, v in mcmc_samples.items():
+        flat = np.asarray(v).reshape(-1, *v.shape[2:])
+        baseline_stats[k] = {
+            'mean': np.mean(flat, axis=0),
+            'std': np.std(flat, axis=0),
+        }
+
+    # IS-weighted summaries for pairwise and mixed
+    pairwise_stats = is_weighted_stats(
+        mcmc_samples, is_results['pairwise']['psis_weights'])
+    mixed_stats = is_weighted_stats(
+        mcmc_samples, is_results['mixed']['psis_weights'])
+
+    variant_stats = {
+        'Baseline': baseline_stats,
+        'Pairwise': pairwise_stats,
+        'Mixed': mixed_stats,
     }
 
-    # ================================================================
-    # Step 3: Marginal ADVI for all 3 variants
-    # ================================================================
-    if not args.skip_advi:
-        print(f"\n{'='*60}")
-        print(f"Step 3: Marginal ADVI (3 variants)")
-        print(f"{'='*60}")
+    # Forest plots
+    plot_forest(item_keys, variant_stats, 'discriminations',
+                'Discrimination', os.path.join(output_dir, 'forest_discriminations.png'))
+    print(f"  Saved forest_discriminations.png")
 
-        for variant_name, data in variant_data.items():
-            model = GRModel.load_from_disk(baseline_grm_path)
-            run_variant_advi(
-                model, data, variant_name, output_dir,
-                num_epochs=args.advi_epochs,
-                rank=args.advi_rank,
-                seed=args.seed,
-            )
-            del model
-            gc.collect()
+    plot_forest(item_keys, variant_stats, 'difficulties0',
+                'Difficulty (first threshold)',
+                os.path.join(output_dir, 'forest_difficulties.png'))
+    print(f"  Saved forest_difficulties.png")
 
-    # ================================================================
-    # Step 4: Marginal MCMC for all 3 variants
-    # ================================================================
-    mcmc_models = {}
-    mcmc_eaps = {}
+    # Ability histograms
+    models_ab = {
+        'Baseline': np.array(eap_baseline['eap']),
+        'Pairwise': np.array(eap_results['pairwise']['eap']),
+        'Mixed': np.array(eap_results['mixed']['eap']),
+    }
+    plot_ability_histograms(models_ab,
+                            os.path.join(output_dir, 'ability_histograms.png'))
+    print(f"  Saved ability_histograms.png")
 
-    if not args.skip_mcmc:
-        print(f"\n{'='*60}")
-        print(f"Step 4: Marginal MCMC (3 variants)")
-        print(f"{'='*60}")
-
-        for i, (variant_name, data) in enumerate(variant_data.items()):
-            model = GRModel.load_from_disk(baseline_grm_path)
-            model, mcmc_samples, eap_result = run_variant_mcmc(
-                model, data, variant_name, output_dir,
-                num_chains=args.num_chains,
-                num_warmup=args.num_warmup,
-                num_samples=args.num_samples,
-                step_size=args.step_size,
-                seed=args.seed + i,
-            )
-            mcmc_models[variant_name] = model
-            mcmc_eaps[variant_name] = eap_result
-            gc.collect()
+    # Ability scatter: baseline vs each imputation variant
+    for label in ['Pairwise', 'Mixed']:
+        plot_ability_scatter(
+            models_ab['Baseline'], models_ab[label], label,
+            os.path.join(output_dir, f'ability_scatter_{label.lower()}.png'))
+        print(f"  Saved ability_scatter_{label.lower()}.png")
 
     # ================================================================
-    # Step 5: Model evaluation and plots
+    # Summary table
     # ================================================================
-    if mcmc_models:
-        print(f"\n{'='*60}")
-        print(f"Step 5: Evaluation and Plots")
-        print(f"{'='*60}")
+    n_observed = sum(
+        np.sum((base_data[k] >= 0) & (base_data[k] < response_cardinality)
+               & ~np.isnan(base_data[k]))
+        for k in item_keys
+    )
 
-        named_models = {
-            'Baseline': mcmc_models.get('baseline'),
-            'Pairwise': mcmc_models.get('pairwise'),
-            'Mixed': mcmc_models.get('mixed'),
-        }
-        named_models = {k: v for k, v in named_models.items() if v is not None}
-
-        # Forest plots
-        plot_forest(item_keys, named_models, 'discriminations',
-                    'Discrimination',
-                    os.path.join(output_dir, 'forest_discriminations.png'))
-        print(f"  Saved forest_discriminations.png")
-
-        plot_forest(item_keys, named_models, 'difficulties0',
-                    'Difficulty (first threshold)',
-                    os.path.join(output_dir, 'forest_difficulties.png'))
-        print(f"  Saved forest_difficulties.png")
-
-        # Ability histograms
-        models_ab = {}
-        for vname, eap in mcmc_eaps.items():
-            label = vname.capitalize()
-            models_ab[label] = np.array(eap['eap'])
-
-        plot_ability_histograms(
-            models_ab, os.path.join(output_dir, 'ability_histograms.png'))
-        print(f"  Saved ability_histograms.png")
-
-        # Ability scatter: baseline vs imputation variants
-        if 'Baseline' in models_ab:
-            for label in ['Pairwise', 'Mixed']:
-                if label in models_ab:
-                    plot_ability_scatter(
-                        models_ab['Baseline'], models_ab[label], label,
-                        os.path.join(output_dir,
-                                     f'ability_scatter_{label.lower()}.png'))
-                    print(f"  Saved ability_scatter_{label.lower()}.png")
-
-        # LOO-RMSE and LOO-ELPD
-        n_observed = sum(
-            np.sum((base_data[k] >= 0)
-                   & (base_data[k] < response_cardinality)
-                   & ~np.isnan(base_data[k]))
-            for k in item_keys
-        )
-
-        print(f"\n{'='*70}")
-        print(f"{'Model':<12} {'RMSE':>8} {'ELPD/resp':>12} {'ELPD SE':>10}")
-        print(f"{'─'*70}")
-
-        for label, mdl in named_models.items():
-            # RMSE
-            try:
-                rmse = predictive_rmse(mdl, base_data, item_keys,
-                                       response_cardinality)
-                rmse_str = f"{rmse:.4f}"
-            except Exception:
-                rmse_str = "nan"
-
-            # ELPD-LOO
-            elpd_str = "nan"
-            se_str = "nan"
-            try:
-                def factory_fn():
-                    yield base_data
-                mdl._compute_elpd_loo(
-                    factory_fn, n_samples=100, seed=args.seed, use_ais=True)
-                elpd_str = f"{mdl.elpd_loo / n_observed:.4f}"
-                se_str = f"{mdl.elpd_loo_se / n_observed:.4f}"
-            except Exception as e:
-                print(f"  {label} ELPD failed: {e}")
-
-            print(f"{label:<12} {rmse_str:>8} {elpd_str:>12} {se_str:>10}")
-            gc.collect()
-
-        print(f"{'='*70}")
-
-    print(f"\n{'='*60}")
-    print(f"Pipeline complete: {args.dataset.upper()}")
+    print(f"\n{'='*70}")
+    print(f"{'Variant':<12} {'k-hat':>8} {'ESS':>8} {'ESS%':>7} "
+          f"{'RMSE':>8} {'ELPD/resp':>12}")
+    print(f"{'─'*70}")
+    print(f"{'Baseline':<12} {'—':>8} "
+          f"{args.num_chains * args.num_samples:>8} {'100.0':>7} "
+          f"{rmse_baseline:>8.4f} "
+          f"{elpd_baseline / n_observed:>12.4f}" if np.isfinite(elpd_baseline)
+          else f"{'Baseline':<12} {'—':>8} "
+          f"{args.num_chains * args.num_samples:>8} {'100.0':>7} "
+          f"{rmse_baseline:>8.4f} {'nan':>12}")
+    for name, res in is_results.items():
+        ess_pct = 100.0 * res['ess'] / res['n_samples']
+        print(f"{name:<12} {res['khat']:>8.3f} "
+              f"{res['ess']:>8.1f} {ess_pct:>6.1f}% "
+              f"{'—':>8} {'—':>12}")
+    print(f"{'='*70}")
     print(f"  Output: {output_dir}/")
-    print(f"{'='*60}")
 
 
 if __name__ == '__main__':

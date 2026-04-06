@@ -1,4 +1,5 @@
 import sys
+import warnings
 from typing import Any, Dict, Optional
 
 import jax
@@ -9,6 +10,15 @@ from bayesianquilts.model import BayesianModel
 from bayesianquilts.predictors.nn.dense import Dense
 from tensorflow_probability.substrates.jax import distributions as tfd
 from tensorflow_probability.substrates.jax import tf2jax as tf
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 
 class IRTModel(BayesianModel):
@@ -87,7 +97,9 @@ class IRTModel(BayesianModel):
             for k in self.var_list:
                 self.surrogate_sample[k] = samples[k]
         except KeyError:
-            print(str(k) + " doesn't exist in your samples")
+            _warn_fallback(
+                f"Key '{k}' not found in samples — "
+                f"surrogate_sample NOT updated")
             return
         self.set_calibration_expectations()
 
@@ -558,7 +570,10 @@ class IRTModel(BayesianModel):
         try:
             _, loos, ks = psisloo(lw_2d)
             khat = float(ks[0])
-        except Exception:
+        except Exception as exc:
+            _warn_fallback(
+                "PSIS-LOO failed, setting k-hat=inf "
+                "(IS weights may be unreliable)", exc)
             khat = float('inf')
 
         # Normalize weights
@@ -1039,7 +1054,11 @@ class IRTModel(BayesianModel):
                             **kwargs,
                         )
                     pmfs[row_idx, i, :] = pmf
-                except (ValueError, KeyError, AttributeError):
+                except (ValueError, KeyError, AttributeError) as exc:
+                    _warn_fallback(
+                        f"Imputation predict_pmf failed for item "
+                        f"'{item_key}' person {row_idx}, "
+                        f"falling back to uniform 1/{K}", exc)
                     pmfs[row_idx, i, :] = 1.0 / K
 
         return pmfs, weights
@@ -1075,7 +1094,10 @@ class IRTModel(BayesianModel):
                     for batch in iterator:
                         _attach_imputation(batch)
                         yield batch
-                except TypeError:
+                except TypeError as exc:
+                    _warn_fallback(
+                        "Data factory returned non-iterable, "
+                        "treating as single batch", exc)
                     batch = iterator
                     _attach_imputation(batch)
                     yield batch
@@ -1229,7 +1251,10 @@ class IRTModel(BayesianModel):
                                 best_khat_i = t_khat
                                 best_loo_i = t_loo
                                 print(f" {t_name}={t_khat:.3f}", end="", flush=True)
-                        except Exception:
+                        except Exception as exc:
+                            _warn_fallback(
+                                f"AIS transformation '{t_name}' failed for "
+                                f"obs {obs_idx}, skipping", exc)
                             continue
 
                     if best_khat_i < ks[obs_idx]:
@@ -1437,7 +1462,11 @@ class IRTModel(BayesianModel):
                         mice_pmfs[row_idx, i, :] = imputation_model.predict_mice_pmf(
                             observed_items, target=item_key, n_categories=K,
                         )
-                    except (ValueError, KeyError, AttributeError, TypeError):
+                    except (ValueError, KeyError, AttributeError, TypeError) as exc:
+                        _warn_fallback(
+                            f"MICE predict_mice_pmf failed for item "
+                            f"'{item_key}' person {row_idx}, "
+                            f"falling back to uniform 1/{K}", exc)
                         mice_pmfs[row_idx, i, :] = 1.0 / K
 
             # Compute response probs p(Y=k|θ_s) chunked over S
@@ -1491,7 +1520,9 @@ class IRTModel(BayesianModel):
         try:
             _, _, ks = psisloo(log_w_matrix)
             khat = float(ks[0])
-        except Exception:
+        except Exception as exc:
+            _warn_fallback(
+                "PSIS-LOO (IS reweighting) failed, setting k-hat=inf", exc)
             khat = np.inf
 
         # Compute normalized IS weights
@@ -1523,7 +1554,9 @@ class IRTModel(BayesianModel):
                     psis_log_w = log_is_weights.copy()
             else:
                 psis_log_w = log_is_weights.copy()
-        except Exception:
+        except Exception as exc:
+            _warn_fallback(
+                "PSIS tail smoothing failed, using unsmoothed IS weights", exc)
             psis_log_w = log_is_weights.copy()
 
         psis_w = np.exp(psis_log_w - psis_log_w.max())
@@ -1828,6 +1861,7 @@ class IRTModel(BayesianModel):
         step_size=0.01,
         seed=None,
         verbose=True,
+        resume=False,
     ):
         """Run NUTS on item parameters with abilities Rao-Blackwellized out.
 
@@ -1845,6 +1879,11 @@ class IRTModel(BayesianModel):
             step_size: Initial step size.
             seed: Random seed.
             verbose: Print progress.
+            resume: If True, skip warmup and continue sampling from the
+                saved state of a previous call. Requires a prior call
+                to fit_marginal_mcmc that populated ``self.mcmc_state_``.
+                New samples are concatenated with existing
+                ``self.mcmc_samples`` along the samples axis.
 
         Returns:
             Dict mapping item param names to posterior sample arrays of
@@ -1925,6 +1964,30 @@ class IRTModel(BayesianModel):
             print(f"  Flat parameter vector: {n_flat} elements")
             sys.stdout.flush()
 
+        # Resume from previous run if requested
+        if resume:
+            if not hasattr(self, 'mcmc_state_') or self.mcmc_state_ is None:
+                raise ValueError(
+                    "resume=True but no mcmc_state_ found. "
+                    "Run fit_marginal_mcmc without resume first.")
+            saved = self.mcmc_state_
+            num_chains = len(saved['states'])
+            if verbose:
+                print(f"  Resuming {num_chains} chains "
+                      f"(+{num_samples} samples each)")
+                sys.stdout.flush()
+        else:
+            self._mcmc_chain_states = []
+            self._mcmc_chain_step_sizes = []
+            self._mcmc_chain_inv_mass = []
+        # On resume, recover the backing lists from the saved state dict so that
+        # the per-chain update at the end of the loop works even after a
+        # serialize/reload cycle that stripped the private attributes.
+        if resume and not hasattr(self, '_mcmc_chain_states'):
+            self._mcmc_chain_states = list(saved['states'])
+            self._mcmc_chain_step_sizes = list(saved['step_sizes'])
+            self._mcmc_chain_inv_mass = list(saved['inv_mass_matrices'])
+
         all_samples = {var: [] for var in item_var_list}
         all_accept = []
 
@@ -1934,20 +1997,29 @@ class IRTModel(BayesianModel):
                 print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
                 sys.stdout.flush()
 
-            init_flat, _ = ravel_pytree(initial_positions[chain_idx])
+            if resume:
+                # Skip warmup — use saved state and kernel params
+                state = saved['states'][chain_idx]
+                current_step_size = saved['step_sizes'][chain_idx]
+                inv_mass_matrix = saved['inv_mass_matrices'][chain_idx]
+                if verbose:
+                    print(f"    Resuming from saved state "
+                          f"(step_size={current_step_size:.6f})")
+                    sys.stdout.flush()
+            else:
+                init_flat, _ = ravel_pytree(initial_positions[chain_idx])
 
-            # Phase 1 uses identity mass for fast steps (even if some diverge).
-            # Phase 2 uses the mass matrix estimated from phase 1 samples.
-            inv_mass_matrix = jnp.ones(n_flat)
-            current_step_size = step_size
-            phase1_steps = num_warmup // 2
-            phase2_steps = num_warmup - phase1_steps
+                # Phase 1 uses identity mass for fast steps (even if some diverge).
+                # Phase 2 uses the mass matrix estimated from phase 1 samples.
+                inv_mass_matrix = jnp.ones(n_flat)
+                current_step_size = step_size
+                phase1_steps = num_warmup // 2
+                phase2_steps = num_warmup - phase1_steps
 
-            for phase, n_steps in [(1, phase1_steps), (2, phase2_steps)]:
-                # Single attempt per phase — no step size retries.
-                # Phase 1 may have divergences; the mass matrix from those
-                # samples still captures the right scale for phase 2.
-                for attempt in range(1):
+                for phase, n_steps in [(1, phase1_steps), (2, phase2_steps)]:
+                    # Single attempt per phase — no step size retries.
+                    # Phase 1 may have divergences; the mass matrix from those
+                    # samples still captures the right scale for phase 2.
                     if verbose:
                         print(f"    Phase {phase}: {n_steps} steps, "
                               f"step_size={current_step_size:.6f}...")
@@ -1958,7 +2030,7 @@ class IRTModel(BayesianModel):
                         step_size=current_step_size,
                         inverse_mass_matrix=inv_mass_matrix,
                     )
-                    if phase == 1 and attempt == 0:
+                    if phase == 1:
                         state = kernel.init(init_flat)
 
                     @jax.jit
@@ -1982,29 +2054,22 @@ class IRTModel(BayesianModel):
                             sys.stdout.flush()
 
                     rate = n_nondiv / max(n_steps, 1)
-                    if rate >= 0.1:
-                        break
-                    current_step_size *= 0.1
+
                     if verbose:
-                        print(f"    Phase {phase} non-div {rate:.3f} too low, "
-                              f"reducing step_size to {current_step_size:.6f}")
+                        print(f"    Phase {phase} done: non-div={rate:.3f}")
                         sys.stdout.flush()
 
-                if verbose:
-                    print(f"    Phase {phase} done: non-div={rate:.3f}")
-                    sys.stdout.flush()
+                    # Estimate mass matrix from second half of this phase
+                    half = max(len(phase_flats) // 2, 1)
+                    p_stack = jnp.stack(phase_flats[half:])
+                    var_est = jnp.var(p_stack, axis=0)
+                    inv_mass_matrix = jnp.maximum(var_est, 1e-6)
 
-                # Estimate mass matrix from second half of this phase
-                half = max(len(phase_flats) // 2, 1)
-                p_stack = jnp.stack(phase_flats[half:])
-                var_est = jnp.var(p_stack, axis=0)
-                inv_mass_matrix = jnp.maximum(var_est, 1e-6)
-
-                # Adjust step size based on acceptance for next phase
-                if rate > 0.9:
-                    current_step_size *= 2.0
-                elif rate < 0.5:
-                    current_step_size *= 0.5
+                    # Adjust step size based on acceptance for next phase
+                    if rate > 0.9:
+                        current_step_size *= 2.0
+                    elif rate < 0.5:
+                        current_step_size *= 0.5
 
             # Build sampling kernel with final adapted parameters
             sampling_kernel = blackjax.nuts(
@@ -2048,12 +2113,35 @@ class IRTModel(BayesianModel):
                     [p[var] for p in positions], axis=0)
                 all_samples[var].append(stacked)
             all_accept.append(accept_ratio)
+            # Save per-chain state for potential resume
+            if chain_idx < len(self._mcmc_chain_states):
+                self._mcmc_chain_states[chain_idx] = state
+                self._mcmc_chain_step_sizes[chain_idx] = current_step_size
+                self._mcmc_chain_inv_mass[chain_idx] = inv_mass_matrix
+            else:
+                self._mcmc_chain_states.append(state)
+                self._mcmc_chain_step_sizes.append(current_step_size)
+                self._mcmc_chain_inv_mass.append(inv_mass_matrix)
+
+        # Save resume state
+        self.mcmc_state_ = {
+            'states': self._mcmc_chain_states,
+            'step_sizes': self._mcmc_chain_step_sizes,
+            'inv_mass_matrices': self._mcmc_chain_inv_mass,
+        }
 
         # Stack chains: (num_chains, num_samples, ...)
         result = {}
         for var in item_var_list:
             if all_samples[var]:
                 result[var] = jnp.stack(all_samples[var], axis=0)
+
+        # If resuming, concatenate with previous samples
+        if resume and hasattr(self, 'mcmc_samples') and self.mcmc_samples:
+            for var in item_var_list:
+                if var in result and var in self.mcmc_samples:
+                    result[var] = jnp.concatenate(
+                        [self.mcmc_samples[var], result[var]], axis=1)
 
         if verbose:
             print(f"\n  Kept {len(all_accept)}/{num_chains} chains")
@@ -2062,8 +2150,10 @@ class IRTModel(BayesianModel):
             for var in item_var_list:
                 if var in result:
                     flat = result[var].reshape(-1, *result[var].shape[2:])
+                    total_per_chain = result[var].shape[1]
                     print(f"  {var}: mean={float(jnp.mean(flat)):.4f}, "
-                          f"std={float(jnp.std(flat)):.4f}")
+                          f"std={float(jnp.std(flat)):.4f}"
+                          f" ({total_per_chain} samples/chain)")
 
         self.mcmc_samples = result
         return result
