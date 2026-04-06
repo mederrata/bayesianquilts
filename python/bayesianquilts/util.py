@@ -1,6 +1,16 @@
 import inspect
 import numbers
+import sys
 from typing import Any, Callable, Iterator
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 import jax
 import jax.numpy as jnp
@@ -555,7 +565,8 @@ def training_loop(
                 final_params = params
                 print("No checkpoints found, using final parameters")
         except Exception as e:
-            print(f"Failed to restore checkpoint: {e}")
+            _warn_fallback(
+                "Checkpoint restore failed, using final (not best) params", e)
             final_params = params
     else:
         final_params = params

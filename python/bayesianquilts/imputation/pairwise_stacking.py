@@ -912,8 +912,9 @@ class PairwiseOrdinalStackingModel:
             )
         except Exception as e:
             if n_jobs != 1:
-                if self.verbose:
-                    print(f"  Parallel fitting failed ({e}), falling back to sequential")
+                _warn_fallback(
+                    "Parallel marginal fitting failed, "
+                    "falling back to sequential", e)
                 n_jobs = 1
                 results_gen = (
                     _worker_fit_marginal(data, i, cfg, seed + i, sample_weights)
@@ -976,8 +977,9 @@ class PairwiseOrdinalStackingModel:
                 )
             except Exception as e:
                 if n_jobs != 1:
-                    if self.verbose:
-                        print(f"  Parallel fitting failed ({e}), falling back to sequential")
+                    _warn_fallback(
+                        "Parallel univariate fitting failed, "
+                        "falling back to sequential", e)
                     n_jobs = 1
                 results_gen = (
                     _worker_fit_univariate(
@@ -1133,7 +1135,9 @@ class PairwiseOrdinalStackingModel:
             if 'n_obs_total' in state:
                 self.n_obs_total = state['n_obs_total']
             return n
-        except Exception:
+        except Exception as exc:
+            _warn_fallback(
+                "load_state failed, returning 0 loaded models", exc)
             return 0
 
     # ------------------------------------------------------------------
