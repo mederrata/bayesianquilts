@@ -1875,20 +1875,30 @@ class IRTModel(BayesianModel):
 
         key = jax.random.PRNGKey(seed)
 
+        # item_var_list may differ from prior_dict keys when parents
+        # (e.g. 'mu', 'global_scale') were pulled in.
+        surrogate_vars = list(prior_dict.keys())
+
         def loss_fn(params):
             surrogate = surrogate_gen(params)
             samples = surrogate.sample(num_samples, seed=key)
             # ELBO = E_q[log p(data, Xi)] - E_q[log q(Xi)]
             log_probs = []
+            log_q_vals = []
             for s_idx in range(num_samples):
-                sample = {v: samples[v][s_idx] for v in item_var_list}
+                sample = {v: samples[v][s_idx] for v in surrogate_vars}
                 lp = self.marginal_log_prob(
                     data, theta_grid=theta_grid, **sample
                 )
                 log_probs.append(lp)
+                log_q_vals.append(surrogate.log_prob(
+                    {v: samples[v][s_idx] for v in surrogate_vars}
+                ))
             log_joint = jnp.mean(jnp.stack(log_probs))
-            entropy = surrogate.entropy()
-            return -(log_joint + entropy)
+            # Estimate entropy as -E_q[log q] (works even when
+            # analytical entropy is unavailable for TransformedDistributions)
+            neg_entropy = jnp.mean(jnp.stack(log_q_vals))
+            return -(log_joint - neg_entropy)
 
         # training_loop expects a data_iterator and steps_per_epoch even
         # when data is already captured in the loss_fn closure.  Provide
@@ -2056,16 +2066,16 @@ class IRTModel(BayesianModel):
                       f"(+{num_samples} samples each)")
                 sys.stdout.flush()
         else:
-            self._mcmc_chain_states = []
-            self._mcmc_chain_step_sizes = []
-            self._mcmc_chain_inv_mass = []
+            object.__setattr__(self, '_mcmc_chain_states', [])
+            object.__setattr__(self, '_mcmc_chain_step_sizes', [])
+            object.__setattr__(self, '_mcmc_chain_inv_mass', [])
         # On resume, recover the backing lists from the saved state dict so that
         # the per-chain update at the end of the loop works even after a
         # serialize/reload cycle that stripped the private attributes.
         if resume and not hasattr(self, '_mcmc_chain_states'):
-            self._mcmc_chain_states = list(saved['states'])
-            self._mcmc_chain_step_sizes = list(saved['step_sizes'])
-            self._mcmc_chain_inv_mass = list(saved['inv_mass_matrices'])
+            object.__setattr__(self, '_mcmc_chain_states', list(saved['states']))
+            object.__setattr__(self, '_mcmc_chain_step_sizes', list(saved['step_sizes']))
+            object.__setattr__(self, '_mcmc_chain_inv_mass', list(saved['inv_mass_matrices']))
 
         all_samples = {var: [] for var in item_var_list}
         all_accept = []
@@ -2203,11 +2213,14 @@ class IRTModel(BayesianModel):
                 self._mcmc_chain_inv_mass.append(inv_mass_matrix)
 
         # Save resume state
-        self.mcmc_state_ = {
+        # Use object.__setattr__ to bypass Flax NNX pytree checks —
+        # mcmc_state_ contains JAX arrays (NUTS states) that are internal
+        # mutable state, not model parameters for serialization.
+        object.__setattr__(self, 'mcmc_state_', {
             'states': self._mcmc_chain_states,
             'step_sizes': self._mcmc_chain_step_sizes,
             'inv_mass_matrices': self._mcmc_chain_inv_mass,
-        }
+        })
 
         # Stack chains: (num_chains, num_samples, ...)
         result = {}
