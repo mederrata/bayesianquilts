@@ -2039,7 +2039,8 @@ class IRTModel(BayesianModel):
                 inv_mass_matrix = jnp.maximum(var_est, 1e-6)
 
                 # Adjust step size based on acceptance for next phase.
-                if phase >= 2 and n_steps > 0 and rate > 0.7:
+                if (phase >= 2 and n_steps > 0 and rate > 0.7
+                        and chain_idx == 0):
                     # Probe larger step sizes with conservative thresholds.
                     # Use 200-step probes (not 50) for reliable estimates,
                     # and require >80% non-divergent for acceptance.
