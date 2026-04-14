@@ -372,6 +372,167 @@ def fit_grm_baseline(
     return model, snapshot_params
 
 
+def fit_grm_baseline_mcmc(
+    data_dict, item_keys, response_cardinality, num_people, save_dir,
+    dim=1, batch_size=256, num_epochs=100, learning_rate=2e-4,
+    patience=10, lr_decay_factor=0.5, clip_norm=1.0,
+    seed=42, discrimination_prior_scale=None,
+    num_chains=2, num_warmup=3000, num_samples=500, thinning=5,
+    step_size=0.001,
+):
+    """Fit a standard GRM via ADVI (for init) then MCMC, and save.
+
+    Returns:
+        (model, mcmc_samples)
+    """
+    from bayesianquilts.irt.grm import GRModel
+
+    model = GRModel(
+        item_keys=item_keys,
+        num_people=num_people,
+        dim=dim,
+        response_cardinality=response_cardinality,
+        dtype=jnp.float64,
+        discrimination_prior_scale=discrimination_prior_scale,
+    )
+
+    # ADVI for initialization
+    steps_per_epoch = int(np.ceil(num_people / batch_size))
+    factory = make_data_factory(data_dict, batch_size, num_people)
+
+    print("  ADVI initialization...")
+    res = model.fit(
+        factory,
+        batch_size=batch_size,
+        dataset_size=num_people,
+        num_epochs=num_epochs,
+        steps_per_epoch=steps_per_epoch,
+        learning_rate=learning_rate,
+        patience=patience,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
+        zero_nan_grads=True,
+        max_nan_recoveries=50,
+        seed=seed,
+    )
+    print(f"  ADVI loss: {res[0][-1]:.2f}")
+
+    # MCMC
+    print("  Running MCMC...")
+    mcmc_samples = model.fit_marginal_mcmc(
+        data_dict,
+        num_chains=num_chains,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        thinning=thinning,
+        step_size=step_size,
+        seed=seed,
+        verbose=True,
+    )
+
+    # Standardize and compute EAP
+    eap_result = model.compute_eap_abilities(data_dict)
+    model.standardize_marginal(data_dict)
+    eap_result = model.compute_eap_abilities(data_dict)
+
+    calibrate_model(model)
+
+    save_dir = Path(save_dir)
+    model.save_to_disk(save_dir)
+    save_dict = {var: np.array(s) for var, s in mcmc_samples.items()}
+    save_dict['eap'] = np.array(eap_result['eap'])
+    np.savez(save_dir / 'mcmc_samples.npz', **save_dict)
+
+    return model, mcmc_samples
+
+
+def fit_grm_imputed_mcmc(
+    data_dict, item_keys, response_cardinality, num_people, save_dir,
+    imputation_model, baseline_model=None,
+    dim=1, batch_size=256, num_epochs=100, learning_rate=2e-4,
+    patience=10, lr_decay_factor=0.5, clip_norm=1.0,
+    seed=42, discrimination_prior_scale=None,
+    num_chains=2, num_warmup=3000, num_samples=500, thinning=5,
+    step_size=0.001,
+):
+    """Fit a GRM with imputation via ADVI (init) then MCMC.
+
+    Warm-starts from baseline_model params if provided.
+
+    Returns:
+        (model, mcmc_samples)
+    """
+    from bayesianquilts.irt.grm import GRModel
+
+    model = GRModel(
+        item_keys=item_keys,
+        num_people=num_people,
+        dim=dim,
+        response_cardinality=response_cardinality,
+        dtype=jnp.float64,
+        imputation_model=imputation_model,
+        discrimination_prior_scale=discrimination_prior_scale,
+    )
+
+    # Compute imputation PMFs
+    data_imp = dict(data_dict)
+    pmfs, weights = model._compute_batch_pmfs(data_imp)
+    if pmfs is not None:
+        data_imp['_imputation_pmfs'] = pmfs
+        if weights is not None:
+            data_imp['_imputation_weights'] = weights
+
+    # ADVI initialization (warm-start from baseline if available)
+    steps_per_epoch = int(np.ceil(num_people / batch_size))
+    factory = make_data_factory(data_imp, batch_size, num_people)
+
+    initial_values = baseline_model.params if baseline_model else None
+    print("  ADVI initialization (imputed)...")
+    res = model.fit(
+        factory,
+        batch_size=batch_size,
+        dataset_size=num_people,
+        num_epochs=num_epochs,
+        steps_per_epoch=steps_per_epoch,
+        learning_rate=learning_rate,
+        patience=patience,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
+        zero_nan_grads=True,
+        initial_values=initial_values,
+        max_nan_recoveries=50,
+        seed=seed,
+    )
+    print(f"  ADVI loss: {res[0][-1]:.2f}")
+
+    # MCMC with imputed data
+    print("  Running MCMC (imputed)...")
+    mcmc_samples = model.fit_marginal_mcmc(
+        data_imp,
+        num_chains=num_chains,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        thinning=thinning,
+        step_size=step_size,
+        seed=seed + 1,
+        verbose=True,
+    )
+
+    eap_result = model.compute_eap_abilities(data_imp)
+    model.standardize_marginal(data_imp)
+    eap_result = model.compute_eap_abilities(data_imp)
+
+    calibrate_model(model)
+
+    save_dir = Path(save_dir)
+    model.save_to_disk(save_dir)
+    save_dict = {var: np.array(s) for var, s in mcmc_samples.items()}
+    save_dict['eap'] = np.array(eap_result['eap'])
+    np.savez(save_dir / 'mcmc_samples.npz', **save_dict)
+
+    return model, mcmc_samples
+
+
 def fit_grm_imputed(
     data_dict, item_keys, response_cardinality, num_people, save_dir,
     imputation_model, dim=1, batch_size=256, num_epochs=500,

@@ -9,7 +9,7 @@ export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 
 OUTPUT_DIR="./results_promis"
-COMMON_ARGS="--epochs 500 --patience 20 --batch-size 256 --lr-decay-factor 0.975 --clip-norm 1.0 --elpd-loo --noisy-dim 2"
+COMMON_ARGS="--epochs 500 --patience 20 --batch-size 256 --lr-decay-factor 0.975 --clip-norm 1.0 --noisy-dim 2 --mcmc"
 
 echo "=============================================="
 echo "PROMIS Synthetic Evaluation Pipeline"
