@@ -36,7 +36,24 @@ DATASET_MODULES = {
     'gcbs': 'bayesianquilts.data.gcbs',
     'scs': 'bayesianquilts.data.scs',
     'bouldering': 'bayesianquilts.data.bouldering',
+    'promis_sleep': 'bayesianquilts.data.promis_sleep',
+    'promis_substance_use': 'bayesianquilts.data.promis_substance_use',
 }
+
+# PROMIS per-domain datasets: copd_<domain> and np_<domain>
+_PROMIS_COPD_DOMAINS = [
+    'depression', 'anxiety', 'anger', 'fatigue_experience',
+    'fatigue_impact', 'pain_interference', 'pain_behavior',
+    'physical_function', 'social_satisfaction',
+]
+_PROMIS_NP_DOMAINS = [
+    'pain_interference', 'pain_behavior', 'global_health',
+    'physical_function',
+]
+for _d in _PROMIS_COPD_DOMAINS:
+    DATASET_MODULES[f'copd_{_d}'] = 'bayesianquilts.data.promis_copd'
+for _d in _PROMIS_NP_DOMAINS:
+    DATASET_MODULES[f'np_{_d}'] = 'bayesianquilts.data.promis_neuropathic_pain'
 
 
 def load_dataset(dataset_name: str, cache_dir=None, gender=None):
@@ -59,19 +76,29 @@ def load_dataset(dataset_name: str, cache_dir=None, gender=None):
             f"Choose from: {list(DATASET_MODULES.keys())}"
         )
     mod = importlib.import_module(DATASET_MODULES[dataset_name])
-    item_keys = mod.item_keys
     response_cardinality = mod.response_cardinality
     kwargs = {'polars_out': True}
     if cache_dir is not None:
         kwargs['cache_dir'] = cache_dir
-    # Pass reorient=True if the loader supports it (reverse-code items)
+
+    # Handle PROMIS per-domain datasets (copd_<domain>, np_<domain>)
     import inspect
+    domain = None
+    if dataset_name.startswith('copd_'):
+        domain = dataset_name[len('copd_'):]
+    elif dataset_name.startswith('np_'):
+        domain = dataset_name[len('np_'):]
+    if domain is not None and 'domain' in inspect.signature(mod.get_data).parameters:
+        kwargs['domain'] = domain
+
+    # Pass reorient=True if the loader supports it (reverse-code items)
     if 'reorient' in inspect.signature(mod.get_data).parameters:
         kwargs['reorient'] = True
     # Pass gender if the loader supports it (e.g. bouldering)
     if gender is not None and 'gender' in inspect.signature(mod.get_data).parameters:
         kwargs['gender'] = gender
     df, num_people = mod.get_data(**kwargs)
+    item_keys = mod.item_keys
 
     # Convert to numpy data dict
     data = {}
