@@ -133,10 +133,12 @@ def _prepare_data(raw, selected_keys):
     return data, num_people
 
 
-def get_data(polars_out=False, cache_dir=None, domain=None):
+def get_data(reorient=False, polars_out=False, cache_dir=None, domain=None):
     """Load a single PROMIS domain from the COPD dataset.
 
     Args:
+        reorient: If True, reverse-score items with negative item-total
+            correlations so all items load in the same direction.
         polars_out: If True, return Polars DataFrame instead of grain Dataset.
         cache_dir: Directory to cache downloaded data. Defaults to cwd.
         domain: Which PROMIS domain to load. One of:
@@ -174,6 +176,30 @@ def get_data(polars_out=False, cache_dir=None, domain=None):
     print(f"Domain '{domain}': {len(item_keys)} items")
 
     data, num_people = _prepare_data(raw, item_keys)
+
+    if reorient:
+        import numpy as np
+        arr = data.select(item_keys).to_numpy().astype(float)
+        arr[arr < 0] = np.nan
+        total = np.nanmean(arr, axis=1)
+        to_reverse = []
+        for i, k in enumerate(item_keys):
+            valid = ~np.isnan(arr[:, i])
+            if valid.sum() > 10:
+                r = np.corrcoef(arr[valid, i], total[valid])[0, 1]
+                if r < -0.05:
+                    to_reverse.append(k)
+        if to_reverse:
+            K = response_cardinality
+            data = data.with_columns([
+                (K - 1 - pl.col(k)).alias(k) for k in to_reverse
+            ])
+            data = data.with_columns([
+                pl.when((pl.col(k) < 0) | (pl.col(k) >= K))
+                .then(-1).otherwise(pl.col(k)).alias(k)
+                for k in to_reverse
+            ])
+            print(f"  Reoriented {len(to_reverse)} items: {to_reverse}")
 
     if polars_out:
         return data, num_people
