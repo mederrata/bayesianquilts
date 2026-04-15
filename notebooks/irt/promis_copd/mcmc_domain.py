@@ -53,7 +53,7 @@ def run_domain(domain: str):
     print(f"{'='*60}\n")
 
     # 1. Load data for this domain
-    df, num_people = get_data(polars_out=True, domain=domain)
+    df, num_people = get_data(reorient=True, polars_out=True, domain=domain)
     domain_items = list(item_keys)  # get_data populates the global
     print(f"  {num_people} people, {len(domain_items)} items, "
           f"{response_cardinality} categories\n")

@@ -39,7 +39,7 @@ def main():
     print(f"  PROMIS Substance Use — Baseline MCMC")
     print(f"{'='*60}\n")
 
-    df, num_people = get_data(polars_out=True)
+    df, num_people = get_data(reorient=True, polars_out=True)
     domain_items = list(item_keys)
     print(f"  {num_people} people, {len(domain_items)} items, "
           f"{response_cardinality} categories\n")

@@ -50,19 +50,19 @@ def load_data(dataset, domain=None):
     if dataset == "copd":
         from bayesianquilts.data.promis_copd import (
             get_data, item_keys, response_cardinality)
-        df, n = get_data(polars_out=True, domain=domain)
+        df, n = get_data(reorient=True, polars_out=True, domain=domain)
     elif dataset == "neuropathic_pain":
         from bayesianquilts.data.promis_neuropathic_pain import (
             get_data, item_keys, response_cardinality)
-        df, n = get_data(polars_out=True, domain=domain)
+        df, n = get_data(reorient=True, polars_out=True, domain=domain)
     elif dataset == "sleep":
         from bayesianquilts.data.promis_sleep import (
             get_data, item_keys, response_cardinality)
-        df, n = get_data(polars_out=True)
+        df, n = get_data(reorient=True, polars_out=True)
     elif dataset == "substance_use":
         from bayesianquilts.data.promis_substance_use import (
             get_data, item_keys, response_cardinality)
-        df, n = get_data(polars_out=True)
+        df, n = get_data(reorient=True, polars_out=True)
     else:
         raise ValueError(dataset)
 
