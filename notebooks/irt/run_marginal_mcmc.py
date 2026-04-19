@@ -55,22 +55,35 @@ def make_data_dict(dataframe, num_people):
 
 
 def run_single_variant(model, data, variant_name, output_dir,
-                       num_chains, num_warmup, num_samples, step_size, seed):
+                       num_chains, num_warmup, num_samples, step_size, seed,
+                       sampler='nuts'):
     """Run MCMC for one variant and save results."""
-    print(f"\n  --- Variant: {variant_name} ---")
+    print(f"\n  --- Variant: {variant_name} (sampler={sampler}) ---")
     sys.stdout.flush()
 
-    mcmc_samples = model.fit_marginal_mcmc(
-        data,
-        theta_grid=None,
-        num_chains=num_chains,
-        num_warmup=num_warmup,
-        num_samples=num_samples,
-        target_accept_prob=0.85,
-        step_size=step_size,
-        seed=seed,
-        verbose=True,
-    )
+    if sampler == 'mala':
+        mcmc_samples = model.fit_marginal_mala(
+            data,
+            theta_grid=None,
+            num_chains=num_chains,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            step_size=step_size,
+            seed=seed,
+            verbose=True,
+        )
+    else:
+        mcmc_samples = model.fit_marginal_mcmc(
+            data,
+            theta_grid=None,
+            num_chains=num_chains,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            target_accept_prob=0.85,
+            step_size=step_size,
+            seed=seed,
+            verbose=True,
+        )
 
     # EAP
     print(f"\n  Computing EAP abilities...")
@@ -132,7 +145,7 @@ def run_single_variant(model, data, variant_name, output_dir,
 
 
 def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
-                step_size, seed, variants):
+                step_size, seed, variants, sampler='nuts'):
     import importlib
     import inspect
     from pathlib import Path
@@ -185,7 +198,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         model = ModelClass.load_from_disk(str(model_path))
         data = dict(base_data)  # no imputation PMFs
         run_single_variant(model, data, 'baseline', output_dir,
-                           num_chains, num_warmup, num_samples, step_size, seed)
+                           num_chains, num_warmup, num_samples, step_size, seed,
+                           sampler=sampler)
         del model
         gc.collect()
 
@@ -200,7 +214,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
             # For pairwise-only, don't pass weights (full imputation, no IS blend)
         print(f"  Pairwise imputation PMFs attached")
         run_single_variant(model, data, 'pairwise', output_dir,
-                           num_chains, num_warmup, num_samples, step_size, seed + 1)
+                           num_chains, num_warmup, num_samples, step_size, seed + 1,
+                           sampler=sampler)
         del model
         gc.collect()
 
@@ -237,7 +252,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
                 data['_imputation_weights'] = weights
         print(f"  Mixed imputation PMFs attached (with IS weights)")
         run_single_variant(model, data, 'mixed', output_dir,
-                           num_chains, num_warmup, num_samples, step_size, seed + 2)
+                           num_chains, num_warmup, num_samples, step_size, seed + 2,
+                           sampler=sampler)
         del model, mixed_model
         gc.collect()
 
@@ -264,6 +280,8 @@ def main():
                         choices=['baseline', 'pairwise', 'mixed'],
                         help='Which model variants to run')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--sampler', default='nuts', choices=['nuts', 'mala'],
+                        help='MCMC sampler: nuts (default) or mala (for stiff posteriors)')
     args = parser.parse_args()
 
     model_dir = args.model_dir or os.path.expanduser(
@@ -282,6 +300,7 @@ def main():
         step_size=args.step_size,
         seed=args.seed,
         variants=args.variants,
+        sampler=args.sampler,
     )
 
 
