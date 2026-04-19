@@ -1,5 +1,6 @@
 import inspect
 import numbers
+import sys
 from typing import Any, Callable, Iterator
 
 import jax
@@ -133,6 +134,7 @@ def training_loop(
     max_nan_recoveries: int = 10,
     zero_nan_grads: bool = False,
     verbose: bool = True,
+    quiet_progress: bool = False,
     snapshot_epoch: int | None = None,
     seed: int | None = None,
     compute_dtype: jnp.dtype | None = None,
@@ -309,7 +311,7 @@ def training_loop(
                 desc=f"Epoch {epoch + 1}/{num_epochs} (LR: {current_lr:.6f})",
                 unit="batch",
                 leave=False,
-                disable=not verbose,
+                disable=(not verbose) or quiet_progress or (not sys.stdout.isatty()),
             ) as pbar:
                 for _ in pbar:
                     try:
