@@ -1610,7 +1610,7 @@ class IRTModel(BayesianModel):
         return theta_grid, theta_log_weights
 
     def marginal_log_prob(self, data, theta_grid=None, theta_log_weights=None,
-                          prior_weight=1.0, **item_params):
+                          prior_weight=1.0, drop_mu_prior=False, **item_params):
         """Rao-Blackwellized log posterior over item parameters only.
 
         Integrates out person abilities on a quadrature grid:
@@ -1627,6 +1627,11 @@ class IRTModel(BayesianModel):
             theta_log_weights: (Q,) log quadrature weights. If None and
                 theta_grid is also None, uses Gauss-Hermite weights.
             prior_weight: Weight on the log prior.
+            drop_mu_prior: If True, compute log prior via
+                ``self._mcmc_log_prior(item_params)``, which integrates
+                out the redundant ``mu`` hierarchical layer (a partial
+                non-identifiability ridge that is harmful under MCMC).
+                ADVI leaves this False because ``mu`` helps exploration.
             **item_params: Item parameters (no abilities).
 
         Returns:
@@ -1697,17 +1702,51 @@ class IRTModel(BayesianModel):
             total_marginal_ll = jnp.sum(marginal_ll_per_person)
 
         # Log prior on item parameters
-        full_params = dict(item_params)
-        # Add dummy abilities so the joint prior can compute
-        for v in self.var_list:
-            if v not in full_params:
-                shape = self.joint_prior_distribution.sample(
-                    seed=jax.random.PRNGKey(0)
-                )[v].shape
-                full_params[v] = jnp.zeros(shape, dtype=self.dtype)
-        log_prior_items = self.joint_prior_distribution.log_prob(full_params)
+        if drop_mu_prior:
+            log_prior_items = self._mcmc_log_prior(item_params)
+        else:
+            full_params = dict(item_params)
+            # Add dummy abilities so the joint prior can compute
+            for v in self.var_list:
+                if v not in full_params:
+                    shape = self.joint_prior_distribution.sample(
+                        seed=jax.random.PRNGKey(0)
+                    )[v].shape
+                    full_params[v] = jnp.zeros(shape, dtype=self.dtype)
+            log_prior_items = self.joint_prior_distribution.log_prob(full_params)
 
         return prior_weight * log_prior_items + total_marginal_ll
+
+    def _mcmc_log_prior(self, item_params):
+        """Compute log prior over item parameters with mu integrated out.
+
+        Default implementation: fall back to ``joint_prior_distribution``
+        but fill missing vars (abilities, mu, ...) with the ADVI-fit
+        loc from ``self.params`` when available, rather than zeros.
+        This is a safe but sub-optimal default — subclasses that know
+        the structure of their priors should override with an exact
+        mu-marginalized computation (e.g. ``GRModel`` and
+        ``FactorizedGRModel`` both override this).
+        """
+        full_params = dict(item_params)
+        for v in self.var_list:
+            if v in full_params:
+                continue
+            shape = self.joint_prior_distribution.sample(
+                seed=jax.random.PRNGKey(0)
+            )[v].shape
+            filled = None
+            if isinstance(self.params, dict):
+                for pk in self.params:
+                    if pk.startswith(v + "\\") and pk.endswith("\\loc"):
+                        candidate = self.params[pk]
+                        if candidate.shape == shape:
+                            filled = candidate
+                            break
+            if filled is None:
+                filled = jnp.zeros(shape, dtype=self.dtype)
+            full_params[v] = filled
+        return self.joint_prior_distribution.log_prob(full_params)
 
     def fit_marginal_advi(
         self,
@@ -1829,6 +1868,7 @@ class IRTModel(BayesianModel):
         thinning=1,
         seed=None,
         verbose=True,
+        dense_mass=False,
     ):
         """Run NUTS on item parameters with abilities Rao-Blackwellized out.
 
@@ -1882,10 +1922,10 @@ class IRTModel(BayesianModel):
                   f"Samples: {num_samples}{thin_msg}")
             sys.stdout.flush()
 
-        # Target log density
+        # Target log density (MCMC uses mu-marginalized prior)
         def logdensity_fn(params_dict):
             return self.marginal_log_prob(
-                data, theta_grid=theta_grid, **params_dict
+                data, theta_grid=theta_grid, drop_mu_prior=True, **params_dict
             )
 
         # Initialize from ADVI solution or prior
@@ -1926,6 +1966,8 @@ class IRTModel(BayesianModel):
         n_flat = sum(np.prod(ref_pos[v].shape) for v in item_var_list)
         if verbose:
             print(f"  Flat parameter vector: {n_flat} elements")
+            mass_kind = "dense" if dense_mass else "diagonal"
+            print(f"  Mass matrix: {mass_kind}")
             sys.stdout.flush()
 
         all_samples = {var: [] for var in item_var_list}
@@ -1960,7 +2002,10 @@ class IRTModel(BayesianModel):
                           f"skip Phase 1")
                     sys.stdout.flush()
             else:
-                inv_mass_matrix = jnp.ones(n_flat)
+                if dense_mass:
+                    inv_mass_matrix = jnp.eye(n_flat)
+                else:
+                    inv_mass_matrix = jnp.ones(n_flat)
                 current_step_size = step_size
                 # Split warmup into 3 phases:
                 #   Phase 1: identity mass, explore scales (may diverge)
@@ -2035,8 +2080,15 @@ class IRTModel(BayesianModel):
                 # Estimate mass matrix from second half of this phase
                 half = max(len(phase_flats) // 2, 1)
                 p_stack = jnp.stack(phase_flats[half:])
-                var_est = jnp.var(p_stack, axis=0)
-                inv_mass_matrix = jnp.maximum(var_est, 1e-6)
+                if dense_mass and p_stack.shape[0] >= 2:
+                    # Full covariance + ridge for numerical stability.
+                    # BlackJAX nuts accepts either 1D (diag) or 2D (dense)
+                    # inverse_mass_matrix arrays interchangeably.
+                    cov_est = jnp.cov(p_stack.T)
+                    inv_mass_matrix = cov_est + 1e-6 * jnp.eye(n_flat)
+                else:
+                    var_est = jnp.var(p_stack, axis=0)
+                    inv_mass_matrix = jnp.maximum(var_est, 1e-6)
 
                 # Adjust step size based on acceptance for next phase.
                 if (phase >= 2 and n_steps > 0 and rate > 0.7
@@ -2212,10 +2264,10 @@ class IRTModel(BayesianModel):
                   f"Samples: {num_samples}, Step size: {step_size}")
             sys.stdout.flush()
 
-        # Target log density
+        # Target log density (MCMC uses mu-marginalized prior)
         def logdensity_fn(params_dict):
             return self.marginal_log_prob(
-                data, theta_grid=theta_grid, **params_dict
+                data, theta_grid=theta_grid, drop_mu_prior=True, **params_dict
             )
 
         # Initialize from ADVI solution or prior

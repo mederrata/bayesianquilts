@@ -56,7 +56,7 @@ def make_data_dict(dataframe, num_people):
 
 def run_single_variant(model, data, variant_name, output_dir,
                        num_chains, num_warmup, num_samples, step_size, seed,
-                       sampler='nuts'):
+                       sampler='nuts', dense_mass=False):
     """Run MCMC for one variant and save results."""
     print(f"\n  --- Variant: {variant_name} (sampler={sampler}) ---")
     sys.stdout.flush()
@@ -83,6 +83,7 @@ def run_single_variant(model, data, variant_name, output_dir,
             step_size=step_size,
             seed=seed,
             verbose=True,
+            dense_mass=dense_mass,
         )
 
     # EAP
@@ -145,7 +146,7 @@ def run_single_variant(model, data, variant_name, output_dir,
 
 
 def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
-                step_size, seed, variants, sampler='nuts'):
+                step_size, seed, variants, sampler='nuts', dense_mass=False):
     import importlib
     import inspect
     from pathlib import Path
@@ -199,7 +200,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         data = dict(base_data)  # no imputation PMFs
         run_single_variant(model, data, 'baseline', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed,
-                           sampler=sampler)
+                           sampler=sampler, dense_mass=dense_mass)
         del model
         gc.collect()
 
@@ -215,7 +216,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         print(f"  Pairwise imputation PMFs attached")
         run_single_variant(model, data, 'pairwise', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed + 1,
-                           sampler=sampler)
+                           sampler=sampler, dense_mass=dense_mass)
         del model
         gc.collect()
 
@@ -253,7 +254,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         print(f"  Mixed imputation PMFs attached (with IS weights)")
         run_single_variant(model, data, 'mixed', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed + 2,
-                           sampler=sampler)
+                           sampler=sampler, dense_mass=dense_mass)
         del model, mixed_model
         gc.collect()
 
@@ -273,7 +274,7 @@ def main():
     parser.add_argument('--num-chains', type=int, default=2)
     parser.add_argument('--num-warmup', type=int, default=200)
     parser.add_argument('--num-samples', type=int, default=300)
-    parser.add_argument('--step-size', type=float, default=0.01,
+    parser.add_argument('--step-size', type=float, default=5e-4,
                         help='Initial NUTS step size')
     parser.add_argument('--variants', nargs='+',
                         default=['baseline', 'pairwise', 'mixed'],
@@ -282,6 +283,9 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--sampler', default='nuts', choices=['nuts', 'mala'],
                         help='MCMC sampler: nuts (default) or mala (for stiff posteriors)')
+    parser.add_argument('--dense-mass', action='store_true',
+                        help='Use dense mass matrix (default: diagonal). '
+                             'NUTS only; ignored for MALA.')
     args = parser.parse_args()
 
     model_dir = args.model_dir or os.path.expanduser(
@@ -301,6 +305,7 @@ def main():
         seed=args.seed,
         variants=args.variants,
         sampler=args.sampler,
+        dense_mass=args.dense_mass,
     )
 
 

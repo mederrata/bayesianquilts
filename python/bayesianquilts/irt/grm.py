@@ -569,6 +569,64 @@ class GRModel(IRTModel):
         likelihood_fn = GradedResponseLikelihood(dtype=jnp.float64)
         return likelihood_fn, ais_data, ais_params
 
+    def _mcmc_log_prior(self, item_params):
+        """Log prior with ``mu`` integrated out analytically.
+
+        In ``create_distributions`` we have:
+            mu ~ Normal(d0_loc, 1)
+            difficulties0 | mu ~ Normal(mu, 1)
+        which implies the marginal
+            difficulties0 ~ Normal(d0_loc, sqrt(2)).
+
+        This eliminates the weak ridge between ``mu`` and
+        ``difficulties0`` that wrecks NUTS convergence, while leaving
+        the priors on ``discriminations`` and ``ddifficulties``
+        untouched.
+        """
+        K = self.response_cardinality
+        d0_loc = -(K - 2) / 2.0
+        diff0 = item_params['difficulties0']
+        d0_prior = tfd.Independent(
+            tfd.Normal(
+                loc=jnp.full(diff0.shape, d0_loc, dtype=self.dtype),
+                scale=jnp.sqrt(jnp.asarray(2.0, dtype=self.dtype))
+                * jnp.ones(diff0.shape, dtype=self.dtype),
+            ),
+            reinterpreted_batch_ndims=diff0.ndim,
+        )
+        lp = d0_prior.log_prob(jnp.asarray(diff0, dtype=self.dtype))
+
+        # Reuse the unchanged priors for everything else except mu/
+        # difficulties0/abilities (the latter were Rao-Blackwellized out).
+        model = self.joint_prior_distribution.model
+        skip = {'mu', 'difficulties0', 'abilities'}
+        # If horseshoe, discriminations depends on global_scale; handle
+        # by sampling the conditional at item_params['global_scale'].
+        for name, factor in model.items():
+            if name in skip or name not in item_params:
+                continue
+            val = jnp.asarray(item_params[name], dtype=self.dtype)
+            if callable(factor):
+                # Conditional factor — resolve its parents from item_params.
+                import inspect
+                sig = inspect.signature(factor)
+                parent_kwargs = {}
+                for pname in sig.parameters:
+                    if pname in item_params:
+                        parent_kwargs[pname] = item_params[pname]
+                    else:
+                        # parent missing — skip this factor (shouldn't
+                        # happen for MCMC vars we sample)
+                        parent_kwargs = None
+                        break
+                if parent_kwargs is None:
+                    continue
+                dist = factor(**parent_kwargs)
+            else:
+                dist = factor
+            lp = lp + dist.log_prob(val)
+        return lp
+
     def create_distributions(self, grouping_params=None):
         """Create prior and surrogate distributions."""
         prior_scale = getattr(self, 'discrimination_prior_scale', None)

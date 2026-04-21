@@ -466,6 +466,64 @@ class FactorizedGRModel(IRTModel):
 
         return params
 
+    def _mcmc_log_prior(self, item_params):
+        """Log prior with per-scale ``mu_j`` integrated out analytically.
+
+        In ``gen_difficulty_prior`` we have:
+            mu_{j} ~ Normal(d0_loc, 5)
+            difficulties0_{j} | mu_{j} ~ Normal(mu_{j}, 1)
+        which gives the marginal
+            difficulties0_{j} ~ Normal(d0_loc, sqrt(26)).
+
+        Priors on ``discriminations_{j}`` and ``ddifficulties_{j}`` are
+        unchanged (they don't depend on mu).
+        """
+        K = self.response_cardinality
+        d0_loc = -(K - 2) / 2.0
+        marginal_scale = jnp.sqrt(jnp.asarray(26.0, dtype=self.dtype))
+
+        lp = jnp.asarray(0.0, dtype=self.dtype)
+        model = self.joint_prior_distribution.model
+        for j, _indices in enumerate(self.scale_indices):
+            d0_name = f"difficulties0_{j}"
+            if d0_name in item_params:
+                diff0 = jnp.asarray(item_params[d0_name], dtype=self.dtype)
+                d0_prior = tfd.Independent(
+                    tfd.Normal(
+                        loc=jnp.full(diff0.shape, d0_loc, dtype=self.dtype),
+                        scale=marginal_scale
+                        * jnp.ones(diff0.shape, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=diff0.ndim,
+                )
+                lp = lp + d0_prior.log_prob(diff0)
+
+        # Reuse unchanged priors for every other MCMC-sampled var
+        # (discriminations_j, ddifficulties_j, ...).
+        skip_prefixes = ("mu_", "difficulties0_", "abilities", "abilities_")
+        for name, factor in model.items():
+            if name.startswith(skip_prefixes) or name not in item_params:
+                continue
+            val = jnp.asarray(item_params[name], dtype=self.dtype)
+            if callable(factor):
+                import inspect
+                sig = inspect.signature(factor)
+                parent_kwargs = {}
+                skip_this = False
+                for pname in sig.parameters:
+                    if pname in item_params:
+                        parent_kwargs[pname] = item_params[pname]
+                    else:
+                        skip_this = True
+                        break
+                if skip_this:
+                    continue
+                dist = factor(**parent_kwargs)
+            else:
+                dist = factor
+            lp = lp + dist.log_prob(val)
+        return lp
+
     def gen_discrim_prior(self, j, indices):
         out = {}
         out[f"discriminations_{j}"] = tfd.Independent(
