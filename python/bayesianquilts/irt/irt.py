@@ -2077,7 +2077,21 @@ class IRTModel(BayesianModel):
                     rate = n_nondiv / max(n_steps, 1)
                     if rate >= 0.1:
                         break
-                    current_step_size *= 0.1
+                    # Floor the step size so a bad mass matrix can't
+                    # drive it to underflow (chain freezes = 0 within-var,
+                    # R-hat numerically explodes). If we're already at
+                    # the floor, give up reducing further this phase.
+                    step_size_floor = 1e-7
+                    if current_step_size <= step_size_floor:
+                        if verbose:
+                            print(f"    Phase {phase} non-div {rate:.3f} "
+                                  f"too low but step_size at floor "
+                                  f"{step_size_floor:.1e}; continuing")
+                            sys.stdout.flush()
+                        break
+                    current_step_size = max(
+                        current_step_size * 0.1, step_size_floor
+                    )
                     if verbose:
                         print(f"    Phase {phase} non-div {rate:.3f} too low, "
                               f"reducing step_size to {current_step_size:.6f}")
