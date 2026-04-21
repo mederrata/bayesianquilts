@@ -1900,6 +1900,16 @@ class IRTModel(BayesianModel):
         key = random.PRNGKey(seed)
 
         item_var_list = self._item_var_list()
+        # Some var_list entries (e.g. horseshoe internals like local_scales,
+        # slab_scale2) are latent params of the surrogate but are not
+        # exposed as top-level keys by joint_prior_distribution.sample().
+        # Keep only vars that the prior actually produces so downstream
+        # sampling + log_prob stay consistent.
+        key, tmp_key = random.split(key)
+        _prior_sample_keys = set(
+            self.joint_prior_distribution.sample(seed=tmp_key).keys()
+        )
+        item_var_list = [v for v in item_var_list if v in _prior_sample_keys]
 
         if theta_grid is not None:
             grid_desc = f"{len(theta_grid)} points (uniform)"
@@ -2249,6 +2259,13 @@ class IRTModel(BayesianModel):
         key = random.PRNGKey(seed)
 
         item_var_list = self._item_var_list()
+        # Filter to vars produced by joint_prior_distribution.sample() —
+        # see note in fit_marginal_mcmc.
+        key, tmp_key = random.split(key)
+        _prior_sample_keys = set(
+            self.joint_prior_distribution.sample(seed=tmp_key).keys()
+        )
+        item_var_list = [v for v in item_var_list if v in _prior_sample_keys]
 
         if verbose:
             print(f"Marginal MALA (Rao-Blackwellized abilities)")
