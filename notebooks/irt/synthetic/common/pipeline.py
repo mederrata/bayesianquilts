@@ -134,7 +134,13 @@ def make_data_factory(data_dict, batch_size, num_people):
             ])
         for start in range(0, n_needed, batch_size):
             idx_batch = indices[start:start + batch_size]
-            yield {k: v[idx_batch] for k, v in data_dict.items()}
+            batch = {}
+            for k, v in data_dict.items():
+                if hasattr(v, 'shape') and v.ndim >= 1 and v.shape[0] == num_people:
+                    batch[k] = v[idx_batch]
+                else:
+                    batch[k] = v
+            yield batch
     return data_factory
 
 
