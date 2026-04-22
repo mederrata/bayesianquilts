@@ -471,9 +471,9 @@ class FactorizedGRModel(IRTModel):
 
         Built explicitly from scratch (not via ``joint_prior_distribution``)
         so the MCMC path uses tighter scales than the ADVI path:
-          * ``difficulties0_{j}`` ~ ``Normal(d0_loc, 2.0)``   (was sqrt(26))
-          * ``discriminations_{j}`` ~ ``HalfNormal(1.0)``     (was 2.0)
-          * ``ddifficulties_{j}`` ~ ``HalfNormal(1.0)``       (unchanged)
+          * ``difficulties0_{j}`` ~ ``Normal(d0_loc, 1.0)``
+          * ``discriminations_{j}`` ~ ``HalfNormal(1.5)``  (covers p95 ~3)
+          * ``ddifficulties_{j}`` ~ ``HalfNormal(1.0)``
 
         ``mu_j`` and ``abilities_j`` are Rao-Blackwellized / dropped.
         ADVI is untouched — only ``marginal_log_prob(drop_mu_prior=True)``
@@ -490,8 +490,7 @@ class FactorizedGRModel(IRTModel):
                 d0_prior = tfd.Independent(
                     tfd.Normal(
                         loc=jnp.full(diff0.shape, d0_loc, dtype=self.dtype),
-                        scale=jnp.asarray(2.0, dtype=self.dtype)
-                        * jnp.ones(diff0.shape, dtype=self.dtype),
+                        scale=jnp.ones(diff0.shape, dtype=self.dtype),
                     ),
                     reinterpreted_batch_ndims=diff0.ndim,
                 )
@@ -502,7 +501,7 @@ class FactorizedGRModel(IRTModel):
                 disc = jnp.asarray(item_params[disc_name], dtype=self.dtype)
                 disc_dist = tfd.Independent(
                     tfd.HalfNormal(
-                        scale=jnp.ones(disc.shape, dtype=self.dtype),
+                        scale=1.5 * jnp.ones(disc.shape, dtype=self.dtype),
                     ),
                     reinterpreted_batch_ndims=disc.ndim,
                 )

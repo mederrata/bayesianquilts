@@ -573,10 +573,12 @@ class GRModel(IRTModel):
         """MCMC prior with ``mu`` integrated out and tightened scales.
 
         Built explicitly from scratch (not via ``joint_prior_distribution``)
-        so the MCMC path can use tighter scales than the ADVI path:
-          * ``difficulties0`` ~ ``Normal(d0_loc, 1.0)``  (was sqrt(2))
-          * ``discriminations`` ~ ``HalfNormal(1.0)``   (was 2.0)
-          * ``ddifficulties`` ~ ``HalfNormal(1.0)``     (unchanged)
+        so the MCMC path can use tighter scales than the ADVI path.
+        Scales were chosen by inspecting per-item posterior-mean
+        discriminations across converged baselines (range 0.3–3.1):
+          * ``difficulties0`` ~ ``Normal(d0_loc, 0.5)``   (tight — d0 bounded)
+          * ``discriminations`` ~ ``HalfNormal(1.5)``    (covers p95 ~3)
+          * ``ddifficulties`` ~ ``HalfNormal(1.0)``
           * ``global_scale`` (horseshoe only) ~ ``HalfCauchy(prior_scale)``
 
         ``mu`` and ``abilities`` are Rao-Blackwellized / dropped.
@@ -587,12 +589,12 @@ class GRModel(IRTModel):
         d0_loc = -(K - 2) / 2.0
         prior_type = getattr(self, 'discrimination_prior', 'half_normal')
 
-        # difficulties0: Normal(d0_loc, 1.0)
+        # difficulties0: Normal(d0_loc, 0.5)
         diff0 = jnp.asarray(item_params['difficulties0'], dtype=self.dtype)
         d0_prior = tfd.Independent(
             tfd.Normal(
                 loc=jnp.full(diff0.shape, d0_loc, dtype=self.dtype),
-                scale=jnp.ones(diff0.shape, dtype=self.dtype),
+                scale=0.5 * jnp.ones(diff0.shape, dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=diff0.ndim,
         )
@@ -618,13 +620,13 @@ class GRModel(IRTModel):
             else:
                 disc_dist = tfd.Independent(
                     tfd.HalfNormal(
-                        scale=jnp.ones(disc.shape, dtype=self.dtype),
+                        scale=1.5 * jnp.ones(disc.shape, dtype=self.dtype),
                     ),
                     reinterpreted_batch_ndims=disc.ndim,
                 )
             lp = lp + disc_dist.log_prob(disc)
 
-        # ddifficulties: HalfNormal(1.0) (unchanged — matches ADVI prior).
+        # ddifficulties: HalfNormal(1.0)
         if 'ddifficulties' in item_params:
             ddiff = jnp.asarray(item_params['ddifficulties'], dtype=self.dtype)
             ddiff_dist = tfd.Independent(
