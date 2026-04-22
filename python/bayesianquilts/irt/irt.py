@@ -1982,192 +1982,37 @@ class IRTModel(BayesianModel):
 
         all_samples = {var: [] for var in item_var_list}
         all_accept = []
-        # Share probed step size and mass matrix across chains:
-        # Chain 1 probes; subsequent chains reuse its adapted values.
-        shared_step_size = None
-        shared_inv_mass = None
 
         for chain_idx in range(num_chains):
             key, chain_key = random.split(key)
             if verbose:
-                print(f"\n  Chain {chain_idx + 1}/{num_chains}:")
+                print(f"\n  Chain {chain_idx + 1}/{num_chains}: "
+                      f"window_adaptation warmup")
                 sys.stdout.flush()
 
             init_flat, _ = ravel_pytree(initial_positions[chain_idx])
 
-            # Phase 1 uses identity mass for fast steps (even if some diverge).
-            # Phase 2 uses the mass matrix estimated from phase 1 samples.
-            if chain_idx > 0 and shared_inv_mass is not None:
-                # Reuse Chain 1's adapted mass matrix and step size.
-                # Skip Phase 1 (identity mass) entirely — only run
-                # Phase 2 as a short warmup to reach the typical set
-                # from this chain's starting point.
-                inv_mass_matrix = shared_inv_mass
-                current_step_size = shared_step_size
-                phase1_steps = 0
-                phase2_steps = num_warmup // 2  # shorter warmup
-                if verbose:
-                    print(f"    Reusing Chain 1 step_size="
-                          f"{shared_step_size:.6f}, "
-                          f"skip Phase 1")
-                    sys.stdout.flush()
-            else:
-                if dense_mass:
-                    inv_mass_matrix = jnp.eye(n_flat)
-                else:
-                    inv_mass_matrix = jnp.ones(n_flat)
-                current_step_size = step_size
-                # Split warmup into 3 phases:
-                #   Phase 1: identity mass, explore scales (may diverge)
-                #   Phase 2: estimated mass from Phase 1
-                #   Phase 3: refined mass from Phase 2 (much better)
-                phase1_steps = num_warmup // 3
-                phase2_steps = num_warmup // 3
-                phase3_steps = num_warmup - phase1_steps - phase2_steps
-
-            # Initialize state for this chain
-            init_kernel = blackjax.nuts(
+            chain_key, wu_key = random.split(chain_key)
+            warmup = blackjax.window_adaptation(
+                blackjax.nuts,
                 logdensity_flat,
-                step_size=current_step_size,
-                inverse_mass_matrix=inv_mass_matrix,
+                target_acceptance_rate=target_accept_prob,
+                is_mass_matrix_diagonal=(not dense_mass),
+                initial_step_size=step_size,
+                progress_bar=False,
             )
-            state = init_kernel.init(init_flat)
+            (state, sampling_params), _wu_info = warmup.run(
+                wu_key, init_flat, num_steps=num_warmup
+            )
+            current_step_size = float(sampling_params["step_size"])
+            if verbose:
+                print(f"    warmup done. adapted step_size="
+                      f"{current_step_size:.4e}")
+                sys.stdout.flush()
 
-            phases = [(1, phase1_steps), (2, phase2_steps)]
-            if phase1_steps > 0:  # Chain 1: add Phase 3
-                phases.append((3, phase3_steps))
-            for phase, n_steps in phases:
-                if n_steps == 0:
-                    continue
-                # Single attempt per phase — no step size retries.
-                # Phase 1 may have divergences; the mass matrix from those
-                # samples still captures the right scale for phase 2.
-                for attempt in range(1):
-                    if verbose:
-                        print(f"    Phase {phase}: {n_steps} steps, "
-                              f"step_size={current_step_size:.6f}...")
-                        sys.stdout.flush()
-
-                    kernel = blackjax.nuts(
-                        logdensity_flat,
-                        step_size=current_step_size,
-                        inverse_mass_matrix=inv_mass_matrix,
-                    )
-
-                    @jax.jit
-                    def warmup_step(state, step_key):
-                        return kernel.step(step_key, state)
-
-                    phase_flats = []
-                    n_nondiv = 0
-
-                    for step in range(n_steps):
-                        chain_key, step_key = random.split(chain_key)
-                        state, info = warmup_step(state, step_key)
-                        n_nondiv += int(1 - info.is_divergent)
-                        phase_flats.append(state.position)
-
-                        if verbose and (step + 1) % 100 == 0:
-                            ar = n_nondiv / (step + 1)
-                            lp = float(state.logdensity)
-                            print(f"      p{phase} {step + 1}/{n_steps} "
-                                  f"non-div={ar:.3f} lp={lp:.1f}")
-                            sys.stdout.flush()
-
-                    rate = n_nondiv / max(n_steps, 1)
-                    if rate >= 0.1:
-                        break
-                    # Floor the step size so a bad mass matrix can't
-                    # drive it to underflow (chain freezes = 0 within-var,
-                    # R-hat numerically explodes). If we're already at
-                    # the floor, give up reducing further this phase.
-                    step_size_floor = 1e-7
-                    if current_step_size <= step_size_floor:
-                        if verbose:
-                            print(f"    Phase {phase} non-div {rate:.3f} "
-                                  f"too low but step_size at floor "
-                                  f"{step_size_floor:.1e}; continuing")
-                            sys.stdout.flush()
-                        break
-                    current_step_size = max(
-                        current_step_size * 0.1, step_size_floor
-                    )
-                    if verbose:
-                        print(f"    Phase {phase} non-div {rate:.3f} too low, "
-                              f"reducing step_size to {current_step_size:.6f}")
-                        sys.stdout.flush()
-
-                if verbose:
-                    print(f"    Phase {phase} done: non-div={rate:.3f}")
-                    sys.stdout.flush()
-
-                # Estimate mass matrix from second half of this phase
-                half = max(len(phase_flats) // 2, 1)
-                p_stack = jnp.stack(phase_flats[half:])
-                if dense_mass and p_stack.shape[0] >= 2:
-                    # Full covariance + ridge for numerical stability.
-                    # BlackJAX nuts accepts either 1D (diag) or 2D (dense)
-                    # inverse_mass_matrix arrays interchangeably.
-                    cov_est = jnp.cov(p_stack.T)
-                    inv_mass_matrix = cov_est + 1e-6 * jnp.eye(n_flat)
-                else:
-                    var_est = jnp.var(p_stack, axis=0)
-                    inv_mass_matrix = jnp.maximum(var_est, 1e-6)
-
-                # Adjust step size based on acceptance for next phase.
-                if (phase >= 2 and n_steps > 0 and rate > 0.7
-                        and chain_idx == 0):
-                    # Probe larger step sizes with conservative thresholds.
-                    # Use 200-step probes (not 50) for reliable estimates,
-                    # and require >80% non-divergent for acceptance.
-                    for _probe in range(4):  # up to 16x increase
-                        probe_ss = current_step_size * 2.0
-                        probe_kernel = blackjax.nuts(
-                            logdensity_flat,
-                            step_size=probe_ss,
-                            inverse_mass_matrix=inv_mass_matrix,
-                        )
-                        @jax.jit
-                        def probe_step(st, sk):
-                            return probe_kernel.step(sk, st)
-                        n_probe_ok = 0
-                        probe_state = state
-                        for _ps in range(200):
-                            chain_key, step_key = random.split(chain_key)
-                            probe_state, probe_info = probe_step(
-                                probe_state, step_key)
-                            n_probe_ok += int(1 - probe_info.is_divergent)
-                        probe_rate = n_probe_ok / 200
-                        if probe_rate > 0.8:
-                            current_step_size = probe_ss
-                            state = probe_state
-                            if verbose:
-                                print(f"    Step size probe: "
-                                      f"{probe_ss:.6f} → "
-                                      f"{probe_rate:.2f} non-div, accepted")
-                                sys.stdout.flush()
-                        else:
-                            if verbose:
-                                print(f"    Step size probe: "
-                                      f"{probe_ss:.6f} → "
-                                      f"{probe_rate:.2f} non-div, rejected")
-                                sys.stdout.flush()
-                            break
-                elif rate > 0.9:
-                    current_step_size *= 2.0
-                elif rate < 0.5:
-                    current_step_size *= 0.5
-
-            # Save Chain 1's adapted step size and mass matrix
-            if chain_idx == 0:
-                shared_step_size = current_step_size
-                shared_inv_mass = inv_mass_matrix
-
-            # Build sampling kernel with final adapted parameters
+            # Sampling kernel uses adapted step size + inverse mass matrix.
             sampling_kernel = blackjax.nuts(
-                logdensity_flat,
-                step_size=current_step_size,
-                inverse_mass_matrix=inv_mass_matrix,
+                logdensity_flat, **sampling_params
             )
 
             @jax.jit
