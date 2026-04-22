@@ -570,61 +570,84 @@ class GRModel(IRTModel):
         return likelihood_fn, ais_data, ais_params
 
     def _mcmc_log_prior(self, item_params):
-        """Log prior with ``mu`` integrated out analytically.
+        """MCMC prior with ``mu`` integrated out and tightened scales.
 
-        In ``create_distributions`` we have:
-            mu ~ Normal(d0_loc, 1)
-            difficulties0 | mu ~ Normal(mu, 1)
-        which implies the marginal
-            difficulties0 ~ Normal(d0_loc, sqrt(2)).
+        Built explicitly from scratch (not via ``joint_prior_distribution``)
+        so the MCMC path can use tighter scales than the ADVI path:
+          * ``difficulties0`` ~ ``Normal(d0_loc, 1.0)``  (was sqrt(2))
+          * ``discriminations`` ~ ``HalfNormal(1.0)``   (was 2.0)
+          * ``ddifficulties`` ~ ``HalfNormal(1.0)``     (unchanged)
+          * ``global_scale`` (horseshoe only) ~ ``HalfCauchy(prior_scale)``
 
-        This eliminates the weak ridge between ``mu`` and
-        ``difficulties0`` that wrecks NUTS convergence, while leaving
-        the priors on ``discriminations`` and ``ddifficulties``
-        untouched.
+        ``mu`` and ``abilities`` are Rao-Blackwellized / dropped.
+        ADVI is untouched — only ``marginal_log_prob(drop_mu_prior=True)``
+        calls this.
         """
         K = self.response_cardinality
         d0_loc = -(K - 2) / 2.0
-        diff0 = item_params['difficulties0']
+        prior_type = getattr(self, 'discrimination_prior', 'half_normal')
+
+        # difficulties0: Normal(d0_loc, 1.0)
+        diff0 = jnp.asarray(item_params['difficulties0'], dtype=self.dtype)
         d0_prior = tfd.Independent(
             tfd.Normal(
                 loc=jnp.full(diff0.shape, d0_loc, dtype=self.dtype),
-                scale=jnp.sqrt(jnp.asarray(2.0, dtype=self.dtype))
-                * jnp.ones(diff0.shape, dtype=self.dtype),
+                scale=jnp.ones(diff0.shape, dtype=self.dtype),
             ),
             reinterpreted_batch_ndims=diff0.ndim,
         )
-        lp = d0_prior.log_prob(jnp.asarray(diff0, dtype=self.dtype))
+        lp = d0_prior.log_prob(diff0)
 
-        # Reuse the unchanged priors for everything else except mu/
-        # difficulties0/abilities (the latter were Rao-Blackwellized out).
-        model = self.joint_prior_distribution.model
-        skip = {'mu', 'difficulties0', 'abilities'}
-        # If horseshoe, discriminations depends on global_scale; handle
-        # by sampling the conditional at item_params['global_scale'].
-        for name, factor in model.items():
-            if name in skip or name not in item_params:
-                continue
-            val = jnp.asarray(item_params[name], dtype=self.dtype)
-            if callable(factor):
-                # Conditional factor — resolve its parents from item_params.
-                import inspect
-                sig = inspect.signature(factor)
-                parent_kwargs = {}
-                for pname in sig.parameters:
-                    if pname in item_params:
-                        parent_kwargs[pname] = item_params[pname]
-                    else:
-                        # parent missing — skip this factor (shouldn't
-                        # happen for MCMC vars we sample)
-                        parent_kwargs = None
-                        break
-                if parent_kwargs is None:
-                    continue
-                dist = factor(**parent_kwargs)
+        # discriminations: positive; MCMC sees constrained value directly.
+        if 'discriminations' in item_params:
+            disc = jnp.asarray(item_params['discriminations'], dtype=self.dtype)
+            if prior_type == 'horseshoe' and 'global_scale' in item_params:
+                # Keep horseshoe conditional on global_scale for horseshoe runs.
+                gs = jnp.asarray(item_params['global_scale'], dtype=self.dtype)
+                gs_b = gs * jnp.ones(disc.shape, dtype=self.dtype)
+                if self.positive_discriminations:
+                    disc_dist = tfd.Independent(
+                        AbsHorseshoe(scale=gs_b),
+                        reinterpreted_batch_ndims=disc.ndim,
+                    )
+                else:
+                    disc_dist = tfd.Independent(
+                        tfd.Horseshoe(scale=gs_b),
+                        reinterpreted_batch_ndims=disc.ndim,
+                    )
             else:
-                dist = factor
-            lp = lp + dist.log_prob(val)
+                disc_dist = tfd.Independent(
+                    tfd.HalfNormal(
+                        scale=jnp.ones(disc.shape, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=disc.ndim,
+                )
+            lp = lp + disc_dist.log_prob(disc)
+
+        # ddifficulties: HalfNormal(1.0) (unchanged — matches ADVI prior).
+        if 'ddifficulties' in item_params:
+            ddiff = jnp.asarray(item_params['ddifficulties'], dtype=self.dtype)
+            ddiff_dist = tfd.Independent(
+                tfd.HalfNormal(scale=jnp.ones(ddiff.shape, dtype=self.dtype)),
+                reinterpreted_batch_ndims=ddiff.ndim,
+            )
+            lp = lp + ddiff_dist.log_prob(ddiff)
+
+        # global_scale (horseshoe only): keep existing HalfCauchy.
+        if prior_type == 'horseshoe' and 'global_scale' in item_params:
+            gs = jnp.asarray(item_params['global_scale'], dtype=self.dtype)
+            prior_scale = getattr(self, 'discrimination_prior_scale', None)
+            gs_scale = float(prior_scale) if prior_scale is not None else 1.0
+            gs_dist = tfd.Independent(
+                tfd.HalfCauchy(
+                    loc=jnp.zeros(gs.shape, dtype=self.dtype),
+                    scale=jnp.asarray(gs_scale, dtype=self.dtype)
+                    * jnp.ones(gs.shape, dtype=self.dtype),
+                ),
+                reinterpreted_batch_ndims=gs.ndim,
+            )
+            lp = lp + gs_dist.log_prob(gs)
+
         return lp
 
     def create_distributions(self, grouping_params=None):
