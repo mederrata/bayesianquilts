@@ -133,15 +133,31 @@ def run_single_variant(model, data, variant_name, output_dir,
         flat = np.array(samples).reshape(-1, *samples.shape[2:])
         print(f"    {var_name}: mean={np.mean(flat):.4f}, std={np.std(flat):.4f}")
         if samples.shape[0] > 1:
-            chain_means = np.mean(np.array(samples), axis=1)
+            s = np.array(samples)
+            chain_means = np.mean(s, axis=1)
             between_var = np.var(chain_means, axis=0, ddof=1)
-            within_var = np.mean(np.var(np.array(samples), axis=1, ddof=1), axis=0)
+            within_var = np.mean(np.var(s, axis=1, ddof=1), axis=0)
             n = samples.shape[1]
+            # Flag params whose chains barely moved — typical of step-size
+            # floor hits where R-hat numerically explodes despite chains
+            # being effectively stationary at (close to) the init. Use a
+            # relative-to-between-var threshold so absolute-scale tiny
+            # params don't over-report as "frozen".
+            eps = np.maximum(between_var * 1e-8, np.abs(chain_means).mean() * 1e-12)
+            frozen = within_var <= eps
+            frac_frozen = float(np.mean(frozen))
             r_hat = np.sqrt(
                 ((n - 1) / n * within_var + between_var) /
-                np.maximum(within_var, 1e-30)
+                np.maximum(within_var, np.maximum(eps, 1e-30))
             )
-            print(f"      R-hat: mean={np.mean(r_hat):.4f}, max={np.max(r_hat):.4f}")
+            # Report R-hat on non-frozen params (informative) and frozen
+            # fraction separately (diagnostic).
+            if frac_frozen < 1.0:
+                rh_ok = r_hat[~frozen]
+                print(f"      R-hat (non-frozen): mean={np.mean(rh_ok):.4f}, "
+                      f"max={np.max(rh_ok):.4f}, frac<=1.1={(rh_ok<=1.1).mean():.2f}")
+            if frac_frozen > 0:
+                print(f"      frac_frozen (within_var≈0): {frac_frozen:.2f}")
     sys.stdout.flush()
 
 
