@@ -21,8 +21,8 @@ import gc
 import os
 import sys
 
-os.environ['JAX_PLATFORMS'] = 'cpu'
-os.environ['JAX_ENABLE_X64'] = '1'
+os.environ.setdefault('JAX_PLATFORMS', 'cpu')
+os.environ.setdefault('JAX_ENABLE_X64', '1')
 
 import numpy as np
 import jax

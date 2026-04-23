@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ.setdefault('JAX_PLATFORMS', 'cpu')
 os.environ['JAX_ENABLE_X64'] = '1'
 
 import numpy as np
