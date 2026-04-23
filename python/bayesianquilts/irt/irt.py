@@ -2028,16 +2028,22 @@ class IRTModel(BayesianModel):
                 sys.stdout.flush()
 
             sample_flats = []
-            n_accepted = 0
+            # Accumulate non-divergences as a device-side scalar — avoids
+            # per-step d2h transfer (slow on GPU, crashes on ROCm with
+            # HIP_ERROR_InvalidValue). Only transfer to host at report
+            # intervals and at end.
+            n_nondiv_dev = jnp.zeros((), dtype=jnp.int32)
             report_every = max(50, 50 * thinning)
             for step in range(total_steps):
                 chain_key, step_key = random.split(chain_key)
                 state, info = sample_step(state, step_key)
-                n_accepted += int(1 - info.is_divergent)
+                n_nondiv_dev = n_nondiv_dev + (
+                    1 - info.is_divergent.astype(jnp.int32)
+                )
                 if (step + 1) % thinning == 0:
                     sample_flats.append(state.position)
                 if verbose and (step + 1) % report_every == 0:
-                    ar = n_accepted / (step + 1)
+                    ar = float(n_nondiv_dev) / (step + 1)
                     lp = float(state.logdensity)
                     kept = len(sample_flats)
                     print(f"      step {step + 1}/{total_steps} "
@@ -2045,6 +2051,7 @@ class IRTModel(BayesianModel):
                           f"non-divergent={ar:.3f} lp={lp:.1f}")
                     sys.stdout.flush()
 
+            n_accepted = int(n_nondiv_dev)
             accept_ratio = n_accepted / total_steps
             if verbose:
                 print(f"    Non-divergent ratio: {accept_ratio:.3f}")
