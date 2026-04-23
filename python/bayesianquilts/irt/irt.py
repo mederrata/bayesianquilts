@@ -2015,10 +2015,6 @@ class IRTModel(BayesianModel):
                 logdensity_flat, **sampling_params
             )
 
-            @jax.jit
-            def sample_step(state, step_key):
-                return sampling_kernel.step(step_key, state)
-
             # Sampling (with thinning)
             total_steps = num_samples * thinning
             if verbose:
@@ -2027,29 +2023,32 @@ class IRTModel(BayesianModel):
                       f"{thin_msg}, step_size={current_step_size:.6f})...")
                 sys.stdout.flush()
 
-            sample_flats = []
-            # Accumulate non-divergences as a device-side scalar — avoids
-            # per-step d2h transfer (slow on GPU, crashes on ROCm with
-            # HIP_ERROR_InvalidValue). Only transfer to host at report
-            # intervals and at end.
-            n_nondiv_dev = jnp.zeros((), dtype=jnp.int32)
-            report_every = max(50, 50 * thinning)
-            for step in range(total_steps):
-                chain_key, step_key = random.split(chain_key)
-                state, info = sample_step(state, step_key)
-                n_nondiv_dev = n_nondiv_dev + (
+            # Use jax.lax.scan over the full sampling phase to avoid
+            # per-step d2h transfers (which crash on ROCm with
+            # HIP_ERROR_InvalidValue). The scan runs atomically within a
+            # single JIT; no intermediate progress printing is possible.
+            def scan_body(carry, step_key):
+                state, n_nondiv = carry
+                state, info = sampling_kernel.step(step_key, state)
+                n_nondiv = n_nondiv + (
                     1 - info.is_divergent.astype(jnp.int32)
                 )
-                if (step + 1) % thinning == 0:
-                    sample_flats.append(state.position)
-                if verbose and (step + 1) % report_every == 0:
-                    ar = float(n_nondiv_dev) / (step + 1)
-                    lp = float(state.logdensity)
-                    kept = len(sample_flats)
-                    print(f"      step {step + 1}/{total_steps} "
-                          f"(kept {kept}) "
-                          f"non-divergent={ar:.3f} lp={lp:.1f}")
-                    sys.stdout.flush()
+                return (state, n_nondiv), state.position
+
+            chain_key, sample_key = random.split(chain_key)
+            step_keys = random.split(sample_key, total_steps)
+            (state, n_nondiv_dev), all_positions = jax.lax.scan(
+                scan_body,
+                (state, jnp.zeros((), dtype=jnp.int32)),
+                step_keys,
+            )
+
+            # all_positions has shape (total_steps, n_flat). Thin post-hoc.
+            if thinning > 1:
+                keep_idx = jnp.arange(thinning - 1, total_steps, thinning)
+                kept_flats = all_positions[keep_idx]
+            else:
+                kept_flats = all_positions
 
             n_accepted = int(n_nondiv_dev)
             accept_ratio = n_accepted / total_steps
@@ -2057,10 +2056,14 @@ class IRTModel(BayesianModel):
                 print(f"    Non-divergent ratio: {accept_ratio:.3f}")
                 sys.stdout.flush()
 
-            positions = [unravel_fn(f) for f in sample_flats]
+            # Unravel each kept sample back to a dict of per-var arrays.
+            positions_list = [
+                unravel_fn(kept_flats[i])
+                for i in range(kept_flats.shape[0])
+            ]
             for var in item_var_list:
                 stacked = jnp.stack(
-                    [p[var] for p in positions], axis=0)
+                    [p[var] for p in positions_list], axis=0)
                 all_samples[var].append(stacked)
             all_accept.append(accept_ratio)
 
