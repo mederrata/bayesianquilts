@@ -424,9 +424,9 @@ def plot_results(results: List[Dict], exp_config: ExperimentConfig):
     """
     import pandas as pd
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
 
-    ax = axes[0, 0]
+    ax = axes[0]
     for effect_scale in exp_config.effect_sizes:
         subset = [r for r in results if r["effect_scale"] == effect_scale]
         snr_arrays = np.array([r["snr_values"] for r in subset])
@@ -445,24 +445,7 @@ def plot_results(results: List[Dict], exp_config: ExperimentConfig):
     ax.set_yscale('log')
     ax.grid(True, alpha=0.3)
 
-    ax = axes[0, 1]
-    for effect_scale in exp_config.effect_sizes:
-        subset = [r for r in results if r["effect_scale"] == effect_scale]
-        action_arrays = np.array([r["actions"] for r in subset])
-        mean_action = np.mean(action_arrays, axis=0)
-        std_action = np.std(action_arrays, axis=0)
-
-        orders = np.arange(len(mean_action))
-        ax.errorbar(orders, mean_action, yerr=std_action,
-                   label=f"γ={effect_scale}", marker='o', capsize=3)
-
-    ax.set_xlabel("Truncation Order K")
-    ax.set_ylabel("Action (Neg. Test LL per obs)")
-    ax.set_title("RG Action vs Truncation Order")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1, 0]
+    ax = axes[1]
     for effect_scale in exp_config.effect_sizes:
         subset = [r for r in results if r["effect_scale"] == effect_scale]
         beta_arrays = np.array([r["beta_fn"] for r in subset])
@@ -480,38 +463,8 @@ def plot_results(results: List[Dict], exp_config: ExperimentConfig):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    ax = axes[1, 1]
-    k_star_list = []
-    optimal_k_list = []
-    effect_list = []
-
-    for r in results:
-        k_star_list.append(r["k_star"])
-        optimal_k_list.append(r["optimal_k"])
-        effect_list.append(r["effect_scale"])
-
-    df = pd.DataFrame({
-        "effect_scale": effect_list,
-        "k_star": k_star_list,
-        "optimal_k": optimal_k_list,
-    })
-
-    mean_df = df.groupby("effect_scale").mean()
-    ax.scatter(mean_df["k_star"], mean_df["optimal_k"], s=100, c='blue')
-    for idx, row in mean_df.iterrows():
-        ax.annotate(f"γ={idx}", (row["k_star"], row["optimal_k"]),
-                   xytext=(5, 5), textcoords='offset points')
-
-    max_k = exp_config.max_order
-    ax.plot([0, max_k], [0, max_k], 'k--', alpha=0.5, label='Perfect prediction')
-    ax.set_xlabel("Predicted K* (SNR threshold)")
-    ax.set_ylabel("Optimal K (min action)")
-    ax.set_title("Fixed Point Prediction Accuracy")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
     plt.tight_layout()
-    plt.savefig(Path(exp_config.output_dir) / "rg_flow_results.png", dpi=150)
+    plt.savefig(Path(exp_config.output_dir) / "rg_flow_results.png", dpi=150, bbox_inches='tight')
     plt.close()
 
     print(f"Plots saved to {exp_config.output_dir}")
