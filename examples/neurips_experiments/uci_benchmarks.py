@@ -324,16 +324,15 @@ def prepare_dataset(
             continue
         le = LabelEncoder()
         indices = le.fit_transform(df[col].astype(str))
-        factor_indices[col] = indices
         n_levels = len(le.classes_)
-        # Limit number of levels for memory efficiency
-        if n_levels > 20:
-            # Group rare categories
+        # Limit number of levels for memory efficiency (max 8 to avoid explosion)
+        if n_levels > 8:
             from collections import Counter
             counts = Counter(indices)
-            top_cats = [k for k, v in counts.most_common(19)]
-            indices = np.array([i if i in top_cats else 19 for i in indices])
-            n_levels = 20
+            top_cats = [k for k, v in counts.most_common(7)]
+            indices = np.array([i if i in top_cats else 7 for i in indices])
+            n_levels = 8
+        factor_indices[col] = indices
         dimensions.append(Dimension(col, n_levels))
 
     # Add PCA-derived dimensions
@@ -670,10 +669,11 @@ def run_single_dataset(
     config = UCI_DATASETS[dataset_name]
 
     # Use categorical features, limited for memory
+    # Limit to 3 factors to avoid combinatorial explosion
     categorical = config.get("categorical", [])
     if categorical == "all":
-        categorical = [c for c in df.columns if c != config["target"]][:5]
-    hierarchical_factors = categorical[:5]
+        categorical = [c for c in df.columns if c != config["target"]][:3]
+    hierarchical_factors = categorical[:3]
 
     try:
         data, dimensions = prepare_dataset(df, dataset_name, hierarchical_factors)
@@ -693,6 +693,16 @@ def run_single_dataset(
         param_shape=[n_features],
         name="beta",
     )
+
+    # Compute lattice size and limit max_order dynamically
+    total_cells = 1
+    for dim in dimensions:
+        total_cells *= dim.size
+    # If lattice is large, limit to order 1 to prevent OOM
+    effective_max_order = exp_config.max_order
+    if total_cells * n_features > 500000:
+        effective_max_order = min(effective_max_order, 1)
+        print(f"  Limiting to order 1 due to lattice size ({total_cells} cells)")
 
     results = []
 
@@ -736,7 +746,7 @@ def run_single_dataset(
                         per_component=True,
                     )
 
-                for order in range(exp_config.max_order + 1):
+                for order in range(effective_max_order + 1):
                     params = fit_logistic_model(
                         train_data, decomp, order, prior_scales,
                         sparse=use_sparse, l1_weight=0.01 if use_sparse else 0.0,
