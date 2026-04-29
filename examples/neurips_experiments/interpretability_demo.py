@@ -87,7 +87,8 @@ def generate_interpretable_data(
 
         if order == 0:
             # Global effect: shape is (1, 1, 1, n_features)
-            true_params[name] = jnp.array([[[[1.0, 0.2, 0.1, 0.05]]]])
+            global_effect = jnp.array([1.0, 0.2, 0.1, 0.05])
+            true_params[name] = global_effect.reshape(shape)
             effect_descriptions[name] = "Global baseline effect"
 
         elif order == 1:
@@ -103,28 +104,15 @@ def generate_interpretable_data(
                 desc = "Income effect"
 
             feature_weights = jnp.array([1.0, 0.5, 0.3, 0.1])
-            # Create effect tensor matching the expected shape
-            effect_tensor = jnp.zeros(shape)
-            # Find which axis has L_levels (not 1)
-            for axis_idx, dim_size in enumerate(shape[:-1]):
-                if dim_size == config.L_levels:
-                    # Expand values along this axis
-                    expand_shape = [1] * len(shape)
-                    expand_shape[axis_idx] = config.L_levels
-                    expand_shape[-1] = config.n_features
-                    effect_tensor = (values.reshape(expand_shape[:axis_idx+1] + [1]*(len(shape)-axis_idx-2) + [1])
-                                    * feature_weights.reshape([1]*(len(shape)-1) + [config.n_features]))
-                    break
-            true_params[name] = effect_tensor
+            # Create effect tensor: outer product of values and feature_weights
+            # Then reshape to match expected shape
+            effect_2d = jnp.outer(values, feature_weights)  # (5, 4)
+            true_params[name] = effect_2d.reshape(shape)
             effect_descriptions[name] = desc
 
         elif order == 2:
             base = 0.1 * jax.random.normal(keys[order], shape=shape)
             if "region" in name and "income_level" in name:
-                # Add specific interaction effects at corners
-                # Find which axes correspond to region and income_level
-                base = base.at[0, :, config.L_levels-1, :].set(0.3)
-                base = base.at[config.L_levels-1, :, 0, :].set(0.3)
                 effect_descriptions[name] = "Region × Income interaction"
             else:
                 effect_descriptions[name] = f"Interaction: {' × '.join(parts)}"
