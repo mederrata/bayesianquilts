@@ -26,7 +26,7 @@ DATASET_NAMES = {
     "electricity": "Electricity",
 }
 
-METHOD_ORDER = ["logistic_regression", "random_forest", "xgboost", "lightgbm", "mlp", "ebm", "sparse"]
+METHOD_ORDER = ["LR", "random_forest", "xgboost", "lightgbm", "mlp", "ebm", "sparse"]
 
 
 def load_results(results_dir: Path) -> pd.DataFrame:

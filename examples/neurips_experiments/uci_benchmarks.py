@@ -405,6 +405,51 @@ def create_train_test_split(
     return train_data, test_data
 
 
+def lookup_params(decomp: Decomposed, interaction_indices: jnp.ndarray, params: Dict) -> jnp.ndarray:
+    """Manually lookup parameters at interaction indices.
+
+    Args:
+        decomp: Parameter decomposition
+        interaction_indices: Indices for each dimension, shape (n_samples, n_dims)
+        params: Parameter tensors dict
+
+    Returns:
+        Parameter values at each sample, shape (n_samples, n_features)
+    """
+    n_samples = interaction_indices.shape[0]
+    n_features = decomp._param_shape[0]
+    result = jnp.zeros((n_samples, n_features))
+
+    dim_names = [d.name for d in decomp._interactions._dimensions]
+
+    for name, tensor in params.items():
+        # Determine which dimensions this component uses
+        base_name = decomp._name + "__"
+        if name == base_name:
+            # Global component - same for all samples
+            result += tensor.reshape(n_features)
+        else:
+            # Parse component name to get active dimensions
+            suffix = name[len(base_name):]
+            active_dims = suffix.split("_") if suffix else []
+
+            # Build full index tuple for the tensor
+            # Tensor shape is (dim1, dim2, ..., n_features)
+            index_tuple = []
+            for i, dim_name in enumerate(dim_names):
+                if dim_name in active_dims:
+                    index_tuple.append(interaction_indices[:, i])
+                else:
+                    index_tuple.append(0)  # Singleton dimension
+
+            # Index into tensor and add to result
+            # tensor[idx1, idx2, ...] gives (n_samples, n_features)
+            indexed = tensor[tuple(index_tuple)]
+            result += indexed
+
+    return result
+
+
 def fit_logistic_model(
     data: Dict,
     decomp: Decomposed,
@@ -452,12 +497,7 @@ def fit_logistic_model(
     y = jnp.array(data["y"])
 
     def loss_fn(params):
-        full_params = {**params}
-        for name in decomp._tensor_parts.keys():
-            if name not in params:
-                full_params[name] = jnp.zeros(decomp._tensor_part_shapes[name])
-
-        beta = decomp.lookup(interaction_indices, tensors=full_params)
+        beta = lookup_params(decomp, interaction_indices, params)
         logits = jnp.sum(X * beta, axis=-1)
 
         bce = jnp.mean(
@@ -511,13 +551,6 @@ def evaluate_model(
     Returns:
         Dictionary of metrics
     """
-    full_params = {}
-    for name in decomp._tensor_parts.keys():
-        if name in params:
-            full_params[name] = params[name]
-        else:
-            full_params[name] = jnp.zeros(decomp._tensor_part_shapes[name])
-
     dim_names = [d.name for d in decomp._interactions._dimensions]
     interaction_indices = jnp.stack(
         [jnp.array(data[name]) for name in dim_names],
@@ -527,7 +560,7 @@ def evaluate_model(
     X = jnp.array(data["X"])
     y = jnp.array(data["y"])
 
-    beta = decomp.lookup(interaction_indices, tensors=full_params)
+    beta = lookup_params(decomp, interaction_indices, params)
     logits = jnp.sum(X * beta, axis=-1)
     probs = jax.nn.sigmoid(logits)
 
@@ -586,7 +619,7 @@ def fit_baseline_models(
     lr.fit(X_train, y_train)
     lr_probs = lr.predict_proba(X_test)[:, 1]
     results.append({
-        "method": "logistic_regression",
+        "method": "LR",
         "order": -1,
         "test_auc": compute_auc(y_test, lr_probs),
         "test_accuracy": float(np.mean(lr.predict(X_test) == y_test)),
