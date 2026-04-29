@@ -333,7 +333,14 @@ def prepare_dataset(
             pca_factors = {}
             pca_dimensions = []
     else:
-        X_numeric = np.zeros((len(df), 1), dtype=np.float32)
+        # No numeric columns - one-hot encode all non-target categorical columns
+        from sklearn.preprocessing import OneHotEncoder
+        cat_cols = [c for c in df.columns if c != config["target"]]
+        if cat_cols:
+            encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+            X_numeric = encoder.fit_transform(df[cat_cols].astype(str)).astype(np.float32)
+        else:
+            X_numeric = np.zeros((len(df), 1), dtype=np.float32)
         pca_factors = {}
         pca_dimensions = []
 
