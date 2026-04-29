@@ -31,9 +31,9 @@ from bayesianquilts.jax.parameter import Decomposed, Interactions, Dimension
 @dataclass
 class RGFlowConfig:
     """Configuration for RG flow experiments."""
-    n_obs: int = 10000
-    d_factors: int = 4
-    L_levels: int = 5
+    n_obs: int = 2000
+    d_factors: int = 3
+    L_levels: int = 4
     n_features: int = 3
     noise_std: float = 1.0
     true_max_order: int = 2
@@ -44,8 +44,8 @@ class RGFlowConfig:
 @dataclass
 class ExperimentConfig:
     """Configuration for the experiment."""
-    n_replications: int = 30
-    max_order: int = 4
+    n_replications: int = 20
+    max_order: int = 3
     effect_sizes: List[float] = None
     output_dir: str = "results/rg_flow"
 
@@ -199,13 +199,14 @@ def estimate_marginal_variance(
     Returns:
         Estimated variance
     """
-    n_obs = len(data["y"])
+    y = np.asarray(data["y"])
+    n_obs = len(y)
     shape = decomp._tensor_part_shapes[component_name]
     n_cells = int(np.prod(shape[:-1]))
     n_local = n_obs / max(n_cells, 1)
 
-    cell_var_estimate = np.var(data["y"])
-    signal_var = max(0, cell_var_estimate - noise_std**2)
+    cell_var_estimate = float(np.var(y))
+    signal_var = max(0.0, cell_var_estimate - noise_std**2)
 
     order = decomp.component_order(component_name)
     decay = 0.5 ** order

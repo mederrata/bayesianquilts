@@ -32,7 +32,7 @@ from bayesianquilts.jax.parameter import Decomposed, Interactions, Dimension
 @dataclass
 class AblationConfig:
     """Configuration for ablation experiments."""
-    n_obs: int = 5000
+    n_obs: int = 2000
     d_factors: int = 3
     L_levels: int = 4
     n_features: int = 3
@@ -45,7 +45,7 @@ class AblationConfig:
 @dataclass
 class ExperimentConfig:
     """Configuration for the experiment."""
-    n_replications: int = 30
+    n_replications: int = 15
     max_order: int = 3
     c_values: List[float] = None
     noise_misspec_factors: List[float] = None

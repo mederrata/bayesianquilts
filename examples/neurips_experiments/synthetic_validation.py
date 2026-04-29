@@ -29,12 +29,12 @@ from bayesianquilts.jax.parameter import Decomposed, Interactions, Dimension
 @dataclass
 class SyntheticDataConfig:
     """Configuration for synthetic data generation."""
-    n_obs: int = 10000
+    n_obs: int = 2000
     d_factors: int = 3
     L_levels: int = 4
     rho_decay: float = 0.3
     noise_std: float = 1.0
-    n_features: int = 5
+    n_features: int = 4
     true_max_order: int = 2
     seed: int = 42
 
@@ -42,7 +42,7 @@ class SyntheticDataConfig:
 @dataclass
 class ExperimentConfig:
     """Configuration for the experiment."""
-    n_replications: int = 50
+    n_replications: int = 20
     max_order: int = 3
     n_obs_values: List[int] = None
     rho_values: List[float] = None
@@ -50,9 +50,9 @@ class ExperimentConfig:
 
     def __post_init__(self):
         if self.n_obs_values is None:
-            self.n_obs_values = [1000, 5000, 10000, 50000]
+            self.n_obs_values = [1000, 2000, 5000]
         if self.rho_values is None:
-            self.rho_values = [0.1, 0.3, 0.5, 0.7]
+            self.rho_values = [0.3, 0.5, 0.7]
 
 
 def generate_synthetic_data(
