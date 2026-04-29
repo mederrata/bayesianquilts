@@ -161,6 +161,28 @@ UCI_DATASETS = {
         "N": 45312,
         "p": 8,
     },
+    "madelon": {
+        "loader": "openml",
+        "openml_id": 1485,
+        "target": "Class",
+        "categorical": [],
+        "numeric": "all",
+        "use_pca": True,
+        "pca_components": 50,
+        "N": 2600,
+        "p": 500,
+    },
+    "semeion": {
+        "loader": "openml",
+        "openml_id": 1501,
+        "target": "Class",
+        "categorical": [],
+        "numeric": "all",
+        "use_pca": True,
+        "pca_components": 30,
+        "N": 1593,
+        "p": 256,
+    },
 }
 
 
@@ -178,7 +200,8 @@ class ExperimentConfig:
         if self.datasets is None:
             self.datasets = [
                 "german", "adult", "bank", "taiwan", "heart",
-                "bioresponse", "spambase", "mushroom", "phoneme", "electricity"
+                "bioresponse", "spambase", "mushroom", "phoneme", "electricity",
+                "madelon", "semeion"
             ]
 
 
