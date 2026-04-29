@@ -697,7 +697,7 @@ def run_single_dataset(
     # Compute lattice size and limit max_order dynamically
     total_cells = 1
     for dim in dimensions:
-        total_cells *= dim.size
+        total_cells *= dim.cardinality
     # If lattice is large, limit to order 1 to prevent OOM
     effective_max_order = exp_config.max_order
     if total_cells * n_features > 500000:
