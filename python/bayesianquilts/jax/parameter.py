@@ -784,6 +784,77 @@ class Decomposed(object):
 
         return cumulative
 
+    def generalization_preserving_scales(
+        self,
+        noise_scale=1.0,
+        total_n=None,
+        contingency_table=None,
+        c=0.5,
+        per_component=False,
+    ):
+        """Compute generalization-preserving prior scales for each component.
+
+        The generalization-preserving scaling ensures that adding a component
+        does not hurt generalization in expectation when the true effect is zero.
+
+        Two modes are available:
+
+        1. per_component=False (default): Per-parameter bound
+           τ^(α) = σ / √N^(α)
+           Each parameter contributes ≤ c df_eff.
+           A component with p parameters contributes ≤ p*c df_eff total.
+
+        2. per_component=True: Per-component bound
+           τ^(α) = σ / √(p · N^(α))
+           The entire component contributes ≤ c df_eff total,
+           regardless of the number of parameters p.
+
+        Args:
+            noise_scale: Noise standard deviation σ (or plug-in estimate)
+            total_n: Total number of observations N. Required if contingency_table
+                is not provided.
+            contingency_table: Optional MultiwayContingencyTable with actual counts
+                per cell. If provided, uses exact local sample sizes. Otherwise,
+                assumes uniform distribution across cells.
+            c: Maximum effective degrees of freedom (default 0.5)
+            per_component: If True, bound total df_eff per component rather than
+                per parameter. Results in tighter regularization for components
+                with many parameters.
+
+        Returns:
+            Dictionary mapping component names to prior standard deviations.
+
+        Reference:
+            Chang (2025), "A renormalization-group inspired hierarchical Bayesian
+            framework for piecewise linear regression models"
+        """
+        if total_n is None and contingency_table is None:
+            raise ValueError("Must provide either total_n or contingency_table")
+
+        scales = {}
+        scale_factor = np.sqrt(c / (1 - c))
+        p = int(np.prod(self._param_shape)) if self._param_shape else 1
+
+        for name, shape in self._tensor_part_shapes.items():
+            interaction_vars = self._tensor_part_interactions[name]
+            interaction_shape = shape[: -len(self._param_shape)] if self._param_shape else shape
+
+            if contingency_table is not None:
+                if len(interaction_vars) == 0:
+                    n_local = contingency_table.lookup(None)
+                else:
+                    counts = contingency_table.lookup(interaction_vars)
+                    n_local = np.mean(counts)
+            else:
+                n_cells = int(np.prod(interaction_shape))
+                n_local = total_n / max(n_cells, 1)
+
+            effective_n = p * n_local if per_component else n_local
+            tau = scale_factor * noise_scale / np.sqrt(max(effective_n, 1))
+            scales[name] = float(tau)
+
+        return scales
+
     def component_order(self, component_name):
         """Return the interaction order (number of vars) of a component."""
         return len(self._tensor_part_interactions.get(component_name, ()))
