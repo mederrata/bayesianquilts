@@ -985,6 +985,13 @@ class IRTModel(BayesianModel):
                   and hasattr(self.imputation_model, 'get_item_weight'))
         weights = np.zeros(I, dtype=np.float64) if use_is else None
 
+        # Diagnostics: track when the actual stacking-model PMF is *not* used,
+        # so silent 1/K fallbacks can never mask a broken pipeline.
+        n_filled = 0
+        n_uniform_from_model = 0   # model returned ~uniform (real prediction)
+        n_uniform_fallback = 0     # exception → forced uniform (suspicious)
+        err_summary: dict = {}
+
         for i, item_key in enumerate(self.item_keys):
             col = np.asarray(batch[item_key], dtype=np.float64)
             bad = np.isnan(col) | (col < 0) | (col >= K)
@@ -1039,8 +1046,35 @@ class IRTModel(BayesianModel):
                             **kwargs,
                         )
                     pmfs[row_idx, i, :] = pmf
-                except (ValueError, KeyError, AttributeError):
+                    n_filled += 1
+                    if np.allclose(pmf, 1.0 / K, atol=1e-6):
+                        n_uniform_from_model += 1
+                except (ValueError, KeyError, AttributeError) as _e:
                     pmfs[row_idx, i, :] = 1.0 / K
+                    n_uniform_fallback += 1
+                    err_summary[(type(_e).__name__, item_key)] = (
+                        err_summary.get((type(_e).__name__, item_key), 0) + 1
+                    )
+
+        # Loud diagnostic so a silent 1/K regression cannot hide.
+        n_missing = n_filled + n_uniform_fallback
+        if n_missing > 0:
+            frac_uniform = (n_uniform_from_model + n_uniform_fallback) / n_missing
+            print(
+                f"  [imputation PMFs] missing_cells={n_missing} "
+                f"model_filled={n_filled} fallback_1/K={n_uniform_fallback} "
+                f"model_uniform_fraction={frac_uniform:.4f}",
+                flush=True,
+            )
+            if n_uniform_fallback > 0:
+                top = sorted(err_summary.items(), key=lambda kv: -kv[1])[:5]
+                detail = ", ".join(f"{e}@{k}={c}" for (e, k), c in top)
+                print(
+                    f"  [imputation PMFs] WARNING: {n_uniform_fallback} cells "
+                    f"used 1/K fallback (stacking model raised). "
+                    f"Top exceptions: {detail}",
+                    flush=True,
+                )
 
         return pmfs, weights
 

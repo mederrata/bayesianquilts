@@ -1302,7 +1302,13 @@ class PairwiseOrdinalStackingModel:
                     models_info.append((f"dm:{predictor_name}", dmr.elpd_loo_per_obs, dmr.elpd_loo_per_obs_se, pmf))
 
         if not models_info:
-            return np.ones(n_categories) / n_categories
+            # No converged sub-models — caller must know, not silently fall
+            # back to uniform (would mask broken stacking fits).
+            raise ValueError(
+                f"PairwiseOrdinalStackingModel.predict_pmf: no converged "
+                f"sub-models for target={target!r} given items={list(items)}. "
+                f"Refit the stacking model before running imputation."
+            )
 
         # Reuse _compute_stacking_weights for consistent weight selection
         # (uses optimal weights when available, falls back to ELPD softmax)
@@ -1318,7 +1324,12 @@ class PairwiseOrdinalStackingModel:
         if total > 0:
             stacked_pmf /= total
         else:
-            stacked_pmf = np.ones(n_categories) / n_categories
+            # Numerical underflow in weighted PMF mix — surface the issue.
+            raise ValueError(
+                f"PairwiseOrdinalStackingModel.predict_pmf: stacked PMF for "
+                f"target={target!r} summed to {total:g}; cannot normalise. "
+                f"Inspect sub-model weights/PMFs."
+            )
         return stacked_pmf
 
     # ------------------------------------------------------------------
