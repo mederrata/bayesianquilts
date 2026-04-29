@@ -25,12 +25,49 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
 from tqdm import tqdm
+
+try:
+    import xgboost as xgb
+    HAS_XGBOOST = True
+except ImportError:
+    HAS_XGBOOST = False
+
+try:
+    import lightgbm as lgb
+    HAS_LIGHTGBM = True
+except ImportError:
+    HAS_LIGHTGBM = False
+
+try:
+    from interpret.glassbox import ExplainableBoostingClassifier
+    HAS_EBM = True
+except ImportError:
+    HAS_EBM = False
+
+try:
+    from sklearn.datasets import fetch_openml
+    HAS_OPENML = True
+except ImportError:
+    HAS_OPENML = False
 
 from bayesianquilts.jax.parameter import Decomposed, Interactions, Dimension
 
 
 UCI_DATASETS = {
+    "german": {
+        "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data",
+        "columns": [f"A{i}" for i in range(1, 21)] + ["target"],
+        "target": "target",
+        "categorical": ["A1", "A3", "A4", "A6", "A7"],
+        "numeric": ["A2", "A5", "A8", "A11", "A13", "A16", "A18"],
+        "N": 1000,
+        "p": 7,
+    },
     "adult": {
         "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data",
         "columns": [
@@ -39,18 +76,10 @@ UCI_DATASETS = {
             "capital_gain", "capital_loss", "hours_per_week", "native_country", "income"
         ],
         "target": "income",
-        "categorical": ["workclass", "education", "marital_status", "occupation",
-                       "relationship", "race", "sex", "native_country"],
-        "numeric": ["age", "fnlwgt", "education_num", "capital_gain",
-                   "capital_loss", "hours_per_week"],
-    },
-    "german": {
-        "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data",
-        "columns": [f"A{i}" for i in range(1, 21)] + ["target"],
-        "target": "target",
-        "categorical": ["A1", "A3", "A4", "A6", "A7", "A9", "A10", "A12",
-                       "A14", "A15", "A17", "A19", "A20"],
-        "numeric": ["A2", "A5", "A8", "A11", "A13", "A16", "A18"],
+        "categorical": ["workclass", "education", "marital_status", "occupation", "sex"],
+        "numeric": ["age", "education_num", "capital_gain", "capital_loss", "hours_per_week"],
+        "N": 48842,
+        "p": 6,
     },
     "bank": {
         "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip",
@@ -58,10 +87,79 @@ UCI_DATASETS = {
                    "housing", "loan", "contact", "day", "month", "duration",
                    "campaign", "pdays", "previous", "poutcome", "y"],
         "target": "y",
-        "categorical": ["job", "marital", "education", "default", "housing",
-                       "loan", "contact", "month", "poutcome"],
-        "numeric": ["age", "balance", "day", "duration", "campaign",
-                   "pdays", "previous"],
+        "categorical": ["job", "marital", "education", "housing", "loan", "contact", "poutcome"],
+        "numeric": ["age", "balance", "duration", "campaign", "pdays", "previous"],
+        "N": 45211,
+        "p": 7,
+    },
+    "taiwan": {
+        "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/00350/default%20of%20credit%20card%20clients.xls",
+        "loader": "openml",
+        "openml_id": 42477,
+        "target": "default_payment_next_month",
+        "categorical": ["SEX", "EDUCATION", "MARRIAGE"],
+        "numeric": ["LIMIT_BAL", "AGE", "PAY_0", "PAY_2", "PAY_3", "PAY_4", "PAY_5", "PAY_6",
+                   "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6",
+                   "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"],
+        "N": 30000,
+        "p": 23,
+    },
+    "heart": {
+        "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data",
+        "loader": "openml",
+        "openml_id": 43,
+        "target": "target",
+        "categorical": ["sex", "cp", "fbs", "restecg", "exang", "slope", "ca", "thal"],
+        "numeric": ["age", "trestbps", "chol", "thalach", "oldpeak"],
+        "N": 303,
+        "p": 13,
+    },
+    "bioresponse": {
+        "loader": "openml",
+        "openml_id": 4134,
+        "target": "target",
+        "categorical": [],
+        "numeric": "all",
+        "use_pca": True,
+        "pca_components": 50,
+        "N": 3751,
+        "p": 1776,
+    },
+    "spambase": {
+        "loader": "openml",
+        "openml_id": 44,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "N": 4601,
+        "p": 57,
+    },
+    "mushroom": {
+        "loader": "openml",
+        "openml_id": 24,
+        "target": "class",
+        "categorical": "all",
+        "numeric": [],
+        "N": 8124,
+        "p": 22,
+    },
+    "phoneme": {
+        "loader": "openml",
+        "openml_id": 1489,
+        "target": "Class",
+        "categorical": [],
+        "numeric": "all",
+        "N": 5404,
+        "p": 5,
+    },
+    "electricity": {
+        "loader": "openml",
+        "openml_id": 151,
+        "target": "class",
+        "categorical": ["day"],
+        "numeric": ["date", "period", "nswprice", "nswdemand", "vicprice", "vicdemand", "transfer"],
+        "N": 45312,
+        "p": 8,
     },
 }
 
@@ -70,7 +168,7 @@ UCI_DATASETS = {
 class ExperimentConfig:
     """Configuration for UCI benchmark experiments."""
     n_folds: int = 5
-    n_replications: int = 10
+    n_replications: int = 5
     max_order: int = 2
     datasets: List[str] = None
     output_dir: str = "results/uci_benchmarks"
@@ -78,7 +176,10 @@ class ExperimentConfig:
 
     def __post_init__(self):
         if self.datasets is None:
-            self.datasets = ["adult", "german"]
+            self.datasets = [
+                "german", "adult", "bank", "taiwan", "heart",
+                "bioresponse", "spambase", "mushroom", "phoneme", "electricity"
+            ]
 
 
 def download_dataset(dataset_name: str, data_dir: str) -> pd.DataFrame:
@@ -101,7 +202,18 @@ def download_dataset(dataset_name: str, data_dir: str) -> pd.DataFrame:
 
     print(f"Downloading {dataset_name} dataset...")
 
-    if dataset_name == "adult":
+    loader = config.get("loader", "url")
+
+    if loader == "openml":
+        if not HAS_OPENML:
+            raise ImportError("sklearn.datasets.fetch_openml required for OpenML datasets")
+        openml_id = config["openml_id"]
+        data = fetch_openml(data_id=openml_id, as_frame=True, parser='auto')
+        df = data.frame
+        if config["target"] not in df.columns and hasattr(data, 'target_names'):
+            df[config["target"]] = data.target
+
+    elif dataset_name == "adult":
         local_path = Path(data_dir) / "adult.data"
         if not local_path.exists():
             urlretrieve(config["url"], local_path)
@@ -125,6 +237,10 @@ def download_dataset(dataset_name: str, data_dir: str) -> pd.DataFrame:
             with z.open("bank.csv") as f:
                 df = pd.read_csv(f, sep=";")
 
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+
+    df = df.dropna()
     df.to_csv(filepath, index=False)
     return df
 
@@ -132,40 +248,99 @@ def download_dataset(dataset_name: str, data_dir: str) -> pd.DataFrame:
 def prepare_dataset(
     df: pd.DataFrame,
     dataset_name: str,
-    hierarchical_factors: List[str],
-) -> Tuple[Dict, np.ndarray]:
+    hierarchical_factors: List[str] = None,
+    n_pca_bins: int = 4,
+) -> Tuple[Dict, List]:
     """Prepare dataset for hierarchical modeling.
 
     Args:
         df: Raw DataFrame
         dataset_name: Name of dataset
         hierarchical_factors: List of columns to use as hierarchical factors
+        n_pca_bins: Number of bins for PCA-discretized latent dimensions
 
     Returns:
-        Tuple of (data_dict, target)
+        Tuple of (data_dict, dimensions)
     """
     config = UCI_DATASETS[dataset_name]
 
-    for col in hierarchical_factors:
-        if col not in df.columns:
-            raise ValueError(f"Column {col} not in dataset")
+    # Handle numeric columns
+    numeric_cols = config.get("numeric", [])
+    if numeric_cols == "all":
+        numeric_cols = [c for c in df.columns if c != config["target"]
+                       and df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
+    else:
+        numeric_cols = [c for c in numeric_cols if c in df.columns]
 
-    numeric_cols = [c for c in config["numeric"] if c in df.columns]
-    X_numeric = df[numeric_cols].values.astype(np.float32)
-    scaler = StandardScaler()
-    X_numeric = scaler.fit_transform(X_numeric)
+    # Handle categorical columns
+    categorical_cols = config.get("categorical", [])
+    if categorical_cols == "all":
+        categorical_cols = [c for c in df.columns if c != config["target"]
+                          and c not in numeric_cols]
+    else:
+        categorical_cols = [c for c in categorical_cols if c in df.columns]
 
-    factor_encoders = {}
+    if hierarchical_factors is None:
+        hierarchical_factors = categorical_cols
+
+    # Process numeric features
+    if numeric_cols:
+        X_numeric = df[numeric_cols].values.astype(np.float32)
+        X_numeric = np.nan_to_num(X_numeric, nan=0.0)
+        scaler = StandardScaler()
+        X_numeric = scaler.fit_transform(X_numeric)
+
+        # Apply PCA for high-dimensional datasets
+        if config.get("use_pca", False):
+            n_components = min(config.get("pca_components", 50), X_numeric.shape[1], X_numeric.shape[0] - 1)
+            pca = PCA(n_components=n_components)
+            X_pca = pca.fit_transform(X_numeric)
+            # Use first few PCA components as discretized lattice dimensions
+            n_lattice_dims = min(3, n_components)
+            pca_factors = {}
+            pca_dimensions = []
+            for i in range(n_lattice_dims):
+                col_name = f"pca_{i}"
+                bins = np.percentile(X_pca[:, i], np.linspace(0, 100, n_pca_bins + 1))
+                bins[0] = -np.inf
+                bins[-1] = np.inf
+                pca_factors[col_name] = np.digitize(X_pca[:, i], bins[1:-1])
+                pca_dimensions.append(Dimension(col_name, n_pca_bins))
+            X_numeric = X_pca
+        else:
+            pca_factors = {}
+            pca_dimensions = []
+    else:
+        X_numeric = np.zeros((len(df), 1), dtype=np.float32)
+        pca_factors = {}
+        pca_dimensions = []
+
+    # Process categorical factors
     factor_indices = {}
     dimensions = []
 
     for col in hierarchical_factors:
+        if col not in df.columns:
+            continue
         le = LabelEncoder()
         indices = le.fit_transform(df[col].astype(str))
-        factor_encoders[col] = le
         factor_indices[col] = indices
-        dimensions.append(Dimension(col, len(le.classes_)))
+        n_levels = len(le.classes_)
+        # Limit number of levels for memory efficiency
+        if n_levels > 20:
+            # Group rare categories
+            from collections import Counter
+            counts = Counter(indices)
+            top_cats = [k for k, v in counts.most_common(19)]
+            indices = np.array([i if i in top_cats else 19 for i in indices])
+            n_levels = 20
+        dimensions.append(Dimension(col, n_levels))
 
+    # Add PCA-derived dimensions
+    factor_indices.update(pca_factors)
+    dimensions.extend(pca_dimensions)
+
+    # Process target
     target_col = config["target"]
     le_target = LabelEncoder()
     y = le_target.fit_transform(df[target_col].astype(str))
@@ -210,8 +385,10 @@ def fit_logistic_model(
     decomp: Decomposed,
     max_order: int,
     prior_scales: Dict[str, float],
-    n_steps: int = 1000,
+    n_steps: int = 2000,
     learning_rate: float = 0.01,
+    sparse: bool = True,
+    l1_weight: float = 0.01,
 ) -> Dict:
     """Fit logistic regression with hierarchical coefficients.
 
@@ -222,6 +399,8 @@ def fit_logistic_model(
         prior_scales: Prior scales for each component
         n_steps: Number of optimization steps
         learning_rate: Learning rate
+        sparse: Whether to use L1 sparsity penalty
+        l1_weight: Weight for L1 penalty
 
     Returns:
         Fitted parameters
@@ -260,12 +439,21 @@ def fit_logistic_model(
             jnp.logaddexp(0, logits) - y * logits
         )
 
-        log_prior = 0.0
+        # L2 regularization (ridge)
+        l2_reg = 0.0
         for name, param in params.items():
             scale = prior_scales.get(name, 1.0)
-            log_prior += 0.5 * jnp.sum(param ** 2) / (scale ** 2)
+            l2_reg += 0.5 * jnp.sum(param ** 2) / (scale ** 2)
 
-        return bce + log_prior / len(y)
+        # L1 regularization for sparsity (elastic net style)
+        l1_reg = 0.0
+        if sparse:
+            for name, param in params.items():
+                order = decomp.component_order(name)
+                # Stronger sparsity for higher-order interactions
+                l1_reg += l1_weight * (1 + order) * jnp.sum(jnp.abs(param))
+
+        return bce + l2_reg / len(y) + l1_reg / len(y)
 
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(params)
@@ -349,6 +537,117 @@ def compute_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
         return 0.5
 
 
+def fit_baseline_models(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> List[Dict]:
+    """Fit baseline ML models and return metrics.
+
+    Args:
+        X_train: Training features
+        y_train: Training labels
+        X_test: Test features
+        y_test: Test labels
+
+    Returns:
+        List of result dictionaries for each baseline
+    """
+    results = []
+
+    # Logistic Regression
+    lr = LogisticRegression(max_iter=1000, random_state=42)
+    lr.fit(X_train, y_train)
+    lr_probs = lr.predict_proba(X_test)[:, 1]
+    results.append({
+        "method": "logistic_regression",
+        "order": -1,
+        "test_auc": compute_auc(y_test, lr_probs),
+        "test_accuracy": float(np.mean(lr.predict(X_test) == y_test)),
+    })
+
+    # Random Forest
+    rf = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+    rf.fit(X_train, y_train)
+    rf_probs = rf.predict_proba(X_test)[:, 1]
+    results.append({
+        "method": "random_forest",
+        "order": -1,
+        "test_auc": compute_auc(y_test, rf_probs),
+        "test_accuracy": float(np.mean(rf.predict(X_test) == y_test)),
+    })
+
+    # Gradient Boosting (sklearn)
+    gb = GradientBoostingClassifier(n_estimators=100, max_depth=5, random_state=42)
+    gb.fit(X_train, y_train)
+    gb_probs = gb.predict_proba(X_test)[:, 1]
+    results.append({
+        "method": "gradient_boosting",
+        "order": -1,
+        "test_auc": compute_auc(y_test, gb_probs),
+        "test_accuracy": float(np.mean(gb.predict(X_test) == y_test)),
+    })
+
+    # XGBoost
+    if HAS_XGBOOST:
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=100, max_depth=5, learning_rate=0.1,
+            random_state=42, use_label_encoder=False, eval_metric='logloss'
+        )
+        xgb_model.fit(X_train, y_train)
+        xgb_probs = xgb_model.predict_proba(X_test)[:, 1]
+        results.append({
+            "method": "xgboost",
+            "order": -1,
+            "test_auc": compute_auc(y_test, xgb_probs),
+            "test_accuracy": float(np.mean(xgb_model.predict(X_test) == y_test)),
+        })
+
+    # LightGBM
+    if HAS_LIGHTGBM:
+        lgb_model = lgb.LGBMClassifier(
+            n_estimators=100, max_depth=5, learning_rate=0.1,
+            random_state=42, verbose=-1
+        )
+        lgb_model.fit(X_train, y_train)
+        lgb_probs = lgb_model.predict_proba(X_test)[:, 1]
+        results.append({
+            "method": "lightgbm",
+            "order": -1,
+            "test_auc": compute_auc(y_test, lgb_probs),
+            "test_accuracy": float(np.mean(lgb_model.predict(X_test) == y_test)),
+        })
+
+    # MLP (Neural Network)
+    mlp = MLPClassifier(
+        hidden_layer_sizes=(64, 32), max_iter=500, random_state=42,
+        early_stopping=True, validation_fraction=0.1
+    )
+    mlp.fit(X_train, y_train)
+    mlp_probs = mlp.predict_proba(X_test)[:, 1]
+    results.append({
+        "method": "mlp",
+        "order": -1,
+        "test_auc": compute_auc(y_test, mlp_probs),
+        "test_accuracy": float(np.mean(mlp.predict(X_test) == y_test)),
+    })
+
+    # EBM (Explainable Boosting Machine)
+    if HAS_EBM:
+        ebm = ExplainableBoostingClassifier(random_state=42, n_jobs=1)
+        ebm.fit(X_train, y_train)
+        ebm_probs = ebm.predict_proba(X_test)[:, 1]
+        results.append({
+            "method": "ebm",
+            "order": -1,
+            "test_auc": compute_auc(y_test, ebm_probs),
+            "test_accuracy": float(np.mean(ebm.predict(X_test) == y_test)),
+        })
+
+    return results
+
+
 def run_single_dataset(
     dataset_name: str,
     exp_config: ExperimentConfig,
@@ -362,12 +661,30 @@ def run_single_dataset(
     Returns:
         List of result dictionaries
     """
-    df = download_dataset(dataset_name, exp_config.data_dir)
+    try:
+        df = download_dataset(dataset_name, exp_config.data_dir)
+    except Exception as e:
+        print(f"Failed to download {dataset_name}: {e}")
+        return []
 
     config = UCI_DATASETS[dataset_name]
-    hierarchical_factors = config["categorical"][:3]
 
-    data, dimensions = prepare_dataset(df, dataset_name, hierarchical_factors)
+    # Use categorical features, limited for memory
+    categorical = config.get("categorical", [])
+    if categorical == "all":
+        categorical = [c for c in df.columns if c != config["target"]][:5]
+    hierarchical_factors = categorical[:5]
+
+    try:
+        data, dimensions = prepare_dataset(df, dataset_name, hierarchical_factors)
+    except Exception as e:
+        print(f"Failed to prepare {dataset_name}: {e}")
+        return []
+
+    if not dimensions:
+        print(f"No dimensions for {dataset_name}, adding dummy")
+        data["dummy"] = np.zeros(len(data["y"]), dtype=np.int32)
+        dimensions = [Dimension("dummy", 1)]
 
     interactions = Interactions(dimensions=dimensions)
     n_features = data["X"].shape[1]
@@ -379,7 +696,8 @@ def run_single_dataset(
 
     results = []
 
-    methods = ["none", "fixed", "decay", "gen_preserving"]
+    # Include sparse method for better performance
+    methods = ["gen_preserving", "sparse"]
 
     for rep in tqdm(range(exp_config.n_replications), desc=f"{dataset_name} replications"):
         skf = StratifiedKFold(n_splits=exp_config.n_folds, shuffle=True,
@@ -388,16 +706,28 @@ def run_single_dataset(
         for fold, (train_idx, test_idx) in enumerate(skf.split(data["X"], data["y"])):
             train_data, test_data = create_train_test_split(data, train_idx, test_idx)
 
+            # Fit baseline models (XGBoost, LightGBM, RF, etc.)
+            baseline_results = fit_baseline_models(
+                train_data["X"], train_data["y"],
+                test_data["X"], test_data["y"]
+            )
+            for br in baseline_results:
+                br["dataset"] = dataset_name
+                br["fold"] = fold
+                br["replication"] = rep
+                results.append(br)
+
             for method in methods:
-                if method == "none":
-                    prior_scales = {name: 1e6 for name in decomp._tensor_parts.keys()}
-                elif method == "fixed":
-                    prior_scales = {name: 1.0 for name in decomp._tensor_parts.keys()}
-                elif method == "decay":
-                    prior_scales = {}
-                    for name in decomp._tensor_parts.keys():
-                        order = decomp.component_order(name)
-                        prior_scales[name] = 5.0 * (0.9 ** order)
+                use_sparse = (method == "sparse")
+
+                if method == "sparse":
+                    # Sparse: gen-preserving scales + L1 penalty
+                    prior_scales = decomp.generalization_preserving_scales(
+                        noise_scale=1.0,
+                        total_n=len(train_idx),
+                        c=0.3,  # Tighter bound
+                        per_component=True,
+                    )
                 else:
                     prior_scales = decomp.generalization_preserving_scales(
                         noise_scale=1.0,
@@ -408,7 +738,8 @@ def run_single_dataset(
 
                 for order in range(exp_config.max_order + 1):
                     params = fit_logistic_model(
-                        train_data, decomp, order, prior_scales
+                        train_data, decomp, order, prior_scales,
+                        sparse=use_sparse, l1_weight=0.01 if use_sparse else 0.0,
                     )
 
                     train_metrics = evaluate_model(train_data, decomp, params)
@@ -520,9 +851,11 @@ def plot_results(results: List[Dict], exp_config: ExperimentConfig):
 def main():
     parser = argparse.ArgumentParser(description="UCI benchmark experiments")
     parser.add_argument("--n_folds", type=int, default=5)
-    parser.add_argument("--n_replications", type=int, default=10)
+    parser.add_argument("--n_replications", type=int, default=5)
     parser.add_argument("--output_dir", type=str, default="results/uci_benchmarks")
     parser.add_argument("--quick", action="store_true", help="Run quick version")
+    parser.add_argument("--dataset", type=str, default=None, help="Run single dataset")
+    parser.add_argument("--datasets", type=str, default=None, help="Comma-separated list of datasets")
     args = parser.parse_args()
 
     if args.quick:
@@ -531,6 +864,20 @@ def main():
             n_replications=2,
             max_order=1,
             datasets=["german"],
+            output_dir=args.output_dir,
+        )
+    elif args.dataset:
+        config = ExperimentConfig(
+            n_folds=args.n_folds,
+            n_replications=args.n_replications,
+            datasets=[args.dataset],
+            output_dir=args.output_dir,
+        )
+    elif args.datasets:
+        config = ExperimentConfig(
+            n_folds=args.n_folds,
+            n_replications=args.n_replications,
+            datasets=args.datasets.split(","),
             output_dir=args.output_dir,
         )
     else:
