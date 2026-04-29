@@ -42,6 +42,41 @@ DATASET_CONFIGS = {
     'promis_substance_use': {'module': 'bayesianquilts.data.promis_substance_use'},
     'promis_neuropathic_pain': {'module': 'bayesianquilts.data.promis_neuropathic_pain', 'factorized': True},
     'promis_copd': {'module': 'bayesianquilts.data.promis_copd', 'factorized': True},
+    # Per-domain unidim GRMs (replace factorized PROMIS fits)
+    'promis_np__pain_interference':  {'module': 'bayesianquilts.data.promis_neuropathic_pain', 'domain': 'pain_interference'},
+    'promis_np__pain_behavior':      {'module': 'bayesianquilts.data.promis_neuropathic_pain', 'domain': 'pain_behavior'},
+    'promis_np__global_health':      {'module': 'bayesianquilts.data.promis_neuropathic_pain', 'domain': 'global_health'},
+    'promis_copd__depression':         {'module': 'bayesianquilts.data.promis_copd', 'domain': 'depression'},
+    'promis_copd__anxiety':            {'module': 'bayesianquilts.data.promis_copd', 'domain': 'anxiety'},
+    'promis_copd__anger':              {'module': 'bayesianquilts.data.promis_copd', 'domain': 'anger'},
+    'promis_copd__fatigue_experience': {'module': 'bayesianquilts.data.promis_copd', 'domain': 'fatigue_experience'},
+    'promis_copd__fatigue_impact':     {'module': 'bayesianquilts.data.promis_copd', 'domain': 'fatigue_impact'},
+    'promis_copd__pain_interference':  {'module': 'bayesianquilts.data.promis_copd', 'domain': 'pain_interference'},
+    'promis_copd__pain_behavior':      {'module': 'bayesianquilts.data.promis_copd', 'domain': 'pain_behavior'},
+    'promis_copd__physical_function':  {'module': 'bayesianquilts.data.promis_copd', 'domain': 'physical_function'},
+    'promis_copd__social_satisfaction':{'module': 'bayesianquilts.data.promis_copd', 'domain': 'social_satisfaction'},
+    # PROMIS Substance Use sub-banks (correlation-derived, Ward; max 50 items per bank)
+    'promis_su__bank1': {'module': 'bayesianquilts.data.promis_substance_use', 'bank': 'bank1'},
+    'promis_su__bank2': {'module': 'bayesianquilts.data.promis_substance_use', 'bank': 'bank2'},
+    'promis_su__bank3': {'module': 'bayesianquilts.data.promis_substance_use', 'bank': 'bank3'},
+    'promis_su__bank4': {'module': 'bayesianquilts.data.promis_substance_use', 'bank': 'bank4'},
+    'promis_su__bank5': {'module': 'bayesianquilts.data.promis_substance_use', 'bank': 'bank5'},
+    'promis_su__bank6': {'module': 'bayesianquilts.data.promis_substance_use', 'bank': 'bank6'},
+    # PROMIS 1 Wave 1 calibration (14 health domains; planned-missing-by-form)
+    'promis_w1__alcohol_use':         {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'alcohol_use'},
+    'promis_w1__anger':               {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'anger'},
+    'promis_w1__anxiety':             {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'anxiety'},
+    'promis_w1__depression':          {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'depression'},
+    'promis_w1__fatigue_experience':  {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'fatigue_experience'},
+    'promis_w1__fatigue_impact':      {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'fatigue_impact'},
+    'promis_w1__pain_behavior':       {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'pain_behavior'},
+    'promis_w1__pain_interference':   {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'pain_interference'},
+    'promis_w1__pain_quality':        {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'pain_quality'},
+    'promis_w1__physical_function_a': {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'physical_function_a'},
+    'promis_w1__physical_function_b': {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'physical_function_b'},
+    'promis_w1__physical_function_c': {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'physical_function_c'},
+    'promis_w1__social_personal':     {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'social_personal'},
+    'promis_w1__social_satisfaction': {'module': 'bayesianquilts.data.promis_wave1', 'domain': 'social_satisfaction'},
 }
 
 
@@ -162,16 +197,28 @@ def run_single_variant(model, data, variant_name, output_dir,
 
 
 def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
-                step_size, seed, variants, sampler='nuts', dense_mass=False):
+                step_size, seed, variants, sampler='nuts', dense_mass=False,
+                mcmc_disc_prior_scale=None, mcmc_ddiff_prior_scale=None,
+                mcmc_d0_prior_scale=None):
     import importlib
     import inspect
     from pathlib import Path
     from bayesianquilts.irt.grm import GRModel
 
+    def _apply_prior_overrides(model):
+        if mcmc_disc_prior_scale is not None:
+            model.mcmc_disc_prior_scale = mcmc_disc_prior_scale
+        if mcmc_ddiff_prior_scale is not None:
+            model.mcmc_ddiff_prior_scale = mcmc_ddiff_prior_scale
+        if mcmc_d0_prior_scale is not None:
+            model.mcmc_d0_prior_scale = mcmc_d0_prior_scale
+        return model
+
     config = DATASET_CONFIGS[dataset_name]
     is_factorized = config.get('factorized', False)
+    domain = config.get('domain')
+    bank = config.get('bank')
     mod = importlib.import_module(config['module'])
-    item_keys = mod.item_keys
     response_cardinality = mod.response_cardinality
 
     if is_factorized:
@@ -182,25 +229,33 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     model_path = Path(model_dir)
     output_dir = model_path.parent
 
-    print(f"\n{'='*60}")
-    print(f"Marginal MCMC: {dataset_name.upper()}")
-    print(f"  Items: {len(item_keys)}, K: {response_cardinality}")
-    print(f"  Chains: {num_chains}, Warmup: {num_warmup}, Samples: {num_samples}")
-    print(f"  Step size: {step_size}")
-    print(f"  Variants: {variants}")
-    print(f"{'='*60}")
-
-    # Load data
+    # Load data first (per-domain loaders set ``mod.item_keys`` only inside get_data)
     if is_factorized and hasattr(mod, 'get_multidomain_data'):
         df, num_people, scale_indices = mod.get_multidomain_data(
             polars_out=True, min_items=10)
     else:
+        sig = inspect.signature(mod.get_data).parameters
         get_data_kwargs = {'polars_out': True}
-        if 'reorient' in inspect.signature(mod.get_data).parameters:
+        if 'reorient' in sig:
             get_data_kwargs['reorient'] = True
+        if domain is not None and 'domain' in sig:
+            get_data_kwargs['domain'] = domain
+        if bank is not None and 'bank' in sig:
+            get_data_kwargs['bank'] = bank
         df, num_people = mod.get_data(**get_data_kwargs)
+    item_keys = list(mod.item_keys)
     base_data = make_data_dict(df, num_people)
+
+    sub_label = domain or bank
+    print(f"\n{'='*60}")
+    print(f"Marginal MCMC: {dataset_name.upper()}"
+          + (f"  [{sub_label}]" if sub_label else ""))
+    print(f"  Items: {len(item_keys)}, K: {response_cardinality}")
     print(f"  People: {num_people}")
+    print(f"  Chains: {num_chains}, Warmup: {num_warmup}, Samples: {num_samples}")
+    print(f"  Step size: {step_size}")
+    print(f"  Variants: {variants}")
+    print(f"{'='*60}")
 
     # Load pairwise stacking model (needed for pairwise and mixed)
     pairwise_model = None
@@ -212,7 +267,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
 
     # ---- Baseline: no imputation ----
     if 'baseline' in variants:
-        model = ModelClass.load_from_disk(str(model_path))
+        model = _apply_prior_overrides(ModelClass.load_from_disk(str(model_path)))
         data = dict(base_data)  # no imputation PMFs
         run_single_variant(model, data, 'baseline', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed,
@@ -222,7 +277,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
 
     # ---- Pairwise: pairwise stacking only ----
     if 'pairwise' in variants and pairwise_model is not None:
-        model = ModelClass.load_from_disk(str(model_path))
+        model = _apply_prior_overrides(ModelClass.load_from_disk(str(model_path)))
         model.imputation_model = pairwise_model
         data = dict(base_data)
         pmfs, weights = model._compute_batch_pmfs(data)
@@ -239,7 +294,7 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     # ---- Mixed: pairwise + IRT baseline blend ----
     if 'mixed' in variants and pairwise_model is not None:
         from bayesianquilts.imputation.mixed import IrtMixedImputationModel
-        model = ModelClass.load_from_disk(str(model_path))
+        model = _apply_prior_overrides(ModelClass.load_from_disk(str(model_path)))
 
         # Build mixed imputation model from pairwise + baseline
         # Need calibrated expectations for the IRT component
@@ -262,12 +317,10 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         model.imputation_model = mixed_model
 
         data = dict(base_data)
-        pmfs, weights = model._compute_batch_pmfs(data)
+        pmfs, _ = model._compute_batch_pmfs(data)
         if pmfs is not None:
             data['_imputation_pmfs'] = pmfs
-            if weights is not None:
-                data['_imputation_weights'] = weights
-        print(f"  Mixed imputation PMFs attached (with IS weights)")
+        print(f"  Mixed imputation PMFs attached")
         run_single_variant(model, data, 'mixed', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed + 2,
                            sampler=sampler, dense_mass=dense_mass)
@@ -302,6 +355,15 @@ def main():
     parser.add_argument('--dense-mass', action='store_true',
                         help='Use dense mass matrix (default: diagonal). '
                              'NUTS only; ignored for MALA.')
+    parser.add_argument('--mcmc-disc-prior-scale', type=float, default=None,
+                        help='Override MCMC discrimination prior scale '
+                             '(HalfNormal). Default 0.5; tighter (e.g. 0.2) '
+                             'helps multimodal real-data posteriors.')
+    parser.add_argument('--mcmc-ddiff-prior-scale', type=float, default=None,
+                        help='Override MCMC ddifficulties prior scale (HalfN).')
+    parser.add_argument('--mcmc-d0-prior-scale', type=float, default=None,
+                        help='Override MCMC difficulties0 prior scale '
+                             '(Normal at d0_loc). Default 0.3.')
     args = parser.parse_args()
 
     model_dir = args.model_dir or os.path.expanduser(
@@ -322,6 +384,9 @@ def main():
         variants=args.variants,
         sampler=args.sampler,
         dense_mass=args.dense_mass,
+        mcmc_disc_prior_scale=args.mcmc_disc_prior_scale,
+        mcmc_ddiff_prior_scale=args.mcmc_ddiff_prior_scale,
+        mcmc_d0_prior_scale=args.mcmc_d0_prior_scale,
     )
 
 

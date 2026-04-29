@@ -40,6 +40,57 @@ import yaml
 DATASETS = ['grit', 'tma', 'rwa', 'npi', 'wpi', 'eqsq',
             'promis_sleep', 'promis_substance_use']
 
+# Per-domain unidim PROMIS GRMs: dataset_name -> (module, kwargs for get_data).
+PER_DOMAIN_CONFIGS = {
+    'promis_np__pain_interference':    ('bayesianquilts.data.promis_neuropathic_pain', {'domain': 'pain_interference'}),
+    'promis_np__pain_behavior':        ('bayesianquilts.data.promis_neuropathic_pain', {'domain': 'pain_behavior'}),
+    'promis_np__global_health':        ('bayesianquilts.data.promis_neuropathic_pain', {'domain': 'global_health'}),
+    'promis_copd__depression':         ('bayesianquilts.data.promis_copd', {'domain': 'depression'}),
+    'promis_copd__anxiety':            ('bayesianquilts.data.promis_copd', {'domain': 'anxiety'}),
+    'promis_copd__anger':              ('bayesianquilts.data.promis_copd', {'domain': 'anger'}),
+    'promis_copd__fatigue_experience': ('bayesianquilts.data.promis_copd', {'domain': 'fatigue_experience'}),
+    'promis_copd__fatigue_impact':     ('bayesianquilts.data.promis_copd', {'domain': 'fatigue_impact'}),
+    'promis_copd__pain_interference':  ('bayesianquilts.data.promis_copd', {'domain': 'pain_interference'}),
+    'promis_copd__pain_behavior':      ('bayesianquilts.data.promis_copd', {'domain': 'pain_behavior'}),
+    'promis_copd__physical_function':  ('bayesianquilts.data.promis_copd', {'domain': 'physical_function'}),
+    'promis_copd__social_satisfaction':('bayesianquilts.data.promis_copd', {'domain': 'social_satisfaction'}),
+    'promis_su__bank1':                ('bayesianquilts.data.promis_substance_use', {'bank': 'bank1'}),
+    'promis_su__bank2':                ('bayesianquilts.data.promis_substance_use', {'bank': 'bank2'}),
+    'promis_su__bank3':                ('bayesianquilts.data.promis_substance_use', {'bank': 'bank3'}),
+    'promis_su__bank4':                ('bayesianquilts.data.promis_substance_use', {'bank': 'bank4'}),
+    'promis_su__bank5':                ('bayesianquilts.data.promis_substance_use', {'bank': 'bank5'}),
+    'promis_su__bank6':                ('bayesianquilts.data.promis_substance_use', {'bank': 'bank6'}),
+    'promis_w1__alcohol_use':          ('bayesianquilts.data.promis_wave1', {'domain': 'alcohol_use'}),
+    'promis_w1__anger':                ('bayesianquilts.data.promis_wave1', {'domain': 'anger'}),
+    'promis_w1__anxiety':              ('bayesianquilts.data.promis_wave1', {'domain': 'anxiety'}),
+    'promis_w1__depression':           ('bayesianquilts.data.promis_wave1', {'domain': 'depression'}),
+    'promis_w1__fatigue_experience':   ('bayesianquilts.data.promis_wave1', {'domain': 'fatigue_experience'}),
+    'promis_w1__fatigue_impact':       ('bayesianquilts.data.promis_wave1', {'domain': 'fatigue_impact'}),
+    'promis_w1__pain_behavior':        ('bayesianquilts.data.promis_wave1', {'domain': 'pain_behavior'}),
+    'promis_w1__pain_interference':    ('bayesianquilts.data.promis_wave1', {'domain': 'pain_interference'}),
+    'promis_w1__pain_quality':         ('bayesianquilts.data.promis_wave1', {'domain': 'pain_quality'}),
+    'promis_w1__physical_function_a':  ('bayesianquilts.data.promis_wave1', {'domain': 'physical_function_a'}),
+    'promis_w1__physical_function_b':  ('bayesianquilts.data.promis_wave1', {'domain': 'physical_function_b'}),
+    'promis_w1__physical_function_c':  ('bayesianquilts.data.promis_wave1', {'domain': 'physical_function_c'}),
+    'promis_w1__social_personal':      ('bayesianquilts.data.promis_wave1', {'domain': 'social_personal'}),
+    'promis_w1__social_satisfaction':  ('bayesianquilts.data.promis_wave1', {'domain': 'social_satisfaction'}),
+}
+
+# Defaults used when no existing config.yaml is present (per-domain fresh fits).
+DEFAULT_GRM_CONFIG = {
+    'dimensions': 1,
+    'discrimination_prior': 'half_normal',
+    'discrimination_prior_scale': 2.0,
+    'eta_scale': 0.01,
+    'slab_df': 4,
+    'slab_scale': 2.0,
+    'positive_discriminations': True,
+    'parameterization': 'softplus',
+    'weight_exponent': 1.0,
+    'full_rank': False,
+    'include_independent': False,
+}
+
 
 def load_existing_config(baseline_dir: Path):
     cfg_path = baseline_dir / 'config.yaml'
@@ -61,28 +112,41 @@ def refit(dataset_name, force=False,
     base_dir = Path.home() / 'workspace/bayesianquilts/notebooks/irt' / dataset_name
     baseline_dir = base_dir / 'grm_baseline'
 
-    mod = importlib.import_module(f'bayesianquilts.data.{dataset_name}')
-    item_keys = mod.item_keys
+    if dataset_name in PER_DOMAIN_CONFIGS:
+        module_name, sub_kwargs = PER_DOMAIN_CONFIGS[dataset_name]
+    else:
+        module_name = f'bayesianquilts.data.{dataset_name}'
+        sub_kwargs = {}
+    mod = importlib.import_module(module_name)
     K = mod.response_cardinality
 
     sig = inspect.signature(mod.get_data).parameters
     has_reorient = 'reorient' in sig
-    if not has_reorient and not force:
+    if not has_reorient and not force and not sub_kwargs:
         print(f"=== {dataset_name.upper()}: no reorient support, skipping (use --force to override)")
         return
 
     kw = {'polars_out': True}
     if has_reorient:
         kw['reorient'] = True
+    for k, v in sub_kwargs.items():
+        if k in sig:
+            kw[k] = v
     df, N = mod.get_data(**kw)
+    item_keys = list(mod.item_keys)
 
     data = {col: df[col].to_numpy().astype(np.float32) for col in df.columns}
     data['person'] = np.arange(N, dtype=np.float32)
 
     existing = load_existing_config(baseline_dir)
     if existing is None:
-        print(f"ERROR: no existing config at {baseline_dir}")
-        return
+        if not sub_kwargs:
+            print(f"ERROR: no existing config at {baseline_dir}")
+            return
+        # Fresh per-domain/per-bank fit: use defaults
+        existing = dict(DEFAULT_GRM_CONFIG)
+        baseline_dir.mkdir(parents=True, exist_ok=True)
+        print(f"    (no existing config.yaml; using DEFAULT_GRM_CONFIG)")
 
     # Preserve the *exact* hyperparameters from the saved config
     model_kwargs = dict(
@@ -163,7 +227,8 @@ def refit(dataset_name, force=False,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--dataset', required=True, choices=DATASETS + ['all'])
+    p.add_argument('--dataset', required=True,
+                   choices=DATASETS + list(PER_DOMAIN_CONFIGS.keys()) + ['all'])
     p.add_argument('--force', action='store_true',
                    help='Refit even for datasets without reorient support')
     p.add_argument('--lr', type=float, default=5e-4)

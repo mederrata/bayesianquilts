@@ -40,7 +40,7 @@ DATASET_MODULES = {
     'promis_substance_use': 'bayesianquilts.data.promis_substance_use',
 }
 
-# PROMIS per-domain datasets: copd_<domain> and np_<domain>
+# PROMIS per-domain datasets: copd_<domain>, np_<domain>, w1_<domain>
 _PROMIS_COPD_DOMAINS = [
     'depression', 'anxiety', 'anger', 'fatigue_experience',
     'fatigue_impact', 'pain_interference', 'pain_behavior',
@@ -50,10 +50,19 @@ _PROMIS_NP_DOMAINS = [
     'pain_interference', 'pain_behavior', 'global_health',
     'physical_function',
 ]
+_PROMIS_W1_DOMAINS = [
+    'alcohol_use', 'anger', 'anxiety', 'depression',
+    'fatigue_experience', 'fatigue_impact',
+    'pain_behavior', 'pain_interference', 'pain_quality',
+    'physical_function_a', 'physical_function_b', 'physical_function_c',
+    'social_personal', 'social_satisfaction',
+]
 for _d in _PROMIS_COPD_DOMAINS:
     DATASET_MODULES[f'copd_{_d}'] = 'bayesianquilts.data.promis_copd'
 for _d in _PROMIS_NP_DOMAINS:
     DATASET_MODULES[f'np_{_d}'] = 'bayesianquilts.data.promis_neuropathic_pain'
+for _d in _PROMIS_W1_DOMAINS:
+    DATASET_MODULES[f'w1_{_d}'] = 'bayesianquilts.data.promis_wave1'
 
 
 def load_dataset(dataset_name: str, cache_dir=None, gender=None):
@@ -81,13 +90,15 @@ def load_dataset(dataset_name: str, cache_dir=None, gender=None):
     if cache_dir is not None:
         kwargs['cache_dir'] = cache_dir
 
-    # Handle PROMIS per-domain datasets (copd_<domain>, np_<domain>)
+    # Handle PROMIS per-domain datasets (copd_<domain>, np_<domain>, w1_<domain>)
     import inspect
     domain = None
     if dataset_name.startswith('copd_'):
         domain = dataset_name[len('copd_'):]
     elif dataset_name.startswith('np_'):
         domain = dataset_name[len('np_'):]
+    elif dataset_name.startswith('w1_'):
+        domain = dataset_name[len('w1_'):]
     if domain is not None and 'domain' in inspect.signature(mod.get_data).parameters:
         kwargs['domain'] = domain
 
@@ -443,6 +454,13 @@ def fit_grm_baseline_mcmc(
 
     calibrate_model(model)
 
+    # calibrate_model overwrites calibrated_expectations from the ADVI
+    # surrogate; for marginal MCMC the posterior abilities live in the
+    # MCMC EAP, not the ADVI loc. Inject the EAP so downstream code that
+    # reads calibrated_expectations['abilities'] sees the MCMC result.
+    eap_arr = np.asarray(eap_result['eap'])
+    model.calibrated_expectations['abilities'] = eap_arr.reshape(-1, 1, 1, 1)
+
     save_dir = Path(save_dir)
     model.save_to_disk(save_dir)
     save_dict = {var: np.array(s) for var, s in mcmc_samples.items()}
@@ -529,6 +547,12 @@ def fit_grm_imputed_mcmc(
     eap_result = model.compute_eap_abilities(data_imp)
 
     calibrate_model(model)
+
+    # See note in fit_grm_baseline_mcmc — inject MCMC EAP so downstream code
+    # reading calibrated_expectations['abilities'] sees the marginal MCMC
+    # posterior mean rather than the ADVI initialization.
+    eap_arr = np.asarray(eap_result['eap'])
+    model.calibrated_expectations['abilities'] = eap_arr.reshape(-1, 1, 1, 1)
 
     save_dir = Path(save_dir)
     model.save_to_disk(save_dir)
