@@ -93,25 +93,24 @@ UCI_DATASETS = {
         "p": 7,
     },
     "taiwan": {
-        "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/00350/default%20of%20credit%20card%20clients.xls",
         "loader": "openml",
         "openml_id": 42477,
-        "target": "default_payment_next_month",
-        "categorical": ["SEX", "EDUCATION", "MARRIAGE"],
-        "numeric": ["LIMIT_BAL", "AGE", "PAY_0", "PAY_2", "PAY_3", "PAY_4", "PAY_5", "PAY_6",
-                   "BILL_AMT1", "BILL_AMT2", "BILL_AMT3", "BILL_AMT4", "BILL_AMT5", "BILL_AMT6",
-                   "PAY_AMT1", "PAY_AMT2", "PAY_AMT3", "PAY_AMT4", "PAY_AMT5", "PAY_AMT6"],
+        "target": "y",
+        "categorical": ["x2", "x3", "x4"],  # SEX, EDUCATION, MARRIAGE
+        "numeric": ["x1", "x5", "x6", "x7", "x8", "x9", "x10", "x11",  # LIMIT_BAL, AGE, PAY_0-6
+                   "x12", "x13", "x14", "x15", "x16", "x17",  # BILL_AMT1-6
+                   "x18", "x19", "x20", "x21", "x22", "x23"],  # PAY_AMT1-6
         "N": 30000,
         "p": 23,
     },
     "heart": {
-        "url": "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data",
         "loader": "openml",
-        "openml_id": 43,
-        "target": "target",
-        "categorical": ["sex", "cp", "fbs", "restecg", "exang", "slope", "ca", "thal"],
-        "numeric": ["age", "trestbps", "chol", "thalach", "oldpeak"],
-        "N": 303,
+        "openml_id": 53,  # heart-statlog dataset
+        "target": "class",
+        "categorical": ["sex", "chest", "fasting_blood_sugar", "resting_electrocardiographic_results",
+                       "exercise_induced_angina", "slope", "number_of_major_vessels", "thal"],
+        "numeric": ["age", "resting_blood_pressure", "serum_cholestoral", "maximum_heart_rate_achieved", "oldpeak"],
+        "N": 270,
         "p": 13,
     },
     "bioresponse": {
@@ -364,8 +363,12 @@ def prepare_dataset(
 
     # Process target
     target_col = config["target"]
-    le_target = LabelEncoder()
-    y = le_target.fit_transform(df[target_col].astype(str))
+    if config.get("binarize_target", False):
+        # Convert multiclass to binary (e.g., heart disease: 0 vs 1-4)
+        y = (df[target_col].astype(int) > 0).astype(int).values
+    else:
+        le_target = LabelEncoder()
+        y = le_target.fit_transform(df[target_col].astype(str))
 
     data = {
         "X": X_numeric,
