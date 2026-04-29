@@ -76,7 +76,7 @@ UCI_DATASETS = {
             "capital_gain", "capital_loss", "hours_per_week", "native_country", "income"
         ],
         "target": "income",
-        "categorical": ["workclass", "education", "marital_status", "occupation", "sex"],
+        "categorical": ["education", "marital_status"],
         "numeric": ["age", "education_num", "capital_gain", "capital_loss", "hours_per_week"],
         "N": 48842,
         "p": 6,
@@ -669,11 +669,13 @@ def run_single_dataset(
     config = UCI_DATASETS[dataset_name]
 
     # Use categorical features, limited for memory
-    # Limit to 3 factors to avoid combinatorial explosion
+    # Limit factors based on dataset size
+    n_samples = len(df)
+    max_factors = 3 if n_samples < 10000 else 2
     categorical = config.get("categorical", [])
     if categorical == "all":
-        categorical = [c for c in df.columns if c != config["target"]][:3]
-    hierarchical_factors = categorical[:3]
+        categorical = [c for c in df.columns if c != config["target"]][:max_factors]
+    hierarchical_factors = categorical[:max_factors]
 
     try:
         data, dimensions = prepare_dataset(df, dataset_name, hierarchical_factors)
