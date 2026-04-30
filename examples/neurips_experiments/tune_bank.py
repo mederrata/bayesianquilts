@@ -90,14 +90,16 @@ def test_config(cat_cols_use, num_bins_list, max_order=2):
 ALL_CATS = ["job", "marital", "education", "housing", "contact", "poutcome"]  # Skip loan (2 levels)
 
 configs = [
-    # Coarse bins
-    (ALL_CATS, [("age", 3), ("duration", 3), ("balance", 3)], "6cat + 3x3bins"),
-    # Medium bins
-    (ALL_CATS, [("age", 5), ("duration", 5), ("balance", 5)], "6cat + 3x5bins"),
-    # Fine bins
-    (ALL_CATS, [("age", 8), ("duration", 8), ("balance", 8)], "6cat + 3x8bins"),
-    # More numeric
-    (ALL_CATS, [("age", 6), ("duration", 6), ("balance", 6), ("campaign", 4)], "6cat + 4num"),
+    # Start from best config and refine further
+    (ALL_CATS, [("age", 6), ("duration", 6), ("balance", 6), ("campaign", 4)], "6cat + 4num (baseline)"),
+    # Add more numeric features
+    (ALL_CATS, [("age", 8), ("duration", 8), ("balance", 8), ("campaign", 4), ("pdays", 4)], "6cat + 5num"),
+    # Full numeric complement with coarse bins
+    (ALL_CATS, [("age", 6), ("duration", 6), ("balance", 6), ("campaign", 4), ("pdays", 4), ("previous", 4)], "6cat + 6num"),
+    # Refine key predictors more (duration is strong predictor in Bank)
+    (ALL_CATS, [("age", 8), ("duration", 10), ("balance", 8), ("campaign", 5), ("pdays", 4)], "6cat + 5num refined"),
+    # Very fine duration
+    (ALL_CATS, [("age", 8), ("duration", 12), ("balance", 8), ("campaign", 6), ("pdays", 5), ("previous", 4)], "6cat + 6num fine"),
 ]
 
 for cats, nums, desc in configs:
