@@ -1780,16 +1780,79 @@ class IRTModel(BayesianModel):
 
         item_var_list = self._item_var_list()
 
-        # Build item-only prior
+        # Build item-only prior.
+        #
+        # Some entries in the joint prior are callables (conditional
+        # distributions) whose signature names parent variables.  When
+        # those parents are not in item_var_list we must either pull
+        # them into the sub-prior or freeze the callable at the current
+        # ADVI point estimate.
+        import inspect as _inspect
+        full_model = self.joint_prior_distribution.model
         prior_dict = {}
         bijectors = {}
+
+        # Collect point estimates for freezing conditionals
+        def _point_estimate(var_name):
+            """Best available point estimate for a variable."""
+            if self.params is not None:
+                for pk in self.params:
+                    if pk.startswith(var_name) and pk.endswith('loc'):
+                        return self.params[pk]
+            return self.joint_prior_distribution.sample(
+                seed=jax.random.PRNGKey(0))[var_name]
+
+        # Resolve each item variable
         for v in item_var_list:
-            # Extract the marginal prior for this variable
-            prior_dict[v] = self.joint_prior_distribution.model[v]
-            if hasattr(self, 'bijectors') and v in self.bijectors:
-                bijectors[v] = self.bijectors[v]
+            entry = full_model[v]
+            if callable(entry) and not isinstance(entry, tfd.Distribution):
+                sig = _inspect.signature(entry)
+                missing = [p for p in sig.parameters if p not in item_var_list]
+                if missing:
+                    # Check if all missing parents themselves have plain
+                    # (non-callable) priors we can include
+                    all_plain = all(
+                        p in full_model
+                        and (not callable(full_model[p])
+                             or isinstance(full_model[p], tfd.Distribution))
+                        for p in missing
+                    )
+                    if all_plain:
+                        # Pull parent(s) into prior_dict
+                        for p in missing:
+                            if p not in prior_dict:
+                                prior_dict[p] = full_model[p]
+                                if hasattr(self, 'bijectors') and p in self.bijectors:
+                                    bijectors[p] = self.bijectors[p]
+                                else:
+                                    bijectors[p] = tfb.Identity()
+                        prior_dict[v] = entry
+                    else:
+                        # Freeze conditional at point estimates
+                        parent_vals = {p: _point_estimate(p) for p in missing}
+                        _warn_fallback(
+                            f"Prior for '{v}' depends on {missing} which "
+                            f"have conditional priors; freezing at point "
+                            f"estimates for marginal ADVI")
+                        # Bind only the missing parents; keep others as
+                        # free parameters in the sub-prior
+                        remaining = [p for p in sig.parameters
+                                     if p not in missing]
+                        if remaining:
+                            prior_dict[v] = lambda _entry=entry, _pv=parent_vals, **kw: _entry(**{**_pv, **kw})
+                        else:
+                            prior_dict[v] = entry(**parent_vals)
+                else:
+                    # All parents are item vars — keep as-is
+                    prior_dict[v] = entry
             else:
-                bijectors[v] = tfb.Identity()
+                prior_dict[v] = entry
+
+            if v not in bijectors:
+                if hasattr(self, 'bijectors') and v in self.bijectors:
+                    bijectors[v] = self.bijectors[v]
+                else:
+                    bijectors[v] = tfb.Identity()
 
         item_prior = tfd.JointDistributionNamed(prior_dict)
 
@@ -1812,24 +1875,70 @@ class IRTModel(BayesianModel):
 
         key = jax.random.PRNGKey(seed)
 
+        # item_var_list may differ from prior_dict keys when parents
+        # (e.g. 'mu', 'global_scale') were pulled in.
+        surrogate_vars = list(prior_dict.keys())
+
+        # Check if analytical entropy is available
+        _test_surrogate = surrogate_gen(marginal_params)
+        try:
+            _test_entropy = _test_surrogate.entropy()
+            _use_analytical_entropy = jnp.isfinite(_test_entropy)
+        except (NotImplementedError, Exception):
+            _use_analytical_entropy = False
+
+        if verbose:
+            print(f"  Entropy: {'analytical' if _use_analytical_entropy else 'sampling-based'}")
+
+        # Use a mutable counter so each call gets a different PRNG key
+        _call_counter = [0]
+
         def loss_fn(params):
+            _call_counter[0] += 1
+            sample_key = jax.random.PRNGKey(seed + _call_counter[0])
             surrogate = surrogate_gen(params)
-            samples = surrogate.sample(num_samples, seed=key)
+            samples = surrogate.sample(num_samples, seed=sample_key)
             # ELBO = E_q[log p(data, Xi)] - E_q[log q(Xi)]
             log_probs = []
             for s_idx in range(num_samples):
-                sample = {v: samples[v][s_idx] for v in item_var_list}
+                sample = {v: samples[v][s_idx] for v in surrogate_vars}
                 lp = self.marginal_log_prob(
                     data, theta_grid=theta_grid, **sample
                 )
                 log_probs.append(lp)
             log_joint = jnp.mean(jnp.stack(log_probs))
-            entropy = surrogate.entropy()
+
+            if _use_analytical_entropy:
+                entropy = surrogate.entropy()
+            else:
+                # Estimate entropy as -E_q[log q]
+                log_q_vals = []
+                for s_idx in range(num_samples):
+                    log_q_vals.append(surrogate.log_prob(
+                        {v: samples[v][s_idx] for v in surrogate_vars}
+                    ))
+                entropy = -jnp.mean(jnp.stack(log_q_vals))
             return -(log_joint + entropy)
+
+        # training_loop expects a data_iterator and steps_per_epoch even
+        # when data is already captured in the loss_fn closure.  Provide
+        # a single-step dummy iterator so the optimiser takes one gradient
+        # step per epoch (the loss already averages over the full dataset).
+        def _dummy_iterator():
+            while True:
+                yield None
+
+        # Wrap loss_fn to match training_loop's (data, params) signature
+        _orig_loss = loss_fn
+
+        def _batched_loss(data_batch, params):
+            return _orig_loss(params)
 
         losses, trained_params = training_loop(
             initial_values=marginal_params,
-            loss_fn=loss_fn,
+            loss_fn=_batched_loss,
+            data_iterator=_dummy_iterator(),
+            steps_per_epoch=1,
             num_epochs=num_epochs,
             learning_rate=learning_rate,
             **training_kwargs,
@@ -1977,16 +2086,16 @@ class IRTModel(BayesianModel):
                       f"(+{num_samples} samples each)")
                 sys.stdout.flush()
         else:
-            self._mcmc_chain_states = []
-            self._mcmc_chain_step_sizes = []
-            self._mcmc_chain_inv_mass = []
+            object.__setattr__(self, '_mcmc_chain_states', [])
+            object.__setattr__(self, '_mcmc_chain_step_sizes', [])
+            object.__setattr__(self, '_mcmc_chain_inv_mass', [])
         # On resume, recover the backing lists from the saved state dict so that
         # the per-chain update at the end of the loop works even after a
         # serialize/reload cycle that stripped the private attributes.
         if resume and not hasattr(self, '_mcmc_chain_states'):
-            self._mcmc_chain_states = list(saved['states'])
-            self._mcmc_chain_step_sizes = list(saved['step_sizes'])
-            self._mcmc_chain_inv_mass = list(saved['inv_mass_matrices'])
+            object.__setattr__(self, '_mcmc_chain_states', list(saved['states']))
+            object.__setattr__(self, '_mcmc_chain_step_sizes', list(saved['step_sizes']))
+            object.__setattr__(self, '_mcmc_chain_inv_mass', list(saved['inv_mass_matrices']))
 
         all_samples = {var: [] for var in item_var_list}
         all_accept = []
@@ -2124,11 +2233,14 @@ class IRTModel(BayesianModel):
                 self._mcmc_chain_inv_mass.append(inv_mass_matrix)
 
         # Save resume state
-        self.mcmc_state_ = {
+        # Use object.__setattr__ to bypass Flax NNX pytree checks —
+        # mcmc_state_ contains JAX arrays (NUTS states) that are internal
+        # mutable state, not model parameters for serialization.
+        object.__setattr__(self, 'mcmc_state_', {
             'states': self._mcmc_chain_states,
             'step_sizes': self._mcmc_chain_step_sizes,
             'inv_mass_matrices': self._mcmc_chain_inv_mass,
-        }
+        })
 
         # Stack chains: (num_chains, num_samples, ...)
         result = {}
@@ -2382,16 +2494,33 @@ class IRTModel(BayesianModel):
             )
 
         if item_params is None:
-            if not hasattr(self, 'mcmc_samples') or self.mcmc_samples is None:
+            if hasattr(self, 'mcmc_samples') and self.mcmc_samples is not None:
+                item_params = {}
+                for var, samples in self.mcmc_samples.items():
+                    # (chains, samples, ...) → mean over chains and samples
+                    item_params[var] = jnp.mean(
+                        samples.reshape(-1, *samples.shape[2:]), axis=0
+                    )
+            elif (hasattr(self, 'marginal_params')
+                  and self.marginal_params is not None
+                  and hasattr(self, 'marginal_surrogate_generator')
+                  and self.marginal_surrogate_generator is not None):
+                # Use marginal ADVI posterior means
+                surrogate = self.marginal_surrogate_generator(
+                    self.marginal_params)
+                post_samples = surrogate.sample(
+                    100, seed=jax.random.PRNGKey(0))
+                item_var_list = self._item_var_list()
+                item_params = {}
+                for var in item_var_list:
+                    if var in post_samples:
+                        item_params[var] = jnp.mean(
+                            post_samples[var], axis=0)
+            else:
                 raise ValueError(
-                    "No item_params provided and no mcmc_samples available. "
-                    "Run fit_marginal_mcmc first or pass item_params."
-                )
-            item_params = {}
-            for var, samples in self.mcmc_samples.items():
-                # (chains, samples, ...) → mean over chains and samples
-                item_params[var] = jnp.mean(
-                    samples.reshape(-1, *samples.shape[2:]), axis=0
+                    "No item_params provided and no mcmc_samples or "
+                    "marginal ADVI params available. Run fit_marginal_advi "
+                    "or fit_marginal_mcmc first, or pass item_params."
                 )
 
         # (Q, I, K)

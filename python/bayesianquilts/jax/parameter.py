@@ -784,6 +784,161 @@ class Decomposed(object):
 
         return cumulative
 
+    def lookup_flat(
+        self, interaction_indices: jnp.ndarray, params: dict, dtype=None
+    ) -> jnp.ndarray:
+        """Simple lookup for point estimates without batch dimensions.
+
+        A more efficient lookup for MAP estimation where params are simple
+        tensors without sample/batch dimensions. Handles the common case
+        where params come from an optimization loop.
+
+        Handles both:
+        - Raveled tensors (from generate_tensors): shapes like (6, 4) for 3x2 interaction
+        - Canonical tensors (from _tensor_part_shapes): shapes like (3, 2, 4) with explicit dims
+
+        Args:
+            interaction_indices: Indices for each dimension, shape (n_samples, n_dims)
+            params: Dict mapping component names to tensors.
+                Keys should match tensor_parts keys (e.g., "beta__", "beta__dim1_dim2").
+            dtype: Optional dtype override
+
+        Returns:
+            Parameter values at each sample, shape (n_samples, *param_shape)
+
+        Example:
+            >>> decomp = Decomposed(interactions, param_shape=[7], name="beta")
+            >>> indices = jnp.array([[0, 1], [1, 0], [0, 0]])  # 3 samples, 2 dims
+            >>> values = decomp.lookup_flat(indices, fitted_params)  # (3, 7)
+        """
+        dtype = dtype if dtype is not None else self._dtype
+        interaction_indices = jnp.asarray(interaction_indices)
+        n_samples = interaction_indices.shape[0]
+
+        result = jnp.zeros((n_samples,) + tuple(self._param_shape), dtype=dtype)
+        dim_names = [d.name for d in self._interactions._dimensions]
+
+        for name, tensor in params.items():
+            if name not in self._tensor_parts:
+                continue
+
+            tensor = jnp.asarray(tensor, dtype)
+            active_dims = self._tensor_part_interactions.get(name, [])
+            canonical_shape = self._tensor_part_shapes[name]
+            actual_shape = tensor.shape
+
+            if len(active_dims) == 0:
+                # Global component - broadcast to all samples
+                result = result + tensor.reshape(self._param_shape)
+            else:
+                # Determine if tensor is raveled or canonical
+                n_param_dims = len(self._param_shape)
+                canonical_interact_shape = canonical_shape[:-n_param_dims] if n_param_dims else canonical_shape
+                is_canonical = (actual_shape == canonical_shape)
+
+                if is_canonical:
+                    # Canonical form: use direct multi-dimensional indexing
+                    # Build index tuple with 0 for singleton dims, actual indices for active dims
+                    index_tuple = []
+                    for i, dim_name in enumerate(dim_names):
+                        if dim_name in active_dims:
+                            index_tuple.append(interaction_indices[:, i])
+                        else:
+                            index_tuple.append(0)
+                    indexed = tensor[tuple(index_tuple)]
+                else:
+                    # Raveled form: compute raveled index
+                    multi_idx = []
+                    for dim_name in active_dims:
+                        dim_idx = dim_names.index(dim_name)
+                        multi_idx.append(interaction_indices[:, dim_idx])
+
+                    multi_idx = jnp.stack(multi_idx, axis=0)  # (n_active_dims, n_samples)
+                    active_sizes = [
+                        self._interactions._dimensions[dim_names.index(d)].cardinality
+                        for d in active_dims
+                    ]
+                    raveled_idx = ravel_multi_index(multi_idx, active_sizes)
+                    indexed = tensor[raveled_idx]
+
+                result = result + indexed
+
+        if self._post_fn is not None:
+            result = self._post_fn(result)
+
+        return result
+
+    def generalization_preserving_scales(
+        self,
+        noise_scale=1.0,
+        total_n=None,
+        contingency_table=None,
+        c=0.5,
+        per_component=False,
+    ):
+        """Compute generalization-preserving prior scales for each component.
+
+        The generalization-preserving scaling ensures that adding a component
+        does not hurt generalization in expectation when the true effect is zero.
+
+        Two modes are available:
+
+        1. per_component=False (default): Per-parameter bound
+           τ^(α) = σ / √N^(α)
+           Each parameter contributes ≤ c df_eff.
+           A component with p parameters contributes ≤ p*c df_eff total.
+
+        2. per_component=True: Per-component bound
+           τ^(α) = σ / √(p · N^(α))
+           The entire component contributes ≤ c df_eff total,
+           regardless of the number of parameters p.
+
+        Args:
+            noise_scale: Noise standard deviation σ (or plug-in estimate)
+            total_n: Total number of observations N. Required if contingency_table
+                is not provided.
+            contingency_table: Optional MultiwayContingencyTable with actual counts
+                per cell. If provided, uses exact local sample sizes. Otherwise,
+                assumes uniform distribution across cells.
+            c: Maximum effective degrees of freedom (default 0.5)
+            per_component: If True, bound total df_eff per component rather than
+                per parameter. Results in tighter regularization for components
+                with many parameters.
+
+        Returns:
+            Dictionary mapping component names to prior standard deviations.
+
+        Reference:
+            Chang (2025), "A renormalization-group inspired hierarchical Bayesian
+            framework for piecewise linear regression models"
+        """
+        if total_n is None and contingency_table is None:
+            raise ValueError("Must provide either total_n or contingency_table")
+
+        scales = {}
+        scale_factor = np.sqrt(c / (1 - c))
+        p = int(np.prod(self._param_shape)) if self._param_shape else 1
+
+        for name, shape in self._tensor_part_shapes.items():
+            interaction_vars = self._tensor_part_interactions[name]
+            interaction_shape = shape[: -len(self._param_shape)] if self._param_shape else shape
+
+            if contingency_table is not None:
+                if len(interaction_vars) == 0:
+                    n_local = contingency_table.lookup(None)
+                else:
+                    counts = contingency_table.lookup(interaction_vars)
+                    n_local = np.mean(counts)
+            else:
+                n_cells = int(np.prod(interaction_shape))
+                n_local = total_n / max(n_cells, 1)
+
+            effective_n = p * n_local if per_component else n_local
+            tau = scale_factor * noise_scale / np.sqrt(max(effective_n, 1))
+            scales[name] = float(tau)
+
+        return scales
+
     def component_order(self, component_name):
         """Return the interaction order (number of vars) of a component."""
         return len(self._tensor_part_interactions.get(component_name, ()))
