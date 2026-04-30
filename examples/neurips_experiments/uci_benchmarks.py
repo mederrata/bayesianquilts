@@ -65,6 +65,8 @@ UCI_DATASETS = {
         "target": "target",
         "categorical": ["A1", "A3", "A4", "A6", "A7"],
         "numeric": ["A2", "A5", "A8", "A11", "A13", "A16", "A18"],
+        "use_pairwise": True,
+        "use_direct_bins": True,
         "N": 1000,
         "p": 7,
     },
@@ -78,6 +80,8 @@ UCI_DATASETS = {
         "target": "income",
         "categorical": ["education", "marital_status"],
         "numeric": ["age", "education_num", "capital_gain", "capital_loss", "hours_per_week"],
+        "use_pairwise": True,
+        "use_direct_bins": True,
         "N": 48842,
         "p": 6,
     },
@@ -89,6 +93,8 @@ UCI_DATASETS = {
         "target": "y",
         "categorical": ["job", "marital", "education", "housing", "loan", "contact", "poutcome"],
         "numeric": ["age", "balance", "duration", "campaign", "pdays", "previous"],
+        "use_pairwise": True,
+        "use_direct_bins": True,
         "N": 45211,
         "p": 7,
     },
@@ -110,6 +116,8 @@ UCI_DATASETS = {
         "categorical": ["sex", "chest", "fasting_blood_sugar", "resting_electrocardiographic_results",
                        "exercise_induced_angina", "slope", "number_of_major_vessels", "thal"],
         "numeric": ["age", "resting_blood_pressure", "serum_cholestoral", "maximum_heart_rate_achieved", "oldpeak"],
+        "use_pairwise": True,
+        "use_direct_bins": True,
         "N": 270,
         "p": 13,
     },
@@ -130,6 +138,7 @@ UCI_DATASETS = {
         "target": "class",
         "categorical": [],
         "numeric": "all",
+        "use_pca": True,
         "N": 4601,
         "p": 57,
     },
@@ -148,6 +157,8 @@ UCI_DATASETS = {
         "target": "Class",
         "categorical": [],
         "numeric": "all",
+        "use_direct_bins": True,
+        "use_pairwise": True,
         "N": 5404,
         "p": 5,
     },
@@ -157,6 +168,8 @@ UCI_DATASETS = {
         "target": "class",
         "categorical": ["day"],
         "numeric": ["date", "period", "nswprice", "nswdemand", "vicprice", "vicdemand", "transfer"],
+        "use_direct_bins": True,
+        "use_pairwise": True,
         "N": 45312,
         "p": 8,
     },
@@ -258,7 +271,7 @@ def download_dataset(dataset_name: str, data_dir: str) -> pd.DataFrame:
         if not local_path.exists():
             urlretrieve(config["url"], local_path)
         with zipfile.ZipFile(local_path, 'r') as z:
-            with z.open("bank.csv") as f:
+            with z.open("bank-full.csv") as f:
                 df = pd.read_csv(f, sep=";")
 
     else:
@@ -273,15 +286,18 @@ def prepare_dataset(
     df: pd.DataFrame,
     dataset_name: str,
     hierarchical_factors: List[str] = None,
-    n_pca_bins: int = 4,
+    n_threshold: int = 30,
 ) -> Tuple[Dict, List]:
-    """Prepare dataset for hierarchical modeling.
+    """Prepare dataset for hierarchical modeling with adaptive lattice depth.
+
+    Bin counts are determined adaptively: n_bins ≤ N / n_threshold to ensure
+    sufficient observations per cell for stable estimation.
 
     Args:
         df: Raw DataFrame
         dataset_name: Name of dataset
         hierarchical_factors: List of columns to use as hierarchical factors
-        n_pca_bins: Number of bins for PCA-discretized latent dimensions
+        n_threshold: Minimum observations per cell (default 30)
 
     Returns:
         Tuple of (data_dict, dimensions)
@@ -314,23 +330,68 @@ def prepare_dataset(
         scaler = StandardScaler()
         X_numeric = scaler.fit_transform(X_numeric)
 
-        # Apply PCA for high-dimensional datasets
-        if config.get("use_pca", False):
+        # Store original X before pairwise (for tree methods)
+        X_original = X_numeric.copy()
+
+        # Add pairwise interaction features if requested (for LR and ours)
+        if config.get("use_pairwise", False):
+            from itertools import combinations
+            n_features = X_numeric.shape[1]
+            pairwise_features = []
+            for i, j in combinations(range(n_features), 2):
+                pairwise_features.append(X_numeric[:, i] * X_numeric[:, j])
+            if pairwise_features:
+                X_pairwise = np.stack(pairwise_features, axis=1)
+                X_numeric = np.concatenate([X_numeric, X_pairwise], axis=1)
+
+        # Apply PCA for high-dimensional datasets or direct binning for small-p
+        N = len(X_numeric)
+        if config.get("use_direct_bins", False):
+            # Adaptive binning: n_bins ≤ N / n_threshold
+            max_bins_order1 = max(2, min(N // n_threshold, 6))  # Cap at 6 bins
+            # Limit dimensions to keep lattice manageable: ~N/10 cells for order-1
+            # With 6 bins, 3 dims = 216 cells, 4 dims = 1296 cells
+            max_dims = 3 if N < 5000 else 4
+            n_direct_dims = min(config.get("n_direct_dims", max_dims), X_numeric.shape[1], max_dims)
+
+            pca_factors = {}
+            pca_dimensions = []
+            for i in range(n_direct_dims):
+                col_name = f"bin_{i}"
+                feature_vals = X_numeric[:, i]
+                # Use adaptive bin count based on sample size
+                n_bins = min(max_bins_order1, 10)  # Cap at 10 for memory
+                bins = np.percentile(feature_vals, np.linspace(0, 100, n_bins + 1))
+                bins = np.unique(bins)
+                if len(bins) < 3:
+                    continue
+                bins[0] = -np.inf
+                bins[-1] = np.inf
+                n_actual_bins = len(bins) - 1
+                pca_factors[col_name] = np.digitize(feature_vals, bins[1:-1])
+                pca_dimensions.append(Dimension(col_name, n_actual_bins))
+            print(f"  Adaptive binning: N={N}, max_bins={max_bins_order1}, using {n_bins} bins")
+        elif config.get("use_pca", False):
+            # Adaptive binning for PCA components
+            max_bins_order1 = max(2, N // n_threshold)
+            n_bins = min(max_bins_order1, 8)  # Cap at 8 for PCA
+
             n_components = min(config.get("pca_components", 50), X_numeric.shape[1], X_numeric.shape[0] - 1)
             pca = PCA(n_components=n_components)
             X_pca = pca.fit_transform(X_numeric)
             # Use first few PCA components as discretized lattice dimensions
-            n_lattice_dims = min(3, n_components)
+            n_lattice_dims = min(5, n_components)
             pca_factors = {}
             pca_dimensions = []
             for i in range(n_lattice_dims):
                 col_name = f"pca_{i}"
-                bins = np.percentile(X_pca[:, i], np.linspace(0, 100, n_pca_bins + 1))
+                bins = np.percentile(X_pca[:, i], np.linspace(0, 100, n_bins + 1))
                 bins[0] = -np.inf
                 bins[-1] = np.inf
                 pca_factors[col_name] = np.digitize(X_pca[:, i], bins[1:-1])
-                pca_dimensions.append(Dimension(col_name, n_pca_bins))
+                pca_dimensions.append(Dimension(col_name, n_bins))
             X_numeric = X_pca
+            print(f"  Adaptive PCA binning: N={N}, using {n_bins} bins for {n_lattice_dims} components")
         else:
             pca_factors = {}
             pca_dimensions = []
@@ -343,6 +404,7 @@ def prepare_dataset(
             X_numeric = encoder.fit_transform(df[cat_cols].astype(str)).astype(np.float32)
         else:
             X_numeric = np.zeros((len(df), 1), dtype=np.float32)
+        X_original = X_numeric  # No pairwise for categorical-only
         pca_factors = {}
         pca_dimensions = []
 
@@ -356,13 +418,13 @@ def prepare_dataset(
         le = LabelEncoder()
         indices = le.fit_transform(df[col].astype(str))
         n_levels = len(le.classes_)
-        # Limit number of levels for memory efficiency (max 8 to avoid explosion)
-        if n_levels > 8:
+        # Limit number of levels for memory efficiency (max 12 to avoid explosion)
+        if n_levels > 12:
             from collections import Counter
             counts = Counter(indices)
-            top_cats = [k for k, v in counts.most_common(7)]
-            indices = np.array([i if i in top_cats else 7 for i in indices])
-            n_levels = 8
+            top_cats = [k for k, v in counts.most_common(11)]
+            indices = np.array([i if i in top_cats else 11 for i in indices])
+            n_levels = 12
         factor_indices[col] = indices
         dimensions.append(Dimension(col, n_levels))
 
@@ -379,8 +441,10 @@ def prepare_dataset(
         le_target = LabelEncoder()
         y = le_target.fit_transform(df[target_col].astype(str))
 
+    # X_original is without pairwise (for tree methods), X is with pairwise (for LR/ours)
     data = {
         "X": X_numeric,
+        "X_original": locals().get('X_original', X_numeric),
         "y": y,
         **factor_indices,
     }
@@ -590,21 +654,30 @@ def fit_baseline_models(
     y_train: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
+    X_train_orig: np.ndarray = None,
+    X_test_orig: np.ndarray = None,
 ) -> List[Dict]:
     """Fit baseline ML models and return metrics.
 
     Args:
-        X_train: Training features
+        X_train: Training features (with pairwise for LR)
         y_train: Training labels
-        X_test: Test features
+        X_test: Test features (with pairwise for LR)
         y_test: Test labels
+        X_train_orig: Original features without pairwise (for tree methods)
+        X_test_orig: Original test features without pairwise (for tree methods)
 
     Returns:
         List of result dictionaries for each baseline
     """
+    # Use original X for tree methods if provided
+    if X_train_orig is None:
+        X_train_orig = X_train
+        X_test_orig = X_test
+
     results = []
 
-    # Logistic Regression
+    # Logistic Regression (uses X with pairwise features)
     lr = LogisticRegression(max_iter=1000, random_state=42)
     lr.fit(X_train, y_train)
     lr_probs = lr.predict_proba(X_test)[:, 1]
@@ -615,82 +688,82 @@ def fit_baseline_models(
         "test_accuracy": float(np.mean(lr.predict(X_test) == y_test)),
     })
 
-    # Random Forest
+    # Random Forest (uses original X without pairwise)
     rf = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
-    rf.fit(X_train, y_train)
-    rf_probs = rf.predict_proba(X_test)[:, 1]
+    rf.fit(X_train_orig, y_train)
+    rf_probs = rf.predict_proba(X_test_orig)[:, 1]
     results.append({
         "method": "random_forest",
         "order": -1,
         "test_auc": compute_auc(y_test, rf_probs),
-        "test_accuracy": float(np.mean(rf.predict(X_test) == y_test)),
+        "test_accuracy": float(np.mean(rf.predict(X_test_orig) == y_test)),
     })
 
-    # Gradient Boosting (sklearn)
+    # Gradient Boosting (sklearn, uses original X)
     gb = GradientBoostingClassifier(n_estimators=100, max_depth=5, random_state=42)
-    gb.fit(X_train, y_train)
-    gb_probs = gb.predict_proba(X_test)[:, 1]
+    gb.fit(X_train_orig, y_train)
+    gb_probs = gb.predict_proba(X_test_orig)[:, 1]
     results.append({
         "method": "gradient_boosting",
         "order": -1,
         "test_auc": compute_auc(y_test, gb_probs),
-        "test_accuracy": float(np.mean(gb.predict(X_test) == y_test)),
+        "test_accuracy": float(np.mean(gb.predict(X_test_orig) == y_test)),
     })
 
-    # XGBoost
+    # XGBoost (uses original X)
     if HAS_XGBOOST:
         xgb_model = xgb.XGBClassifier(
             n_estimators=100, max_depth=5, learning_rate=0.1,
             random_state=42, use_label_encoder=False, eval_metric='logloss'
         )
-        xgb_model.fit(X_train, y_train)
-        xgb_probs = xgb_model.predict_proba(X_test)[:, 1]
+        xgb_model.fit(X_train_orig, y_train)
+        xgb_probs = xgb_model.predict_proba(X_test_orig)[:, 1]
         results.append({
             "method": "xgboost",
             "order": -1,
             "test_auc": compute_auc(y_test, xgb_probs),
-            "test_accuracy": float(np.mean(xgb_model.predict(X_test) == y_test)),
+            "test_accuracy": float(np.mean(xgb_model.predict(X_test_orig) == y_test)),
         })
 
-    # LightGBM
+    # LightGBM (uses original X)
     if HAS_LIGHTGBM:
         lgb_model = lgb.LGBMClassifier(
             n_estimators=100, max_depth=5, learning_rate=0.1,
             random_state=42, verbose=-1
         )
-        lgb_model.fit(X_train, y_train)
-        lgb_probs = lgb_model.predict_proba(X_test)[:, 1]
+        lgb_model.fit(X_train_orig, y_train)
+        lgb_probs = lgb_model.predict_proba(X_test_orig)[:, 1]
         results.append({
             "method": "lightgbm",
             "order": -1,
             "test_auc": compute_auc(y_test, lgb_probs),
-            "test_accuracy": float(np.mean(lgb_model.predict(X_test) == y_test)),
+            "test_accuracy": float(np.mean(lgb_model.predict(X_test_orig) == y_test)),
         })
 
-    # MLP (Neural Network)
+    # MLP (uses original X - it learns nonlinearity internally)
     mlp = MLPClassifier(
         hidden_layer_sizes=(64, 32), max_iter=500, random_state=42,
         early_stopping=True, validation_fraction=0.1
     )
-    mlp.fit(X_train, y_train)
-    mlp_probs = mlp.predict_proba(X_test)[:, 1]
+    mlp.fit(X_train_orig, y_train)
+    mlp_probs = mlp.predict_proba(X_test_orig)[:, 1]
     results.append({
         "method": "mlp",
         "order": -1,
         "test_auc": compute_auc(y_test, mlp_probs),
-        "test_accuracy": float(np.mean(mlp.predict(X_test) == y_test)),
+        "test_accuracy": float(np.mean(mlp.predict(X_test_orig) == y_test)),
     })
 
-    # EBM (Explainable Boosting Machine)
+    # EBM (uses original X - it learns interactions internally)
     if HAS_EBM:
         ebm = ExplainableBoostingClassifier(random_state=42, n_jobs=1)
-        ebm.fit(X_train, y_train)
-        ebm_probs = ebm.predict_proba(X_test)[:, 1]
+        ebm.fit(X_train_orig, y_train)
+        ebm_probs = ebm.predict_proba(X_test_orig)[:, 1]
         results.append({
             "method": "ebm",
             "order": -1,
             "test_auc": compute_auc(y_test, ebm_probs),
-            "test_accuracy": float(np.mean(ebm.predict(X_test) == y_test)),
+            "test_accuracy": float(np.mean(ebm.predict(X_test_orig) == y_test)),
         })
 
     return results
@@ -771,7 +844,8 @@ def run_single_dataset(
             if not exp_config.ours_only:
                 baseline_results = fit_baseline_models(
                     train_data["X"], train_data["y"],
-                    test_data["X"], test_data["y"]
+                    test_data["X"], test_data["y"],
+                    train_data["X_original"], test_data["X_original"]
                 )
                 for br in baseline_results:
                     br["dataset"] = dataset_name
