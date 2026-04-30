@@ -194,6 +194,8 @@ class ExperimentConfig:
     datasets: List[str] = None
     output_dir: str = "results/uci_benchmarks"
     data_dir: str = "data/uci"
+    baselines_only: bool = False
+    ours_only: bool = False
 
     def __post_init__(self):
         if self.datasets is None:
@@ -462,10 +464,10 @@ def fit_logistic_model(
     decomp: Decomposed,
     max_order: int,
     prior_scales: Dict[str, float],
-    n_steps: int = 2000,
+    n_steps: int = 3000,
     learning_rate: float = 0.01,
     sparse: bool = True,
-    l1_weight: float = 0.01,
+    l1_weight: float = 0.005,
 ) -> Dict:
     """Fit logistic regression with hierarchical coefficients.
 
@@ -493,6 +495,8 @@ def fit_logistic_model(
         name: jnp.zeros(decomp._tensor_part_shapes[name])
         for name in active_components
     }
+    # Add intercept parameter (not multiplied by X)
+    params["_intercept"] = jnp.zeros(1)
 
     dim_names = [d.name for d in decomp._interactions._dimensions]
     interaction_indices = jnp.stack(
@@ -504,26 +508,32 @@ def fit_logistic_model(
     y = jnp.array(data["y"])
 
     def loss_fn(params):
-        beta = lookup_params(decomp, interaction_indices, params)
-        logits = jnp.sum(X * beta, axis=-1)
+        # Separate intercept from other params
+        intercept = params.get("_intercept", jnp.zeros(1))
+        model_params = {k: v for k, v in params.items() if k != "_intercept"}
+
+        beta = lookup_params(decomp, interaction_indices, model_params)
+        logits = jnp.sum(X * beta, axis=-1) + intercept[0]
 
         bce = jnp.mean(
             jnp.logaddexp(0, logits) - y * logits
         )
 
-        # L2 regularization (ridge)
+        # L2 regularization (ridge) - weaker regularization
         l2_reg = 0.0
-        for name, param in params.items():
+        for name, param in model_params.items():
             scale = prior_scales.get(name, 1.0)
-            l2_reg += 0.5 * jnp.sum(param ** 2) / (scale ** 2)
+            # Use weaker regularization (multiply scale by 10)
+            l2_reg += 0.5 * jnp.sum(param ** 2) / ((scale * 10) ** 2)
 
-        # L1 regularization for sparsity (elastic net style)
+        # L1 regularization for sparsity (elastic net style) - weaker
         l1_reg = 0.0
         if sparse:
-            for name, param in params.items():
+            for name, param in model_params.items():
                 order = decomp.component_order(name)
-                # Stronger sparsity for higher-order interactions
-                l1_reg += l1_weight * (1 + order) * jnp.sum(jnp.abs(param))
+                # Weaker L1, only on higher-order terms
+                if order > 0:
+                    l1_reg += l1_weight * order * jnp.sum(jnp.abs(param))
 
         return bce + l2_reg / len(y) + l1_reg / len(y)
 
@@ -567,8 +577,12 @@ def evaluate_model(
     X = jnp.array(data["X"])
     y = jnp.array(data["y"])
 
-    beta = lookup_params(decomp, interaction_indices, params)
-    logits = jnp.sum(X * beta, axis=-1)
+    # Separate intercept from other params
+    intercept = params.get("_intercept", jnp.zeros(1))
+    model_params = {k: v for k, v in params.items() if k != "_intercept"}
+
+    beta = lookup_params(decomp, interaction_indices, model_params)
+    logits = jnp.sum(X * beta, axis=-1) + intercept[0]
     probs = jax.nn.sigmoid(logits)
 
     predictions = (probs > 0.5).astype(jnp.float32)
@@ -785,15 +799,20 @@ def run_single_dataset(
             train_data, test_data = create_train_test_split(data, train_idx, test_idx)
 
             # Fit baseline models (XGBoost, LightGBM, RF, etc.)
-            baseline_results = fit_baseline_models(
-                train_data["X"], train_data["y"],
-                test_data["X"], test_data["y"]
-            )
-            for br in baseline_results:
-                br["dataset"] = dataset_name
-                br["fold"] = fold
-                br["replication"] = rep
-                results.append(br)
+            if not exp_config.ours_only:
+                baseline_results = fit_baseline_models(
+                    train_data["X"], train_data["y"],
+                    test_data["X"], test_data["y"]
+                )
+                for br in baseline_results:
+                    br["dataset"] = dataset_name
+                    br["fold"] = fold
+                    br["replication"] = rep
+                    results.append(br)
+
+            # Skip our methods if baselines_only
+            if exp_config.baselines_only:
+                continue
 
             for method in methods:
                 use_sparse = (method == "sparse")
@@ -934,7 +953,12 @@ def main():
     parser.add_argument("--quick", action="store_true", help="Run quick version")
     parser.add_argument("--dataset", type=str, default=None, help="Run single dataset")
     parser.add_argument("--datasets", type=str, default=None, help="Comma-separated list of datasets")
+    parser.add_argument("--baselines-only", action="store_true", help="Run only baseline models")
+    parser.add_argument("--ours-only", action="store_true", help="Run only our models (sparse, gen_preserving)")
     args = parser.parse_args()
+
+    baselines_only = getattr(args, 'baselines_only', False)
+    ours_only = getattr(args, 'ours_only', False)
 
     if args.quick:
         config = ExperimentConfig(
@@ -943,6 +967,8 @@ def main():
             max_order=1,
             datasets=["german"],
             output_dir=args.output_dir,
+            baselines_only=baselines_only,
+            ours_only=ours_only,
         )
     elif args.dataset:
         config = ExperimentConfig(
@@ -950,6 +976,8 @@ def main():
             n_replications=args.n_replications,
             datasets=[args.dataset],
             output_dir=args.output_dir,
+            baselines_only=baselines_only,
+            ours_only=ours_only,
         )
     elif args.datasets:
         config = ExperimentConfig(
@@ -957,12 +985,16 @@ def main():
             n_replications=args.n_replications,
             datasets=args.datasets.split(","),
             output_dir=args.output_dir,
+            baselines_only=baselines_only,
+            ours_only=ours_only,
         )
     else:
         config = ExperimentConfig(
             n_folds=args.n_folds,
             n_replications=args.n_replications,
             output_dir=args.output_dir,
+            baselines_only=baselines_only,
+            ours_only=ours_only,
         )
 
     run_full_experiment(config)
