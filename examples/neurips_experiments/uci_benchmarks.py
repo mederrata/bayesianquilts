@@ -201,7 +201,7 @@ class ExperimentConfig:
         if self.datasets is None:
             self.datasets = [
                 "german", "adult", "bank", "taiwan", "heart",
-                "bioresponse", "spambase", "mushroom", "phoneme", "electricity",
+                "bioresponse", "spambase", "phoneme", "electricity",
                 "madelon", "semeion"
             ]
 
