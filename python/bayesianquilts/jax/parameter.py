@@ -784,6 +784,90 @@ class Decomposed(object):
 
         return cumulative
 
+    def lookup_flat(
+        self, interaction_indices: jnp.ndarray, params: dict, dtype=None
+    ) -> jnp.ndarray:
+        """Simple lookup for point estimates without batch dimensions.
+
+        A more efficient lookup for MAP estimation where params are simple
+        tensors without sample/batch dimensions. Handles the common case
+        where params come from an optimization loop.
+
+        Handles both:
+        - Raveled tensors (from generate_tensors): shapes like (6, 4) for 3x2 interaction
+        - Canonical tensors (from _tensor_part_shapes): shapes like (3, 2, 4) with explicit dims
+
+        Args:
+            interaction_indices: Indices for each dimension, shape (n_samples, n_dims)
+            params: Dict mapping component names to tensors.
+                Keys should match tensor_parts keys (e.g., "beta__", "beta__dim1_dim2").
+            dtype: Optional dtype override
+
+        Returns:
+            Parameter values at each sample, shape (n_samples, *param_shape)
+
+        Example:
+            >>> decomp = Decomposed(interactions, param_shape=[7], name="beta")
+            >>> indices = jnp.array([[0, 1], [1, 0], [0, 0]])  # 3 samples, 2 dims
+            >>> values = decomp.lookup_flat(indices, fitted_params)  # (3, 7)
+        """
+        dtype = dtype if dtype is not None else self._dtype
+        interaction_indices = jnp.asarray(interaction_indices)
+        n_samples = interaction_indices.shape[0]
+
+        result = jnp.zeros((n_samples,) + tuple(self._param_shape), dtype=dtype)
+        dim_names = [d.name for d in self._interactions._dimensions]
+
+        for name, tensor in params.items():
+            if name not in self._tensor_parts:
+                continue
+
+            tensor = jnp.asarray(tensor, dtype)
+            active_dims = self._tensor_part_interactions.get(name, [])
+            canonical_shape = self._tensor_part_shapes[name]
+            actual_shape = tensor.shape
+
+            if len(active_dims) == 0:
+                # Global component - broadcast to all samples
+                result = result + tensor.reshape(self._param_shape)
+            else:
+                # Determine if tensor is raveled or canonical
+                n_param_dims = len(self._param_shape)
+                canonical_interact_shape = canonical_shape[:-n_param_dims] if n_param_dims else canonical_shape
+                is_canonical = (actual_shape == canonical_shape)
+
+                if is_canonical:
+                    # Canonical form: use direct multi-dimensional indexing
+                    # Build index tuple with 0 for singleton dims, actual indices for active dims
+                    index_tuple = []
+                    for i, dim_name in enumerate(dim_names):
+                        if dim_name in active_dims:
+                            index_tuple.append(interaction_indices[:, i])
+                        else:
+                            index_tuple.append(0)
+                    indexed = tensor[tuple(index_tuple)]
+                else:
+                    # Raveled form: compute raveled index
+                    multi_idx = []
+                    for dim_name in active_dims:
+                        dim_idx = dim_names.index(dim_name)
+                        multi_idx.append(interaction_indices[:, dim_idx])
+
+                    multi_idx = jnp.stack(multi_idx, axis=0)  # (n_active_dims, n_samples)
+                    active_sizes = [
+                        self._interactions._dimensions[dim_names.index(d)].cardinality
+                        for d in active_dims
+                    ]
+                    raveled_idx = ravel_multi_index(multi_idx, active_sizes)
+                    indexed = tensor[raveled_idx]
+
+                result = result + indexed
+
+        if self._post_fn is not None:
+            result = self._post_fn(result)
+
+        return result
+
     def generalization_preserving_scales(
         self,
         noise_scale=1.0,

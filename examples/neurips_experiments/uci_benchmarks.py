@@ -415,7 +415,7 @@ def create_train_test_split(
 
 
 def lookup_params(decomp: Decomposed, interaction_indices: jnp.ndarray, params: Dict) -> jnp.ndarray:
-    """Manually lookup parameters at interaction indices.
+    """Lookup parameters at interaction indices using Decomposed.lookup_flat.
 
     Args:
         decomp: Parameter decomposition
@@ -425,38 +425,7 @@ def lookup_params(decomp: Decomposed, interaction_indices: jnp.ndarray, params: 
     Returns:
         Parameter values at each sample, shape (n_samples, n_features)
     """
-    n_samples = interaction_indices.shape[0]
-    n_features = decomp._param_shape[0]
-    result = jnp.zeros((n_samples, n_features))
-
-    dim_names = [d.name for d in decomp._interactions._dimensions]
-
-    for name, tensor in params.items():
-        # Determine which dimensions this component uses
-        base_name = decomp._name + "__"
-        if name == base_name:
-            # Global component - same for all samples
-            result += tensor.reshape(n_features)
-        else:
-            # Parse component name to get active dimensions
-            suffix = name[len(base_name):]
-            active_dims = suffix.split("_") if suffix else []
-
-            # Build full index tuple for the tensor
-            # Tensor shape is (dim1, dim2, ..., n_features)
-            index_tuple = []
-            for i, dim_name in enumerate(dim_names):
-                if dim_name in active_dims:
-                    index_tuple.append(interaction_indices[:, i])
-                else:
-                    index_tuple.append(0)  # Singleton dimension
-
-            # Index into tensor and add to result
-            # tensor[idx1, idx2, ...] gives (n_samples, n_features)
-            indexed = tensor[tuple(index_tuple)]
-            result += indexed
-
-    return result
+    return decomp.lookup_flat(interaction_indices, params)
 
 
 def fit_logistic_model(
