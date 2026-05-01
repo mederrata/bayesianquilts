@@ -14,11 +14,21 @@ each model.  This guarantees the mixture is at least as good as the
 better single model (Yao et al. 2018, Theorem 1).
 """
 
+import sys
 import numpy as np
 import jax
 import jax.numpy as jnp
 from scipy.optimize import minimize_scalar
 from typing import Dict, Any, Optional, List
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 
 class IrtMixedImputationModel:
@@ -407,8 +417,11 @@ class IrtMixedImputationModel:
                     )
                     p = float(pmf[y_true])
                     log_scores[n] = np.log(max(p, 1e-30))
-                except (ValueError, KeyError, AttributeError, TypeError):
-                    log_scores[n] = np.log(1.0 / K)  # fallback to uniform
+                except (ValueError, KeyError, AttributeError, TypeError) as exc:
+                    _warn_fallback(
+                        f"MICE predict_pmf failed for item '{item_key}' "
+                        f"person {n}, using uniform 1/{K} in ELPD", exc)
+                    log_scores[n] = np.log(1.0 / K)
 
             valid_scores = log_scores[~np.isnan(log_scores)]
             self._mice_elpd_per_item[item_key] = float(np.mean(valid_scores))
@@ -609,7 +622,10 @@ class IrtMixedImputationModel:
                 items, target, n_categories,
                 uncertainty_penalty=uncertainty_penalty,
             )
-        except (ValueError, KeyError, AttributeError):
+        except (ValueError, KeyError, AttributeError) as exc:
+            _warn_fallback(
+                f"Mixed imputation: MICE predict_pmf failed for "
+                f"target '{target}', using uniform 1/{n_categories}", exc)
             mice_pmf = np.ones(n_categories) / n_categories
 
         # IRT baseline PMF from pre-fitted model
@@ -742,7 +758,10 @@ class IrtMixedImputationModel:
                 items, target, n_categories,
                 uncertainty_penalty=uncertainty_penalty,
             )
-        except (ValueError, KeyError, AttributeError):
+        except (ValueError, KeyError, AttributeError) as exc:
+            _warn_fallback(
+                f"PairwiseOnly imputation: predict_pmf failed for "
+                f"target '{target}', using uniform 1/{n_categories}", exc)
             mice_pmf = np.ones(n_categories) / n_categories
 
         # Normalize

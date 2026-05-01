@@ -12,10 +12,20 @@ PairwiseOrdinalStackingModel:
 - LOO-ELPD computation via PSIS
 """
 
+import sys
 import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.flatten_util
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 jax.config.update("jax_enable_x64", True)
 
@@ -526,7 +536,7 @@ def run_pathfinder(
         return samples_dict, elbo, converged, surrogate_log_prob_fn
 
     except Exception as e:
-        print(f"    Pathfinder failed: {e}")
+        _warn_fallback("Pathfinder inference failed, returning unconverged", e)
         import traceback
         traceback.print_exc()
         return None, float('-inf'), False, None
@@ -633,7 +643,7 @@ def run_advi(
         return samples_dict, -best_loss, True, surrogate_log_prob_fn
 
     except Exception as e:
-        print(f"    ADVI sampling failed: {e}")
+        _warn_fallback("ADVI inference failed, returning unconverged", e)
         return None, float('-inf'), False, None
 
 

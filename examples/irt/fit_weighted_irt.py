@@ -102,7 +102,14 @@ def calibrate_manually(model, n_samples=32, seed=42):
         }
         model.surrogate_sample = samples
     except KeyError as e:
-        print(f"  Warning: surrogate sampling failed ({e}), using point estimates")
+        import sys
+        sys.stderr.write(
+            f"\033[91mWARNING: Surrogate sampling failed ({e}), "
+            f"falling back to point estimates from params. "
+            f"Forest plots and predictions will use point estimates "
+            f"instead of posterior samples!\033[0m\n"
+        )
+        sys.stderr.flush()
         point_estimates = {}
         for key_name, value in model.params.items():
             parts = key_name.split('\\')

@@ -8,6 +8,15 @@ import os
 import yaml
 import h5py
 
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
+
 import dill
 import jax
 import jax.numpy as jnp
@@ -42,8 +51,10 @@ def FactorizedDistributionMoments(dist, samples=100):
         mean = dist.mean()
         var = dist.variance()
         return mean, var
-    except Exception:
-        # Fallback to sampling
+    except Exception as exc:
+        _warn_fallback(
+            "Analytical moments failed, falling back to sampling-based "
+            f"moments ({samples} samples)", exc)
         s = dist.sample(samples)
         if isinstance(s, dict):
             mean = {k: jnp.mean(v, axis=0) for k, v in s.items()}
@@ -143,6 +154,150 @@ class BayesianModel(nnx.Module, ABC):
         )
         self.params = res[1]
         return res
+
+    def fit_map(
+        self,
+        data: Dict[str, jax.typing.ArrayLike] | None = None,
+        batched_data_factory: Callable | None = None,
+        initial_values: Dict[str, jax.typing.ArrayLike] | None = None,
+        num_epochs: int = 100,
+        steps_per_epoch: int = 1,
+        learning_rate: float = 0.01,
+        clip_norm: float | None = 1.0,
+        patience: int = 10,
+        lr_decay_factor: float = 0.5,
+        l1_weight: float = 0.0,
+        l2_weight: float = 0.01,
+        order_dependent_l1: bool = False,
+        verbose: bool = True,
+        **kwargs,
+    ):
+        """Fit model using MAP (maximum a posteriori) point estimation.
+
+        A simpler alternative to full ADVI that directly optimizes the
+        unnormalized log probability using gradient descent. Useful for
+        benchmarks and quick model fitting.
+
+        Args:
+            data: Full dataset dict (use this OR batched_data_factory)
+            batched_data_factory: Factory for batch iterators (use this OR data)
+            initial_values: Initial parameter values. If None, uses zeros or
+                generates from decomposed parameter structure.
+            num_epochs: Number of training epochs
+            steps_per_epoch: Steps per epoch (relevant for batched data)
+            learning_rate: Initial learning rate
+            clip_norm: Gradient clipping threshold (None to disable)
+            patience: Early stopping patience
+            lr_decay_factor: LR decay factor on plateau
+            l1_weight: L1 regularization weight (0 to disable)
+            l2_weight: L2 regularization weight (0 to disable)
+            order_dependent_l1: If True, scale L1 penalty by interaction order
+            verbose: Print progress
+            **kwargs: Additional args passed to training_loop
+
+        Returns:
+            Tuple of (losses, final_params)
+        """
+        if data is None and batched_data_factory is None:
+            raise ValueError("Must provide either data or batched_data_factory")
+
+        # Initialize parameters
+        if initial_values is None:
+            initial_values = self._initialize_map_params()
+
+        # Get decompositions for order-dependent regularization
+        decompositions = {}
+        if order_dependent_l1 and hasattr(self, '_get_decompositions'):
+            decompositions = self._get_decompositions()
+
+        def loss_fn(batch_data, params):
+            neg_log_prob = -self.unormalized_log_prob(data=batch_data, **params)
+
+            # Add regularization
+            reg = jnp.array(0.0)
+            for name, val in params.items():
+                # L2 regularization
+                if l2_weight > 0:
+                    reg = reg + l2_weight * jnp.sum(val ** 2)
+
+                # L1 regularization (optionally order-dependent)
+                if l1_weight > 0:
+                    if order_dependent_l1:
+                        order = self._get_param_order(name, decompositions)
+                        reg = reg + l1_weight * (order + 1) * jnp.sum(jnp.abs(val))
+                    else:
+                        reg = reg + l1_weight * jnp.sum(jnp.abs(val))
+
+            return neg_log_prob + reg
+
+        # Create data iterator
+        if data is not None:
+            def data_iterator():
+                while True:
+                    yield data
+        else:
+            def data_iterator():
+                while True:
+                    iterator = batched_data_factory()
+                    try:
+                        yield from iterator
+                    except TypeError:
+                        yield iterator
+
+        losses, final_params = training_loop(
+            initial_values=initial_values,
+            loss_fn=loss_fn,
+            data_iterator=data_iterator(),
+            steps_per_epoch=steps_per_epoch,
+            num_epochs=num_epochs,
+            learning_rate=learning_rate,
+            clip_norm=clip_norm,
+            patience=patience,
+            lr_decay_factor=lr_decay_factor,
+            verbose=verbose,
+            **kwargs,
+        )
+
+        self.point_estimate_vars = final_params
+        return losses, final_params
+
+    def _initialize_map_params(self) -> Dict[str, jax.typing.ArrayLike]:
+        """Initialize parameters for MAP estimation.
+
+        Returns zeros for each parameter, inferring shapes from decompositions
+        or surrogate initializer.
+        """
+        if hasattr(self, '_get_decompositions'):
+            decomps = self._get_decompositions()
+            if decomps:
+                params = {}
+                for decomp in decomps.values():
+                    tensors, _, _ = decomp.generate_tensors(dtype=self.dtype)
+                    for name, tensor in tensors.items():
+                        params[name] = jnp.zeros_like(tensor)
+                return params
+
+        if hasattr(self, 'surrogate_parameter_initializer'):
+            template = self.surrogate_parameter_initializer()
+            params = {}
+            for k, v in template.items():
+                if k.endswith('_loc') or k.endswith('\\loc'):
+                    base_name = k.rsplit('_loc', 1)[0] if '_loc' in k else k.rsplit('\\loc', 1)[0]
+                    params[base_name] = jnp.zeros_like(v)
+            return params if params else {k: jnp.zeros_like(v) for k, v in template.items()}
+
+        raise ValueError(
+            "Cannot initialize MAP params: no decompositions or surrogate_parameter_initializer found"
+        )
+
+    def _get_param_order(
+        self, param_name: str, decompositions: Dict
+    ) -> int:
+        """Get interaction order of a parameter for order-dependent regularization."""
+        for decomp in decompositions.values():
+            if param_name in decomp._tensor_parts:
+                return decomp.component_order(param_name)
+        return 0
 
     def compute_loo(self, data, likelihood_fn, khat_threshold=0.7):
         """Compute LOO-CV using PSIS, with AIS fallback for k-hat > threshold.
@@ -322,7 +477,10 @@ class BayesianModel(nnx.Module, ABC):
                     dist = self.surrogate_distribution_generator(self.params)
                 else:
                     dist = self.surrogate_distribution
-            except Exception:
+            except Exception as exc:
+                _warn_fallback(
+                    "surrogate_distribution_generator failed, "
+                    "falling back to stored surrogate_distribution", exc)
                 dist = self.surrogate_distribution
 
             mean, var = FactorizedDistributionMoments(
