@@ -36,7 +36,24 @@ DATASET_MODULES = {
     'gcbs': 'bayesianquilts.data.gcbs',
     'scs': 'bayesianquilts.data.scs',
     'bouldering': 'bayesianquilts.data.bouldering',
+    'promis_sleep': 'bayesianquilts.data.promis_sleep',
+    'promis_substance_use': 'bayesianquilts.data.promis_substance_use',
 }
+
+# PROMIS per-domain datasets: copd_<domain> and np_<domain>
+_PROMIS_COPD_DOMAINS = [
+    'depression', 'anxiety', 'anger', 'fatigue_experience',
+    'fatigue_impact', 'pain_interference', 'pain_behavior',
+    'physical_function', 'social_satisfaction',
+]
+_PROMIS_NP_DOMAINS = [
+    'pain_interference', 'pain_behavior', 'global_health',
+    'physical_function',
+]
+for _d in _PROMIS_COPD_DOMAINS:
+    DATASET_MODULES[f'copd_{_d}'] = 'bayesianquilts.data.promis_copd'
+for _d in _PROMIS_NP_DOMAINS:
+    DATASET_MODULES[f'np_{_d}'] = 'bayesianquilts.data.promis_neuropathic_pain'
 
 
 def load_dataset(dataset_name: str, cache_dir=None, gender=None):
@@ -59,19 +76,29 @@ def load_dataset(dataset_name: str, cache_dir=None, gender=None):
             f"Choose from: {list(DATASET_MODULES.keys())}"
         )
     mod = importlib.import_module(DATASET_MODULES[dataset_name])
-    item_keys = mod.item_keys
     response_cardinality = mod.response_cardinality
     kwargs = {'polars_out': True}
     if cache_dir is not None:
         kwargs['cache_dir'] = cache_dir
-    # Pass reorient=True if the loader supports it (reverse-code items)
+
+    # Handle PROMIS per-domain datasets (copd_<domain>, np_<domain>)
     import inspect
+    domain = None
+    if dataset_name.startswith('copd_'):
+        domain = dataset_name[len('copd_'):]
+    elif dataset_name.startswith('np_'):
+        domain = dataset_name[len('np_'):]
+    if domain is not None and 'domain' in inspect.signature(mod.get_data).parameters:
+        kwargs['domain'] = domain
+
+    # Pass reorient=True if the loader supports it (reverse-code items)
     if 'reorient' in inspect.signature(mod.get_data).parameters:
         kwargs['reorient'] = True
     # Pass gender if the loader supports it (e.g. bouldering)
     if gender is not None and 'gender' in inspect.signature(mod.get_data).parameters:
         kwargs['gender'] = gender
     df, num_people = mod.get_data(**kwargs)
+    item_keys = mod.item_keys
 
     # Convert to numpy data dict
     data = {}
@@ -107,7 +134,13 @@ def make_data_factory(data_dict, batch_size, num_people):
             ])
         for start in range(0, n_needed, batch_size):
             idx_batch = indices[start:start + batch_size]
-            yield {k: v[idx_batch] for k, v in data_dict.items()}
+            batch = {}
+            for k, v in data_dict.items():
+                if hasattr(v, 'shape') and v.ndim >= 1 and v.shape[0] == num_people:
+                    batch[k] = v[idx_batch]
+                else:
+                    batch[k] = v
+            yield batch
     return data_factory
 
 
@@ -343,6 +376,167 @@ def fit_grm_baseline(
     np.save(save_dir / 'losses.npy', np.array(losses))
 
     return model, snapshot_params
+
+
+def fit_grm_baseline_mcmc(
+    data_dict, item_keys, response_cardinality, num_people, save_dir,
+    dim=1, batch_size=256, num_epochs=100, learning_rate=2e-4,
+    patience=10, lr_decay_factor=0.5, clip_norm=1.0,
+    seed=42, discrimination_prior_scale=None,
+    num_chains=2, num_warmup=3000, num_samples=500, thinning=5,
+    step_size=0.001,
+):
+    """Fit a standard GRM via ADVI (for init) then MCMC, and save.
+
+    Returns:
+        (model, mcmc_samples)
+    """
+    from bayesianquilts.irt.grm import GRModel
+
+    model = GRModel(
+        item_keys=item_keys,
+        num_people=num_people,
+        dim=dim,
+        response_cardinality=response_cardinality,
+        dtype=jnp.float64,
+        discrimination_prior_scale=discrimination_prior_scale,
+    )
+
+    # ADVI for initialization
+    steps_per_epoch = int(np.ceil(num_people / batch_size))
+    factory = make_data_factory(data_dict, batch_size, num_people)
+
+    print("  ADVI initialization...")
+    res = model.fit(
+        factory,
+        batch_size=batch_size,
+        dataset_size=num_people,
+        num_epochs=num_epochs,
+        steps_per_epoch=steps_per_epoch,
+        learning_rate=learning_rate,
+        patience=patience,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
+        zero_nan_grads=True,
+        max_nan_recoveries=50,
+        seed=seed,
+    )
+    print(f"  ADVI loss: {res[0][-1]:.2f}")
+
+    # MCMC
+    print("  Running MCMC...")
+    mcmc_samples = model.fit_marginal_mcmc(
+        data_dict,
+        num_chains=num_chains,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        thinning=thinning,
+        step_size=step_size,
+        seed=seed,
+        verbose=True,
+    )
+
+    # Standardize and compute EAP
+    eap_result = model.compute_eap_abilities(data_dict)
+    model.standardize_marginal(data_dict)
+    eap_result = model.compute_eap_abilities(data_dict)
+
+    calibrate_model(model)
+
+    save_dir = Path(save_dir)
+    model.save_to_disk(save_dir)
+    save_dict = {var: np.array(s) for var, s in mcmc_samples.items()}
+    save_dict['eap'] = np.array(eap_result['eap'])
+    np.savez(save_dir / 'mcmc_samples.npz', **save_dict)
+
+    return model, mcmc_samples
+
+
+def fit_grm_imputed_mcmc(
+    data_dict, item_keys, response_cardinality, num_people, save_dir,
+    imputation_model, baseline_model=None,
+    dim=1, batch_size=256, num_epochs=100, learning_rate=2e-4,
+    patience=10, lr_decay_factor=0.5, clip_norm=1.0,
+    seed=42, discrimination_prior_scale=None,
+    num_chains=2, num_warmup=3000, num_samples=500, thinning=5,
+    step_size=0.001,
+):
+    """Fit a GRM with imputation via ADVI (init) then MCMC.
+
+    Warm-starts from baseline_model params if provided.
+
+    Returns:
+        (model, mcmc_samples)
+    """
+    from bayesianquilts.irt.grm import GRModel
+
+    model = GRModel(
+        item_keys=item_keys,
+        num_people=num_people,
+        dim=dim,
+        response_cardinality=response_cardinality,
+        dtype=jnp.float64,
+        imputation_model=imputation_model,
+        discrimination_prior_scale=discrimination_prior_scale,
+    )
+
+    # Compute imputation PMFs
+    data_imp = dict(data_dict)
+    pmfs, weights = model._compute_batch_pmfs(data_imp)
+    if pmfs is not None:
+        data_imp['_imputation_pmfs'] = pmfs
+        if weights is not None:
+            data_imp['_imputation_weights'] = weights
+
+    # ADVI initialization (warm-start from baseline if available)
+    steps_per_epoch = int(np.ceil(num_people / batch_size))
+    factory = make_data_factory(data_imp, batch_size, num_people)
+
+    initial_values = baseline_model.params if baseline_model else None
+    print("  ADVI initialization (imputed)...")
+    res = model.fit(
+        factory,
+        batch_size=batch_size,
+        dataset_size=num_people,
+        num_epochs=num_epochs,
+        steps_per_epoch=steps_per_epoch,
+        learning_rate=learning_rate,
+        patience=patience,
+        lr_decay_factor=lr_decay_factor,
+        clip_norm=clip_norm,
+        zero_nan_grads=True,
+        initial_values=initial_values,
+        max_nan_recoveries=50,
+        seed=seed,
+    )
+    print(f"  ADVI loss: {res[0][-1]:.2f}")
+
+    # MCMC with imputed data
+    print("  Running MCMC (imputed)...")
+    mcmc_samples = model.fit_marginal_mcmc(
+        data_imp,
+        num_chains=num_chains,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        thinning=thinning,
+        step_size=step_size,
+        seed=seed + 1,
+        verbose=True,
+    )
+
+    eap_result = model.compute_eap_abilities(data_imp)
+    model.standardize_marginal(data_imp)
+    eap_result = model.compute_eap_abilities(data_imp)
+
+    calibrate_model(model)
+
+    save_dir = Path(save_dir)
+    model.save_to_disk(save_dir)
+    save_dict = {var: np.array(s) for var, s in mcmc_samples.items()}
+    save_dict['eap'] = np.array(eap_result['eap'])
+    np.savez(save_dir / 'mcmc_samples.npz', **save_dict)
+
+    return model, mcmc_samples
 
 
 def fit_grm_imputed(

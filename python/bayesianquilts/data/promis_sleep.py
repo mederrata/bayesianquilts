@@ -41,11 +41,17 @@ class _ArrayDataSource(grain.sources.RandomAccessDataSource):
         return self.n
 
 
-def get_data(polars_out=False, cache_dir=None):
+def get_data(reorient=False, polars_out=False, cache_dir=None):
     """Load the PROMIS Sleep-Wake dataset.
 
     Responses are shifted from 1-5 to 0-4. Missing or out-of-range
     values become -1.
+
+    Args:
+        reorient: If True, reverse-score items with negative item-total
+            correlations so all items load in the same direction.
+        polars_out: If True, return polars DataFrame.
+        cache_dir: Directory for caching downloaded data.
 
     Returns:
         Tuple of (dataset, num_people).
@@ -81,6 +87,36 @@ def get_data(polars_out=False, cache_dir=None):
         .alias(k)
         for k in item_keys
     ])
+
+    if reorient:
+        # Reverse-code items with negative item-total correlations.
+        # These are positively-worded items (e.g., "My sleep was refreshing")
+        # where higher = better sleep, opposite to the rest of the bank.
+        import numpy as np
+        arr = data.select(item_keys).to_numpy().astype(float)
+        arr[arr < 0] = np.nan
+        total = np.nanmean(arr, axis=1)
+        to_reverse = []
+        for i, k in enumerate(item_keys):
+            valid = ~np.isnan(arr[:, i])
+            if valid.sum() > 10:
+                r = np.corrcoef(arr[valid, i], total[valid])[0, 1]
+                if r < -0.05:  # negative item-total correlation
+                    to_reverse.append(k)
+        if to_reverse:
+            K = response_cardinality
+            data = data.with_columns([
+                (K - 1 - pl.col(k)).alias(k) for k in to_reverse
+            ])
+            # Re-mark invalid values after flipping
+            data = data.with_columns([
+                pl.when((pl.col(k) < 0) | (pl.col(k) >= K))
+                .then(-1)
+                .otherwise(pl.col(k))
+                .alias(k)
+                for k in to_reverse
+            ])
+            print(f"  Reoriented {len(to_reverse)} items: {to_reverse[:5]}...")
 
     data = data.with_row_index("person")
 

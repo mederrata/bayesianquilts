@@ -569,6 +569,93 @@ class GRModel(IRTModel):
         likelihood_fn = GradedResponseLikelihood(dtype=jnp.float64)
         return likelihood_fn, ais_data, ais_params
 
+    def _mcmc_log_prior(self, item_params):
+        """MCMC prior with ``mu`` integrated out and tightened scales.
+
+        Built explicitly from scratch (not via ``joint_prior_distribution``)
+        so the MCMC path can use tighter scales than the ADVI path.
+        Aggressive regularization — per GRM scale-degeneracy, tight priors
+        on discriminations just pick a representative from the equivalence
+        class without biasing response probabilities. Used to kill
+        multi-modality on the harder real-data posteriors:
+          * ``difficulties0`` ~ ``Normal(d0_loc, 0.3)``
+          * ``discriminations`` ~ ``HalfNormal(0.5)``
+          * ``ddifficulties`` ~ ``HalfNormal(0.5)``
+          * ``global_scale`` (horseshoe only) ~ ``HalfCauchy(prior_scale)``
+
+        ``mu`` and ``abilities`` are Rao-Blackwellized / dropped.
+        ADVI is untouched — only ``marginal_log_prob(drop_mu_prior=True)``
+        calls this.
+        """
+        K = self.response_cardinality
+        d0_loc = -(K - 2) / 2.0
+        prior_type = getattr(self, 'discrimination_prior', 'half_normal')
+
+        # difficulties0: Normal(d0_loc, 0.3)
+        diff0 = jnp.asarray(item_params['difficulties0'], dtype=self.dtype)
+        d0_prior = tfd.Independent(
+            tfd.Normal(
+                loc=jnp.full(diff0.shape, d0_loc, dtype=self.dtype),
+                scale=0.3 * jnp.ones(diff0.shape, dtype=self.dtype),
+            ),
+            reinterpreted_batch_ndims=diff0.ndim,
+        )
+        lp = d0_prior.log_prob(diff0)
+
+        # discriminations: positive; MCMC sees constrained value directly.
+        if 'discriminations' in item_params:
+            disc = jnp.asarray(item_params['discriminations'], dtype=self.dtype)
+            if prior_type == 'horseshoe' and 'global_scale' in item_params:
+                # Keep horseshoe conditional on global_scale for horseshoe runs.
+                gs = jnp.asarray(item_params['global_scale'], dtype=self.dtype)
+                gs_b = gs * jnp.ones(disc.shape, dtype=self.dtype)
+                if self.positive_discriminations:
+                    disc_dist = tfd.Independent(
+                        AbsHorseshoe(scale=gs_b),
+                        reinterpreted_batch_ndims=disc.ndim,
+                    )
+                else:
+                    disc_dist = tfd.Independent(
+                        tfd.Horseshoe(scale=gs_b),
+                        reinterpreted_batch_ndims=disc.ndim,
+                    )
+            else:
+                disc_dist = tfd.Independent(
+                    tfd.HalfNormal(
+                        scale=0.5 * jnp.ones(disc.shape, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=disc.ndim,
+                )
+            lp = lp + disc_dist.log_prob(disc)
+
+        # ddifficulties: HalfNormal(0.5)
+        if 'ddifficulties' in item_params:
+            ddiff = jnp.asarray(item_params['ddifficulties'], dtype=self.dtype)
+            ddiff_dist = tfd.Independent(
+                tfd.HalfNormal(
+                    scale=0.5 * jnp.ones(ddiff.shape, dtype=self.dtype)
+                ),
+                reinterpreted_batch_ndims=ddiff.ndim,
+            )
+            lp = lp + ddiff_dist.log_prob(ddiff)
+
+        # global_scale (horseshoe only): keep existing HalfCauchy.
+        if prior_type == 'horseshoe' and 'global_scale' in item_params:
+            gs = jnp.asarray(item_params['global_scale'], dtype=self.dtype)
+            prior_scale = getattr(self, 'discrimination_prior_scale', None)
+            gs_scale = float(prior_scale) if prior_scale is not None else 1.0
+            gs_dist = tfd.Independent(
+                tfd.HalfCauchy(
+                    loc=jnp.zeros(gs.shape, dtype=self.dtype),
+                    scale=jnp.asarray(gs_scale, dtype=self.dtype)
+                    * jnp.ones(gs.shape, dtype=self.dtype),
+                ),
+                reinterpreted_batch_ndims=gs.ndim,
+            )
+            lp = lp + gs_dist.log_prob(gs)
+
+        return lp
+
     def create_distributions(self, grouping_params=None):
         """Create prior and surrogate distributions."""
         prior_scale = getattr(self, 'discrimination_prior_scale', None)

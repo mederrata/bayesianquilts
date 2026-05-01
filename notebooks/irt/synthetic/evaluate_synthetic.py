@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ.setdefault('JAX_PLATFORMS', 'cpu')
 os.environ['JAX_ENABLE_X64'] = '1'
 
 import numpy as np
@@ -42,7 +42,13 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
                  compute_elpd_loo=False,
                  nn_hidden_sizes=4,
                  nn_prior_scale=0.5,
-                 discrimination_prior_scale=None):
+                 discrimination_prior_scale=None,
+                 use_mcmc=False,
+                 mcmc_chains=2,
+                 mcmc_warmup=3000,
+                 mcmc_samples=500,
+                 mcmc_thinning=5,
+                 mcmc_step_size=0.001):
     """Run the full synthetic evaluation pipeline for one dataset.
 
     Steps:
@@ -66,7 +72,9 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
         compute_missingness_stats,
         sample_abilities,
         fit_grm_baseline,
+        fit_grm_baseline_mcmc,
         fit_grm_imputed,
+        fit_grm_imputed_mcmc,
         calibrate_model,
         compare_ability_ordering,
         make_comparison_plots,
@@ -201,20 +209,34 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     # 7. Fit baseline GRM on all data (no imputation — missing responses
     #    are marginalized out, contributing 0 to the log-likelihood)
     snapshot_epoch = 50  # save early checkpoint for warm-starting imputed model
-    print(f"\n--- Fitting baseline GRM on all data ({num_people} people, no imputation) ---")
-    baseline_model, snapshot_params = fit_grm_baseline(
-        synth_data, item_keys, response_cardinality, num_people,
-        save_dir=output_dir / "grm_baseline",
-        dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=grm_lr, patience=patience,
-        lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
-        snapshot_epoch=snapshot_epoch, sample_size=sample_size,
-        seed=seed, parameterization=parameterization,
-        pathfinder_init=pathfinder_init,
-        qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
-        compute_elpd_loo=compute_elpd_loo,
-        discrimination_prior_scale=discrimination_prior_scale,
-    )
+    snapshot_params = None
+
+    if use_mcmc:
+        print(f"\n--- Fitting baseline GRM via MCMC ({num_people} people) ---")
+        baseline_model, mcmc_baseline = fit_grm_baseline_mcmc(
+            synth_data, item_keys, response_cardinality, num_people,
+            save_dir=output_dir / "grm_baseline",
+            dim=dim, batch_size=batch_size,
+            seed=seed, discrimination_prior_scale=discrimination_prior_scale,
+            num_chains=mcmc_chains, num_warmup=mcmc_warmup,
+            num_samples=mcmc_samples, thinning=mcmc_thinning,
+            step_size=mcmc_step_size,
+        )
+    else:
+        print(f"\n--- Fitting baseline GRM on all data ({num_people} people, no imputation) ---")
+        baseline_model, snapshot_params = fit_grm_baseline(
+            synth_data, item_keys, response_cardinality, num_people,
+            save_dir=output_dir / "grm_baseline",
+            dim=dim, batch_size=batch_size, num_epochs=epochs,
+            learning_rate=grm_lr, patience=patience,
+            lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
+            snapshot_epoch=snapshot_epoch, sample_size=sample_size,
+            seed=seed, parameterization=parameterization,
+            pathfinder_init=pathfinder_init,
+            qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
+            compute_elpd_loo=compute_elpd_loo,
+            discrimination_prior_scale=discrimination_prior_scale,
+        )
     if snapshot_params is not None:
         print(f"  Using baseline epoch-{snapshot_epoch} snapshot to warm-start imputed model")
     else:
@@ -224,26 +246,39 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     gc.collect()
 
     # 8. Fit pairwise-only GRM (imputation from pairwise stacking, no IRT blending)
-    #    Warm-start from baseline final params (not snapshot)
     from bayesianquilts.imputation.mixed import PairwiseOnlyImputationModel
     pairwise_imputation = PairwiseOnlyImputationModel(mice_model=pairwise_model)
 
-    print(f"\n--- Fitting pairwise-only GRM on all data ({num_people} people) ---")
-    print(f"  Warm-starting from baseline model parameters")
-    mice_only_model = fit_grm_imputed(
-        synth_data, item_keys, response_cardinality, num_people,
-        save_dir=output_dir / "grm_mice_only",
-        imputation_model=pairwise_imputation,
-        dim=dim, batch_size=batch_size, num_epochs=epochs,
-        learning_rate=grm_lr, patience=patience,
-        lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
-        initial_values=baseline_model.params, sample_size=sample_size,
-        seed=seed + 1, parameterization=parameterization,
-        pathfinder_init=pathfinder_init,
-        qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
-        compute_elpd_loo=compute_elpd_loo,
-        discrimination_prior_scale=discrimination_prior_scale,
-    )
+    if use_mcmc:
+        print(f"\n--- Fitting pairwise-only GRM via MCMC ({num_people} people) ---")
+        mice_only_model, mcmc_mice = fit_grm_imputed_mcmc(
+            synth_data, item_keys, response_cardinality, num_people,
+            save_dir=output_dir / "grm_mice_only",
+            imputation_model=pairwise_imputation,
+            baseline_model=baseline_model,
+            dim=dim, batch_size=batch_size,
+            seed=seed + 1, discrimination_prior_scale=discrimination_prior_scale,
+            num_chains=mcmc_chains, num_warmup=mcmc_warmup,
+            num_samples=mcmc_samples, thinning=mcmc_thinning,
+            step_size=mcmc_step_size,
+        )
+    else:
+        print(f"\n--- Fitting pairwise-only GRM on all data ({num_people} people) ---")
+        print(f"  Warm-starting from baseline model parameters")
+        mice_only_model = fit_grm_imputed(
+            synth_data, item_keys, response_cardinality, num_people,
+            save_dir=output_dir / "grm_mice_only",
+            imputation_model=pairwise_imputation,
+            dim=dim, batch_size=batch_size, num_epochs=epochs,
+            learning_rate=grm_lr, patience=patience,
+            lr_decay_factor=lr_decay_factor, clip_norm=clip_norm,
+            initial_values=baseline_model.params, sample_size=sample_size,
+            seed=seed + 1, parameterization=parameterization,
+            pathfinder_init=pathfinder_init,
+            qmc=qmc, kl_anneal_epochs=kl_anneal_epochs,
+            compute_elpd_loo=compute_elpd_loo,
+            discrimination_prior_scale=discrimination_prior_scale,
+        )
 
     jax.clear_caches()
     gc.collect()
@@ -276,6 +311,20 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     if all_pairwise:
         print(f"\n--- All w_IRT ≈ 0 — mixed model identical to pairwise. Reusing. ---")
         imputed_model = mice_only_model
+    elif use_mcmc:
+        n_irt = sum(1 for k in item_keys if mixed_imputation.get_item_weight(k) < 1.0 - 1e-6)
+        print(f"\n--- Fitting mixed-imputed GRM via MCMC ({n_irt}/{len(item_keys)} items with IRT) ---")
+        imputed_model, mcmc_mixed = fit_grm_imputed_mcmc(
+            synth_data, item_keys, response_cardinality, num_people,
+            save_dir=output_dir / "grm_imputed",
+            imputation_model=mixed_imputation,
+            baseline_model=baseline_model,
+            dim=dim, batch_size=batch_size,
+            seed=seed + 2, discrimination_prior_scale=discrimination_prior_scale,
+            num_chains=mcmc_chains, num_warmup=mcmc_warmup,
+            num_samples=mcmc_samples, thinning=mcmc_thinning,
+            step_size=mcmc_step_size,
+        )
     else:
         n_irt = sum(1 for k in item_keys if mixed_imputation.get_item_weight(k) < 1.0 - 1e-6)
         print(f"\n--- Fitting mixed-imputed GRM ({n_irt}/{len(item_keys)} items with IRT contribution) ---")
@@ -460,7 +509,16 @@ def run_pipeline(dataset_name, output_dir, epochs=500, lr=1e-3, grm_lr=None,
     return results
 
 
-DATASETS = ['grit', 'rwa', 'tma', 'wpi', 'npi', 'eqsq', 'gcbs', 'scs']
+DATASETS = [
+    'grit', 'rwa', 'tma', 'wpi', 'npi', 'eqsq', 'gcbs', 'scs',
+    'promis_sleep', 'promis_substance_use',
+    'copd_depression', 'copd_anxiety', 'copd_anger',
+    'copd_fatigue_experience', 'copd_fatigue_impact',
+    'copd_pain_interference', 'copd_pain_behavior',
+    'copd_physical_function', 'copd_social_satisfaction',
+    'np_pain_interference', 'np_pain_behavior',
+    'np_global_health', 'np_physical_function',
+]
 
 
 def main():
@@ -523,6 +581,18 @@ def main():
                         help="Prior scale for NN params (smaller = more regularization, default 0.5)")
     parser.add_argument("--discrimination-prior-scale", type=float, default=None,
                         help="Scale for half_normal/half_cauchy discrimination prior")
+    parser.add_argument("--mcmc", action="store_true",
+                        help="Use MCMC (instead of ADVI) for GRM fitting")
+    parser.add_argument("--mcmc-chains", type=int, default=2,
+                        help="Number of MCMC chains (default 2)")
+    parser.add_argument("--mcmc-warmup", type=int, default=3000,
+                        help="MCMC warmup steps per chain (default 3000)")
+    parser.add_argument("--mcmc-samples", type=int, default=500,
+                        help="MCMC samples to keep per chain (default 500)")
+    parser.add_argument("--mcmc-thinning", type=int, default=5,
+                        help="MCMC thinning factor (default 5)")
+    parser.add_argument("--mcmc-step-size", type=float, default=0.001,
+                        help="Initial MCMC step size (default 0.001)")
     args = parser.parse_args()
 
     datasets = DATASETS if args.dataset == 'all' else [args.dataset]
@@ -563,6 +633,12 @@ def main():
             nn_hidden_sizes=args.nn_hidden_sizes,
             nn_prior_scale=args.nn_prior_scale,
             discrimination_prior_scale=args.discrimination_prior_scale,
+            use_mcmc=args.mcmc,
+            mcmc_chains=args.mcmc_chains,
+            mcmc_warmup=args.mcmc_warmup,
+            mcmc_samples=args.mcmc_samples,
+            mcmc_thinning=args.mcmc_thinning,
+            mcmc_step_size=args.mcmc_step_size,
         )
         all_results[ds] = results
 

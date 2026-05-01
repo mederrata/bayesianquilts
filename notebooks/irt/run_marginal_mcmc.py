@@ -21,8 +21,8 @@ import gc
 import os
 import sys
 
-os.environ['JAX_PLATFORMS'] = 'cpu'
-os.environ['JAX_ENABLE_X64'] = '1'
+os.environ.setdefault('JAX_PLATFORMS', 'cpu')
+os.environ.setdefault('JAX_ENABLE_X64', '1')
 
 import numpy as np
 import jax
@@ -55,22 +55,36 @@ def make_data_dict(dataframe, num_people):
 
 
 def run_single_variant(model, data, variant_name, output_dir,
-                       num_chains, num_warmup, num_samples, step_size, seed):
+                       num_chains, num_warmup, num_samples, step_size, seed,
+                       sampler='nuts', dense_mass=False):
     """Run MCMC for one variant and save results."""
-    print(f"\n  --- Variant: {variant_name} ---")
+    print(f"\n  --- Variant: {variant_name} (sampler={sampler}) ---")
     sys.stdout.flush()
 
-    mcmc_samples = model.fit_marginal_mcmc(
-        data,
-        theta_grid=None,
-        num_chains=num_chains,
-        num_warmup=num_warmup,
-        num_samples=num_samples,
-        target_accept_prob=0.85,
-        step_size=step_size,
-        seed=seed,
-        verbose=True,
-    )
+    if sampler == 'mala':
+        mcmc_samples = model.fit_marginal_mala(
+            data,
+            theta_grid=None,
+            num_chains=num_chains,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            step_size=step_size,
+            seed=seed,
+            verbose=True,
+        )
+    else:
+        mcmc_samples = model.fit_marginal_mcmc(
+            data,
+            theta_grid=None,
+            num_chains=num_chains,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            target_accept_prob=0.85,
+            step_size=step_size,
+            seed=seed,
+            verbose=True,
+            dense_mass=dense_mass,
+        )
 
     # EAP
     print(f"\n  Computing EAP abilities...")
@@ -119,20 +133,36 @@ def run_single_variant(model, data, variant_name, output_dir,
         flat = np.array(samples).reshape(-1, *samples.shape[2:])
         print(f"    {var_name}: mean={np.mean(flat):.4f}, std={np.std(flat):.4f}")
         if samples.shape[0] > 1:
-            chain_means = np.mean(np.array(samples), axis=1)
+            s = np.array(samples)
+            chain_means = np.mean(s, axis=1)
             between_var = np.var(chain_means, axis=0, ddof=1)
-            within_var = np.mean(np.var(np.array(samples), axis=1, ddof=1), axis=0)
+            within_var = np.mean(np.var(s, axis=1, ddof=1), axis=0)
             n = samples.shape[1]
+            # Flag params whose chains barely moved — typical of step-size
+            # floor hits where R-hat numerically explodes despite chains
+            # being effectively stationary at (close to) the init. Use a
+            # relative-to-between-var threshold so absolute-scale tiny
+            # params don't over-report as "frozen".
+            eps = np.maximum(between_var * 1e-8, np.abs(chain_means).mean() * 1e-12)
+            frozen = within_var <= eps
+            frac_frozen = float(np.mean(frozen))
             r_hat = np.sqrt(
                 ((n - 1) / n * within_var + between_var) /
-                np.maximum(within_var, 1e-30)
+                np.maximum(within_var, np.maximum(eps, 1e-30))
             )
-            print(f"      R-hat: mean={np.mean(r_hat):.4f}, max={np.max(r_hat):.4f}")
+            # Report R-hat on non-frozen params (informative) and frozen
+            # fraction separately (diagnostic).
+            if frac_frozen < 1.0:
+                rh_ok = r_hat[~frozen]
+                print(f"      R-hat (non-frozen): mean={np.mean(rh_ok):.4f}, "
+                      f"max={np.max(rh_ok):.4f}, frac<=1.1={(rh_ok<=1.1).mean():.2f}")
+            if frac_frozen > 0:
+                print(f"      frac_frozen (within_var≈0): {frac_frozen:.2f}")
     sys.stdout.flush()
 
 
 def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
-                step_size, seed, variants):
+                step_size, seed, variants, sampler='nuts', dense_mass=False):
     import importlib
     import inspect
     from pathlib import Path
@@ -185,7 +215,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         model = ModelClass.load_from_disk(str(model_path))
         data = dict(base_data)  # no imputation PMFs
         run_single_variant(model, data, 'baseline', output_dir,
-                           num_chains, num_warmup, num_samples, step_size, seed)
+                           num_chains, num_warmup, num_samples, step_size, seed,
+                           sampler=sampler, dense_mass=dense_mass)
         del model
         gc.collect()
 
@@ -200,7 +231,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
             # For pairwise-only, don't pass weights (full imputation, no IS blend)
         print(f"  Pairwise imputation PMFs attached")
         run_single_variant(model, data, 'pairwise', output_dir,
-                           num_chains, num_warmup, num_samples, step_size, seed + 1)
+                           num_chains, num_warmup, num_samples, step_size, seed + 1,
+                           sampler=sampler, dense_mass=dense_mass)
         del model
         gc.collect()
 
@@ -237,7 +269,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
                 data['_imputation_weights'] = weights
         print(f"  Mixed imputation PMFs attached (with IS weights)")
         run_single_variant(model, data, 'mixed', output_dir,
-                           num_chains, num_warmup, num_samples, step_size, seed + 2)
+                           num_chains, num_warmup, num_samples, step_size, seed + 2,
+                           sampler=sampler, dense_mass=dense_mass)
         del model, mixed_model
         gc.collect()
 
@@ -257,13 +290,18 @@ def main():
     parser.add_argument('--num-chains', type=int, default=2)
     parser.add_argument('--num-warmup', type=int, default=200)
     parser.add_argument('--num-samples', type=int, default=300)
-    parser.add_argument('--step-size', type=float, default=0.01,
+    parser.add_argument('--step-size', type=float, default=5e-4,
                         help='Initial NUTS step size')
     parser.add_argument('--variants', nargs='+',
                         default=['baseline', 'pairwise', 'mixed'],
                         choices=['baseline', 'pairwise', 'mixed'],
                         help='Which model variants to run')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--sampler', default='nuts', choices=['nuts', 'mala'],
+                        help='MCMC sampler: nuts (default) or mala (for stiff posteriors)')
+    parser.add_argument('--dense-mass', action='store_true',
+                        help='Use dense mass matrix (default: diagonal). '
+                             'NUTS only; ignored for MALA.')
     args = parser.parse_args()
 
     model_dir = args.model_dir or os.path.expanduser(
@@ -282,6 +320,8 @@ def main():
         step_size=args.step_size,
         seed=args.seed,
         variants=args.variants,
+        sampler=args.sampler,
+        dense_mass=args.dense_mass,
     )
 
 

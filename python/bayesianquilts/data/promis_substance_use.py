@@ -57,12 +57,18 @@ def _detect_item_columns(all_columns: list[str]) -> list[str]:
     return sorted([c for c in all_columns if pattern.match(c)])
 
 
-def get_data(polars_out=False, cache_dir=None):
+def get_data(reorient=False, polars_out=False, cache_dir=None):
     """Load the PROMIS Substance Use dataset.
 
     On first call, downloads data and detects sd*R* item columns.
     Responses are shifted from 1-5 to 0-4. Values 8/9 (missing codes)
     and out-of-range values become -1.
+
+    Args:
+        reorient: If True, reverse-score items with negative item-total
+            correlations (typically items with 'R' in the name).
+        polars_out: If True, return polars DataFrame.
+        cache_dir: Directory for caching downloaded data.
 
     Returns:
         Tuple of (dataset, num_people).
@@ -107,6 +113,32 @@ def get_data(polars_out=False, cache_dir=None):
         .alias(k)
         for k in item_keys
     ])
+
+    if reorient:
+        import numpy as np
+        arr = data.select(item_keys).to_numpy().astype(float)
+        arr[arr < 0] = np.nan
+        total = np.nanmean(arr, axis=1)
+        to_reverse = []
+        for i, k in enumerate(item_keys):
+            valid = ~np.isnan(arr[:, i])
+            if valid.sum() > 10:
+                r = np.corrcoef(arr[valid, i], total[valid])[0, 1]
+                if r < -0.05:
+                    to_reverse.append(k)
+        if to_reverse:
+            K = response_cardinality
+            data = data.with_columns([
+                (K - 1 - pl.col(k)).alias(k) for k in to_reverse
+            ])
+            data = data.with_columns([
+                pl.when((pl.col(k) < 0) | (pl.col(k) >= K))
+                .then(-1)
+                .otherwise(pl.col(k))
+                .alias(k)
+                for k in to_reverse
+            ])
+            print(f"  Reoriented {len(to_reverse)} items: {to_reverse}")
 
     data = data.with_row_index("person")
 
