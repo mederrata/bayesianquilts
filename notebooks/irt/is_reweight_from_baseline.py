@@ -75,12 +75,17 @@ def reweight_dataset(dataset_name, max_samples=None):
 
     # Load baseline MCMC samples
     saved = dict(np.load(str(baseline_npz)))
+    skip_keys = {'eap', 'psd', 'standardize_mu', 'standardize_sigma',
+                 'eap_standardized', 'psd_standardized'}
     mcmc_samples = {}
-    item_var_list = [v for v in model.var_list if not v.startswith('abilities')]
-    for var in item_var_list:
-        if var in saved:
-            mcmc_samples[var] = jnp.array(saved[var])
-    print(f"  Baseline samples: {mcmc_samples[item_var_list[0]].shape}")
+    for k, v in saved.items():
+        if k in skip_keys:
+            continue
+        if hasattr(v, 'shape') and len(v.shape) >= 3:
+            mcmc_samples[k] = jnp.array(v)
+    first_key = list(mcmc_samples.keys())[0]
+    print(f"  Baseline samples: {mcmc_samples[first_key].shape} "
+          f"({list(mcmc_samples.keys())})")
 
     # Check baseline R-hat first
     max_rhat = 0

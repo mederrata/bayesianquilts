@@ -466,6 +466,61 @@ class FactorizedGRModel(IRTModel):
 
         return params
 
+    def _mcmc_log_prior(self, item_params):
+        """MCMC prior with per-scale ``mu_j`` integrated out; tightened scales.
+
+        Built explicitly from scratch (not via ``joint_prior_distribution``)
+        so the MCMC path uses tighter scales than the ADVI path.
+        Aggressive regularization per GRM scale-degeneracy:
+          * ``difficulties0_{j}`` ~ ``Normal(d0_loc, 0.7)``
+          * ``discriminations_{j}`` ~ ``HalfNormal(0.5)``
+          * ``ddifficulties_{j}`` ~ ``HalfNormal(0.5)``
+
+        ``mu_j`` and ``abilities_j`` are Rao-Blackwellized / dropped.
+        ADVI is untouched — only ``marginal_log_prob(drop_mu_prior=True)``
+        calls this.
+        """
+        K = self.response_cardinality
+        d0_loc = -(K - 2) / 2.0
+
+        lp = jnp.asarray(0.0, dtype=self.dtype)
+        for j, _indices in enumerate(self.scale_indices):
+            d0_name = f"difficulties0_{j}"
+            if d0_name in item_params:
+                diff0 = jnp.asarray(item_params[d0_name], dtype=self.dtype)
+                d0_prior = tfd.Independent(
+                    tfd.Normal(
+                        loc=jnp.full(diff0.shape, d0_loc, dtype=self.dtype),
+                        scale=0.7 * jnp.ones(diff0.shape, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=diff0.ndim,
+                )
+                lp = lp + d0_prior.log_prob(diff0)
+
+            disc_name = f"discriminations_{j}"
+            if disc_name in item_params:
+                disc = jnp.asarray(item_params[disc_name], dtype=self.dtype)
+                disc_dist = tfd.Independent(
+                    tfd.HalfNormal(
+                        scale=0.5 * jnp.ones(disc.shape, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=disc.ndim,
+                )
+                lp = lp + disc_dist.log_prob(disc)
+
+            ddiff_name = f"ddifficulties_{j}"
+            if ddiff_name in item_params:
+                ddiff = jnp.asarray(item_params[ddiff_name], dtype=self.dtype)
+                ddiff_dist = tfd.Independent(
+                    tfd.HalfNormal(
+                        scale=0.5 * jnp.ones(ddiff.shape, dtype=self.dtype),
+                    ),
+                    reinterpreted_batch_ndims=ddiff.ndim,
+                )
+                lp = lp + ddiff_dist.log_prob(ddiff)
+
+        return lp
+
     def gen_discrim_prior(self, j, indices):
         out = {}
         out[f"discriminations_{j}"] = tfd.Independent(
