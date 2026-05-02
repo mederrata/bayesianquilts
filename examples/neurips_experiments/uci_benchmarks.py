@@ -1000,12 +1000,15 @@ def run_single_dataset(
                 # Use minibatch for large datasets (>10K samples)
                 n_train = len(train_data["y"])
                 batch_size = 2048 if n_train > 10000 else None
+                # Fewer steps for very large datasets
+                n_steps = 1000 if n_train > 50000 else 2000 if n_train > 10000 else 3000
 
                 for order in range(effective_max_order + 1):
                     params = fit_logistic_model(
                         train_data, decomp, order, prior_scales,
                         sparse=use_sparse, l1_weight=0.01 if use_sparse else 0.0,
                         batch_size=batch_size,
+                        n_steps=n_steps,
                     )
 
                     train_metrics = evaluate_model(train_data, decomp, params)
