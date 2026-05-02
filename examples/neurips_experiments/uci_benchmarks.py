@@ -57,6 +57,26 @@ except ImportError:
 
 from bayesianquilts.jax.parameter import Decomposed, Interactions, Dimension
 
+# Import tuned dataset-specific configs
+TUNED_CONFIGS = {}
+try:
+    from improve_adult_v30 import run_adult as run_adult_tuned
+    TUNED_CONFIGS["adult"] = run_adult_tuned
+except ImportError:
+    pass
+
+try:
+    from improve_bank import run_bank as run_bank_tuned
+    TUNED_CONFIGS["bank"] = run_bank_tuned
+except ImportError:
+    pass
+
+try:
+    from rerun_german_credit_v7 import run_german_credit as run_german_tuned
+    TUNED_CONFIGS["german"] = run_german_tuned
+except ImportError:
+    pass
+
 
 UCI_DATASETS = {
     "german": {
@@ -197,6 +217,29 @@ UCI_DATASETS = {
         "N": 1593,
         "p": 256,
     },
+    "covertype": {
+        "loader": "openml",
+        "openml_id": 293,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_direct_bins": True,
+        "use_pairwise": True,
+        "binary_target": "2",  # Lodgepole Pine vs others
+        "N": 581012,
+        "p": 54,
+    },
+    "higgs": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_direct_bins": True,
+        "use_pairwise": True,
+        "N": 11000000,
+        "p": 28,
+    },
 }
 
 
@@ -247,10 +290,19 @@ def download_dataset(dataset_name: str, data_dir: str) -> pd.DataFrame:
         if not HAS_OPENML:
             raise ImportError("sklearn.datasets.fetch_openml required for OpenML datasets")
         openml_id = config["openml_id"]
-        data = fetch_openml(data_id=openml_id, as_frame=True, parser='auto')
-        df = data.frame
-        if config["target"] not in df.columns and hasattr(data, 'target_names'):
-            df[config["target"]] = data.target
+        # Use as_frame=False for large datasets that may return sparse
+        data = fetch_openml(data_id=openml_id, as_frame=False, parser='auto')
+        X = data.data
+        y = data.target
+        # Convert sparse to dense if needed
+        if hasattr(X, 'toarray'):
+            X = X.toarray()
+        feature_names = data.feature_names if data.feature_names else [f"f{i}" for i in range(X.shape[1])]
+        df = pd.DataFrame(X, columns=feature_names)
+        df[config["target"]] = y
+        # Handle binary_target for multiclass->binary conversion
+        if "binary_target" in config:
+            df[config["target"]] = (df[config["target"]].astype(str) == config["binary_target"]).astype(int)
 
     elif dataset_name == "adult":
         local_path = Path(data_dir) / "adult.data"
@@ -1011,6 +1063,7 @@ def main():
     parser.add_argument("--datasets", type=str, default=None, help="Comma-separated list of datasets")
     parser.add_argument("--baselines-only", action="store_true", help="Run only baseline models")
     parser.add_argument("--ours-only", action="store_true", help="Run only our models (sparse, gen_preserving)")
+    parser.add_argument("--tuned", action="store_true", help="Use tuned dataset-specific configs for Ours")
     args = parser.parse_args()
 
     baselines_only = getattr(args, 'baselines_only', False)
@@ -1053,7 +1106,22 @@ def main():
             ours_only=ours_only,
         )
 
-    run_full_experiment(config)
+    # Use tuned configs if available and requested
+    if args.tuned:
+        print("Using tuned dataset-specific configurations for Ours")
+        print(f"Available tuned configs: {list(TUNED_CONFIGS.keys())}")
+        for dataset in config.datasets:
+            if dataset in TUNED_CONFIGS:
+                print(f"\nRunning tuned config for {dataset}...")
+                try:
+                    TUNED_CONFIGS[dataset]()
+                except Exception as e:
+                    print(f"Error running tuned {dataset}: {e}")
+            else:
+                print(f"No tuned config for {dataset}, using generic")
+                run_single_dataset(dataset, config)
+    else:
+        run_full_experiment(config)
 
 
 if __name__ == "__main__":
