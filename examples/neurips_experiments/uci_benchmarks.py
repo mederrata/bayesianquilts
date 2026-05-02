@@ -225,7 +225,7 @@ UCI_DATASETS = {
         "numeric": "all",
         "use_direct_bins": True,
         "use_pairwise": True,
-        "binary_target": "2",  # Lodgepole Pine vs others
+        # Already binary: -1 vs 1 (class 2 vs others)
         "N": 581012,
         "p": 54,
     },
@@ -237,7 +237,8 @@ UCI_DATASETS = {
         "numeric": "all",
         "use_direct_bins": True,
         "use_pairwise": True,
-        "N": 11000000,
+        # OpenML version has 98K samples (subsampled from full 11M)
+        "N": 98050,
         "p": 28,
     },
 }

@@ -1,0 +1,20 @@
+MLP Baseline Results (moved to supplement)
+==========================================
+Multi-Layer Perceptron (2 hidden layers, 64 units each)
+Results: Test AUC (mean ± std, 5-fold stratified CV)
+
+| Dataset        | N      | p    | MLP AUC         |
+|----------------|--------|------|-----------------|
+| Heart Disease  | 270    | 13   | 0.677 ± 0.156   |
+| German Credit  | 1000   | 48   | 0.716 ± 0.136   |
+| Madelon        | 2600   | 500  | 0.580 ± 0.033   |
+| Bioresponse    | 3751   | 1776 | 0.839 ± 0.013   |
+| Spambase       | 4601   | 57   | 0.977 ± 0.008   |
+| Phoneme        | 5404   | 5    | 0.915 ± 0.009   |
+| Taiwan Credit  | 30000  | 23   | 0.772 ± 0.009   |
+| Bank Marketing | 45211  | 7    | 0.924 ± 0.005   |
+| Electricity    | 45312  | 8    | 0.882 ± 0.006   |
+| Adult          | 48842  | 6    | 0.911 ± 0.003   |
+
+Note: MLP shows high variance on small datasets (Heart, German)
+and underperforms gradient boosting methods on most benchmarks.
