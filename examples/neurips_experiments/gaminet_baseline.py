@@ -240,60 +240,184 @@ def run_covertype():
 
 
 def run_higgs():
-    """Run GAMINet on HIGGS (N=11,000,000 - very large dataset).
-
-    Note: GAMINet is limited to pairwise interactions while our method
-    can handle higher-order. This tests whether pairwise is sufficient.
-    """
+    """Run GAMINet on HIGGS (N=98,050 on OpenML)."""
     data = fetch_openml(data_id=23512, as_frame=False, parser="auto")
     X = data.data
     y_raw = data.target
 
-    # Convert sparse to dense if needed
     if hasattr(X, 'toarray'):
         X = X.toarray()
+    X = np.nan_to_num(X, nan=0.0)
 
-    # Create DataFrame
     feature_names = data.feature_names if data.feature_names else [f"f{i}" for i in range(X.shape[1])]
     df = pd.DataFrame(X, columns=feature_names)
 
-    # All features numeric
     num_cols = list(df.columns)
     cat_cols = []
 
-    # Binary classification
-    y = y_raw.astype(int)
+    y = (y_raw == '1').astype(int)
 
     print(f"HIGGS: N={len(y)}, pos_rate={y.mean():.3f}")
 
     return run_gaminet_dataset("HIGGS", df, cat_cols, num_cols, y)
 
 
+def run_madelon():
+    """Run GAMINet on Madelon (N=2600, p=500)."""
+    data = fetch_openml(data_id=1485, as_frame=False, parser="auto")
+    X = data.data
+    y_raw = data.target
+
+    if hasattr(X, 'toarray'):
+        X = X.toarray()
+
+    feature_names = data.feature_names if data.feature_names else [f"f{i}" for i in range(X.shape[1])]
+    df = pd.DataFrame(X, columns=feature_names)
+
+    num_cols = list(df.columns)
+    cat_cols = []
+
+    y = (y_raw == '1').astype(int)
+
+    return run_gaminet_dataset("Madelon", df, cat_cols, num_cols, y)
+
+
+def run_bioresponse():
+    """Run GAMINet on Bioresponse (N=3751, p=1776)."""
+    data = fetch_openml(data_id=4134, as_frame=False, parser="auto")
+    X = data.data
+    y_raw = data.target
+
+    if hasattr(X, 'toarray'):
+        X = X.toarray()
+
+    feature_names = data.feature_names if data.feature_names else [f"f{i}" for i in range(X.shape[1])]
+    df = pd.DataFrame(X, columns=feature_names)
+
+    num_cols = list(df.columns)
+    cat_cols = []
+
+    y = (y_raw == '1').astype(int)
+
+    return run_gaminet_dataset("Bioresponse", df, cat_cols, num_cols, y)
+
+
+def run_spambase():
+    """Run GAMINet on Spambase (N=4601, p=57)."""
+    data = fetch_openml(data_id=44, as_frame=False, parser="auto")
+    X = data.data
+    y_raw = data.target
+
+    if hasattr(X, 'toarray'):
+        X = X.toarray()
+
+    feature_names = data.feature_names if data.feature_names else [f"f{i}" for i in range(X.shape[1])]
+    df = pd.DataFrame(X, columns=feature_names)
+
+    num_cols = list(df.columns)
+    cat_cols = []
+
+    y = (y_raw == '1').astype(int)
+
+    return run_gaminet_dataset("Spambase", df, cat_cols, num_cols, y)
+
+
+def run_phoneme():
+    """Run GAMINet on Phoneme (N=5404, p=5)."""
+    data = fetch_openml(data_id=1489, as_frame=False, parser="auto")
+    X = data.data
+    y_raw = data.target
+
+    if hasattr(X, 'toarray'):
+        X = X.toarray()
+
+    feature_names = data.feature_names if data.feature_names else [f"f{i}" for i in range(X.shape[1])]
+    df = pd.DataFrame(X, columns=feature_names)
+
+    num_cols = list(df.columns)
+    cat_cols = []
+
+    y = (y_raw == '1').astype(int)
+
+    return run_gaminet_dataset("Phoneme", df, cat_cols, num_cols, y)
+
+
+def run_taiwan():
+    """Run GAMINet on Taiwan Credit (N=30000, p=23)."""
+    data = fetch_openml(data_id=42477, as_frame=True, parser="auto")
+    df = data.frame
+
+    cat_cols = ["x2", "x3", "x4"]  # SEX, EDUCATION, MARRIAGE
+    num_cols = ["x1", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
+                "x12", "x13", "x14", "x15", "x16", "x17",
+                "x18", "x19", "x20", "x21", "x22", "x23"]
+
+    y = df["y"].astype(int).values
+
+    return run_gaminet_dataset("Taiwan Credit", df, cat_cols, num_cols, y)
+
+
+def run_electricity():
+    """Run GAMINet on Electricity (N=45312, p=8)."""
+    data = fetch_openml(data_id=151, as_frame=True, parser="auto")
+    df = data.frame
+
+    cat_cols = ["day"]
+    num_cols = ["date", "period", "nswprice", "nswdemand", "vicprice", "vicdemand", "transfer"]
+
+    y = (df["class"] == "UP").astype(int).values
+
+    return run_gaminet_dataset("Electricity", df, cat_cols, num_cols, y)
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", choices=["heart", "german", "adult", "bank", "covertype", "higgs", "all", "small", "large"], default="all")
+    parser.add_argument("--dataset", choices=[
+        "heart", "german", "madelon", "bioresponse", "spambase", "phoneme",
+        "taiwan", "bank", "electricity", "adult", "higgs", "covertype",
+        "all", "small", "medium", "large"
+    ], default="all")
     args = parser.parse_args()
 
     results = {}
 
+    # In order of Table 2 (by sample size)
     if args.dataset in ["heart", "all", "small"]:
         results["heart"] = run_heart()
 
     if args.dataset in ["german", "all", "small"]:
         results["german"] = run_german()
 
-    if args.dataset in ["adult", "all"]:
-        results["adult"] = run_adult()
+    if args.dataset in ["madelon", "all", "small"]:
+        results["madelon"] = run_madelon()
+
+    if args.dataset in ["bioresponse", "all", "medium"]:
+        results["bioresponse"] = run_bioresponse()
+
+    if args.dataset in ["spambase", "all", "medium"]:
+        results["spambase"] = run_spambase()
+
+    if args.dataset in ["phoneme", "all", "medium"]:
+        results["phoneme"] = run_phoneme()
+
+    if args.dataset in ["taiwan", "all", "medium"]:
+        results["taiwan"] = run_taiwan()
 
     if args.dataset in ["bank", "all"]:
         results["bank"] = run_bank()
 
-    if args.dataset in ["covertype", "all", "large"]:
-        results["covertype"] = run_covertype()
+    if args.dataset in ["electricity", "all"]:
+        results["electricity"] = run_electricity()
+
+    if args.dataset in ["adult", "all"]:
+        results["adult"] = run_adult()
 
     if args.dataset in ["higgs", "all", "large"]:
         results["higgs"] = run_higgs()
+
+    if args.dataset in ["covertype", "all", "large"]:
+        results["covertype"] = run_covertype()
 
     print("\n" + "="*60)
     print("SUMMARY")
