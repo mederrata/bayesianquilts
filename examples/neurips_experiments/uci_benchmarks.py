@@ -266,29 +266,47 @@ UCI_DATASETS = {
         "p": 28,
     },
     # Alternative configs for HIGGS - try if main ones underperform
-    "higgs_small": {
+    # Approach: Use fewer but key features, allowing higher-order interactions
+    "higgs_key4": {
         "loader": "openml",
         "openml_id": 23512,
         "target": "class",
         "categorical": [],
-        "numeric": "all",
-        "use_pca": True,
-        "pca_components": 3,
+        # First 4 features are lepton pT, eta, phi, and missing ET - key physics
+        "numeric": [0, 1, 2, 3],
+        "use_direct_bins": True,
         "use_pairwise": True,
-        "max_bins": 6,
+        "max_bins": 5,
+        "max_order": 2,  # Allow pairwise
         "N": 98050,
         "p": 28,
     },
-    "higgs_dense": {
+    # Try 6 key features with order 2
+    "higgs_key6": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        # Lepton features + jet masses
+        "numeric": [0, 1, 4, 5, 7, 10],
+        "use_direct_bins": True,
+        "use_pairwise": True,
+        "max_bins": 4,
+        "max_order": 2,
+        "N": 98050,
+        "p": 28,
+    },
+    # More PCA components but tighter binning
+    "higgs_pca8": {
         "loader": "openml",
         "openml_id": 23512,
         "target": "class",
         "categorical": [],
         "numeric": "all",
         "use_pca": True,
-        "pca_components": 4,
+        "pca_components": 8,
         "use_pairwise": True,
-        "max_bins": 5,
+        "max_bins": 4,
         "max_order": 2,
         "N": 98050,
         "p": 28,
@@ -416,6 +434,10 @@ def prepare_dataset(
     if numeric_cols == "all":
         numeric_cols = [c for c in df.columns if c != config["target"]
                        and df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
+    elif isinstance(numeric_cols[0] if numeric_cols else None, int):
+        # Handle integer indices - convert to column names
+        all_cols = [c for c in df.columns if c != config["target"]]
+        numeric_cols = [all_cols[i] for i in numeric_cols if i < len(all_cols)]
     else:
         numeric_cols = [c for c in numeric_cols if c in df.columns]
 
