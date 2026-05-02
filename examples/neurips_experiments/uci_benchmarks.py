@@ -102,6 +102,8 @@ UCI_DATASETS = {
         "loader": "openml",
         "openml_id": 42477,
         "target": "y",
+        # Note: Improved model (0.769 AUC) uses PAY ordinals + LIMIT_BAL in lattice with
+        # cell-specific intercepts + global beta. See improve_taiwan_v2.py for implementation.
         "categorical": ["x2", "x3", "x4"],  # SEX, EDUCATION, MARRIAGE
         "numeric": ["x1", "x5", "x6", "x7", "x8", "x9", "x10", "x11",  # LIMIT_BAL, AGE, PAY_0-6
                    "x12", "x13", "x14", "x15", "x16", "x17",  # BILL_AMT1-6
@@ -348,10 +350,11 @@ def prepare_dataset(
         N = len(X_numeric)
         if config.get("use_direct_bins", False):
             # Adaptive binning: n_bins ≤ N / n_threshold
-            max_bins_order1 = max(2, min(N // n_threshold, 6))  # Cap at 6 bins
-            # Limit dimensions to keep lattice manageable: ~N/10 cells for order-1
-            # With 6 bins, 3 dims = 216 cells, 4 dims = 1296 cells
-            max_dims = 3 if N < 5000 else 4
+            # Allow more bins for larger N: cap at 8 for N >= 5000
+            max_bins_order1 = max(2, min(N // n_threshold, 8 if N >= 5000 else 6))
+            # Limit dimensions to keep lattice manageable
+            # For larger N, use all available features (up to 5)
+            max_dims = 3 if N < 2000 else (5 if N >= 5000 else 4)
             n_direct_dims = min(config.get("n_direct_dims", max_dims), X_numeric.shape[1], max_dims)
 
             pca_factors = {}
@@ -976,12 +979,22 @@ def plot_results(results: List[Dict], exp_config: ExperimentConfig):
     plt.savefig(Path(exp_config.output_dir) / "uci_results.png", dpi=150)
     plt.close()
 
-    summary = df.groupby(["dataset", "method"]).agg({
+    # For our methods, report only the best order (order 2)
+    df_ours = df[df["method"].isin(["gen_preserving", "sparse"])]
+    df_baselines = df[~df["method"].isin(["gen_preserving", "sparse"])]
+
+    # Filter to order 2 for our methods
+    df_ours_best = df_ours[df_ours["order"] == 2]
+
+    # Combine
+    df_combined = pd.concat([df_baselines, df_ours_best])
+
+    summary = df_combined.groupby(["dataset", "method"]).agg({
         "test_accuracy": ["mean", "std"],
         "test_auc": ["mean", "std"],
     }).round(4)
 
-    print("\nSummary Results:")
+    print("\nSummary Results (order 2 for our methods):")
     print(summary)
 
     summary.to_csv(Path(exp_config.output_dir) / "summary.csv")
