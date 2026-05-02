@@ -241,6 +241,18 @@ UCI_DATASETS = {
         "N": 98050,
         "p": 28,
     },
+    "higgs_pca": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_pca": True,
+        "pca_components": 10,
+        "use_pairwise": True,
+        "N": 98050,
+        "p": 28,
+    },
 }
 
 
