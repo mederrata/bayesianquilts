@@ -569,6 +569,7 @@ def fit_logistic_model(
     learning_rate: float = 0.01,
     sparse: bool = True,
     l1_weight: float = 0.005,
+    batch_size: Optional[int] = None,
 ) -> Dict:
     """Fit logistic regression with hierarchical coefficients.
 
@@ -581,6 +582,7 @@ def fit_logistic_model(
         learning_rate: Learning rate
         sparse: Whether to use L1 sparsity penalty
         l1_weight: Weight for L1 penalty
+        batch_size: If set, use minibatch training (helpful for large datasets)
 
     Returns:
         Fitted parameters
@@ -596,7 +598,6 @@ def fit_logistic_model(
         name: jnp.zeros(decomp._tensor_part_shapes[name])
         for name in active_components
     }
-    # Add intercept parameter (not multiplied by X)
     params["_intercept"] = jnp.zeros(1)
 
     dim_names = [d.name for d in decomp._interactions._dimensions]
@@ -607,49 +608,61 @@ def fit_logistic_model(
 
     X = jnp.array(data["X"])
     y = jnp.array(data["y"])
+    N = len(y)
 
-    def loss_fn(params):
-        # Separate intercept from other params
+    def loss_fn(params, X_batch, y_batch, indices_batch):
         intercept = params.get("_intercept", jnp.zeros(1))
         model_params = {k: v for k, v in params.items() if k != "_intercept"}
 
-        beta = lookup_params(decomp, interaction_indices, model_params)
-        logits = jnp.sum(X * beta, axis=-1) + intercept[0]
+        beta = lookup_params(decomp, indices_batch, model_params)
+        logits = jnp.sum(X_batch * beta, axis=-1) + intercept[0]
 
         bce = jnp.mean(
-            jnp.logaddexp(0, logits) - y * logits
+            jnp.logaddexp(0, logits) - y_batch * logits
         )
 
-        # L2 regularization (ridge) - weaker regularization
         l2_reg = 0.0
         for name, param in model_params.items():
             scale = prior_scales.get(name, 1.0)
-            # Use weaker regularization (multiply scale by 10)
             l2_reg += 0.5 * jnp.sum(param ** 2) / ((scale * 10) ** 2)
 
-        # L1 regularization for sparsity (elastic net style) - weaker
         l1_reg = 0.0
         if sparse:
             for name, param in model_params.items():
                 order = decomp.component_order(name)
-                # Weaker L1, only on higher-order terms
                 if order > 0:
                     l1_reg += l1_weight * order * jnp.sum(jnp.abs(param))
 
-        return bce + l2_reg / len(y) + l1_reg / len(y)
+        return bce + l2_reg / N + l1_reg / N
 
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(params)
 
     @jax.jit
-    def step(params, opt_state):
-        loss, grads = jax.value_and_grad(loss_fn)(params)
+    def step(params, opt_state, X_batch, y_batch, indices_batch):
+        loss, grads = jax.value_and_grad(loss_fn)(params, X_batch, y_batch, indices_batch)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
 
-    for _ in range(n_steps):
-        params, opt_state, loss = step(params, opt_state)
+    if batch_size is None or batch_size >= N:
+        for _ in range(n_steps):
+            params, opt_state, loss = step(params, opt_state, X, y, interaction_indices)
+    else:
+        rng = np.random.default_rng(42)
+        steps_per_epoch = max(1, N // batch_size)
+        n_epochs = max(1, n_steps // steps_per_epoch)
+
+        for epoch in range(n_epochs):
+            perm = rng.permutation(N)
+            for i in range(steps_per_epoch):
+                start = i * batch_size
+                end = min(start + batch_size, N)
+                idx = perm[start:end]
+                params, opt_state, loss = step(
+                    params, opt_state,
+                    X[idx], y[idx], interaction_indices[idx]
+                )
 
     return params
 
@@ -944,14 +957,23 @@ def run_single_dataset(
                         per_component=True,
                     )
 
+                # Use minibatch for large datasets (>10K samples)
+                n_train = len(train_data["y"])
+                batch_size = 2048 if n_train > 10000 else None
+
                 for order in range(effective_max_order + 1):
                     params = fit_logistic_model(
                         train_data, decomp, order, prior_scales,
                         sparse=use_sparse, l1_weight=0.01 if use_sparse else 0.0,
+                        batch_size=batch_size,
                     )
 
                     train_metrics = evaluate_model(train_data, decomp, params)
                     test_metrics = evaluate_model(test_data, decomp, params)
+
+                    # Print per-fold AUC for monitoring
+                    print(f"  {dataset_name} | {method} | order={order} | fold={fold} | "
+                          f"test_AUC={test_metrics['auc']:.4f}")
 
                     result = {
                         "dataset": dataset_name,
