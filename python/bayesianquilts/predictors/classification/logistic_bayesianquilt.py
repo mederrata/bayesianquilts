@@ -502,6 +502,50 @@ class LogisticBayesianquilt(QuiltedBayesianModel):
     def expand(self, interaction):
         raise NotImplementedError("expand() not yet implemented for this model")
 
+    def estimate_noise_scale_from_data(self, data, params=None):
+        """Estimate effective noise scale from Fisher information.
+
+        For logistic regression, the Fisher information for observation i is
+        I_i = p_i(1 - p_i). The effective noise variance is:
+
+            σ²_eff = 1 / E[p(1-p)]
+
+        This can be used to set noise_scale for theory-based regularization.
+
+        Args:
+            data: Data dict containing covariates and outcome
+            params: Optional parameters for computing predictions
+                   (if None, uses uniform predictions p=0.5)
+
+        Returns:
+            Estimated noise scale σ_eff
+        """
+        if params is not None:
+            pred = self.predictive_distribution(data, **params)
+            logits = pred['logits']
+            probs = jax.nn.softmax(logits, axis=-1)[..., -1]  # P(y=1)
+        else:
+            # Default assumption: p ≈ 0.5 initially
+            probs = 0.5
+
+        probs = jnp.clip(probs, 1e-6, 1 - 1e-6)
+        fisher_weights = probs * (1 - probs)
+        avg_fisher = jnp.mean(fisher_weights)
+        sigma_eff = 1.0 / jnp.sqrt(avg_fisher)
+        return float(sigma_eff)
+
+    def update_noise_scale(self, sigma_eff):
+        """Update noise scale and recreate distributions.
+
+        Call this after initial fitting to update regularization scales
+        based on estimated Fisher information.
+
+        Args:
+            sigma_eff: New noise scale estimate
+        """
+        self.noise_scale = sigma_eff
+        self.create_distributions()
+
     def fit(
         self,
         batched_data_factory,
