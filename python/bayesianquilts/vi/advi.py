@@ -417,6 +417,17 @@ def build_factored_surrogate_posterior_generator(
     var_labels = []
     if bijectors is None: bijectors = defaultdict(tfb.Identity)
 
+    # Auto-detect positive-constrained distributions and add Softplus bijector
+    for k, v in joint_distribution_named.model.items():
+        if k in exclude or k in bijectors:
+            continue
+        # Unwrap Independent wrapper if present
+        dist = v.distribution if hasattr(v, 'distribution') else v
+        # Check for distributions that require positive support
+        if isinstance(dist, (tfd.HalfNormal, tfd.HalfCauchy, tfd.Exponential,
+                            tfd.Gamma, tfd.InverseGamma, tfd.LogNormal)):
+            bijectors[k] = tfb.Softplus()
+
     # Track event shapes for low-rank initialization
     var_event_shapes = {}
 
