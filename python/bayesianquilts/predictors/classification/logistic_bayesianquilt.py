@@ -26,7 +26,7 @@ class LogisticBayesianquilt(QuiltedBayesianModel):
         intercept_interact,
         split_quantiles=2,
         random_intercept_interact=None,
-        dim_decay_factor=0.9,
+        dim_decay_factor=None,
         strategy=None,
         regressor_scales=None,
         regressor_offsets=None,
@@ -35,6 +35,11 @@ class LogisticBayesianquilt(QuiltedBayesianModel):
         outcome_classes=2,
         initialize_distributions=True,
         regression_shrinkage_scale=4e-2,
+        total_n=None,
+        noise_scale=1.0,
+        use_generalization_preserving=True,
+        df_eff_bound=0.5,
+        per_component_bound=True,
     ):
         super(LogisticBayesianquilt, self).__init__(dtype=dtype, strategy=strategy)
         self.split_quantiles = split_quantiles
@@ -46,6 +51,11 @@ class LogisticBayesianquilt(QuiltedBayesianModel):
         self.dim_regressors = dim_regressors
         self.random_intercept_interact = random_intercept_interact
         self.regression_shrinkage_scale = regression_shrinkage_scale
+        self.total_n = total_n
+        self.noise_scale = noise_scale
+        self.use_generalization_preserving = use_generalization_preserving
+        self.df_eff_bound = df_eff_bound
+        self.per_component_bound = per_component_bound
         self.outcome_label = outcome_label
         self.outcome_classes = outcome_classes
         if regressor_scales is None:
@@ -114,11 +124,23 @@ class LogisticBayesianquilt(QuiltedBayesianModel):
             regression_vars,
             regression_shapes,
         ) = self.regression_decomposition.generate_tensors(dtype=self.dtype)
-        regression_scales = {
-            k: 5 * self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
-            for k, v in regression_shapes.items()
-        }
-        #  self.regression_decomposition.set_scales(regression_scales)
+
+        if self.use_generalization_preserving and self.total_n is not None:
+            regression_scales = self.regression_decomposition.generalization_preserving_scales(
+                noise_scale=self.noise_scale,
+                total_n=self.total_n,
+                c=self.df_eff_bound,
+                per_component=self.per_component_bound,
+            )
+        elif self.dim_decay_factor is not None:
+            regression_scales = {
+                k: 5 * self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
+                for k, v in regression_shapes.items()
+            }
+        else:
+            regression_scales = {k: 1.0 for k in regression_shapes.keys()}
+
+        self.regression_scales = regression_scales
         self.regression_vars = regression_vars
         self.regression_var_list = list(regression_vars.keys())
 
@@ -228,17 +250,29 @@ class LogisticBayesianquilt(QuiltedBayesianModel):
             regression_model, bijectors=bijectors
         )
 
-        #  Exponential params
+        #  Intercept params
         (
             intercept_tensors,
             intercept_vars,
             intercept_shapes,
         ) = self.intercept_decomposition.generate_tensors(dtype=self.dtype)
-        intercept_scales = {
-            k: 20 * self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
-            for k, v in intercept_shapes.items()
-        }
-        #  self.intercept_decomposition.set_scales(intercept_scales)
+
+        if self.use_generalization_preserving and self.total_n is not None:
+            intercept_scales = self.intercept_decomposition.generalization_preserving_scales(
+                noise_scale=self.noise_scale,
+                total_n=self.total_n,
+                c=self.df_eff_bound,
+                per_component=self.per_component_bound,
+            )
+        elif self.dim_decay_factor is not None:
+            intercept_scales = {
+                k: 20 * self.dim_decay_factor ** (len([d for d in v if d > 1]) - 1)
+                for k, v in intercept_shapes.items()
+            }
+        else:
+            intercept_scales = {k: 1.0 for k in intercept_shapes.keys()}
+
+        self.intercept_scales = intercept_scales
         self.intercept_vars = intercept_vars
         intercept_dict = {}
         for label, tensor in intercept_tensors.items():

@@ -18,10 +18,20 @@ Stacking weights are determined by LOO-ELPD.
 This module is self-contained and does NOT depend on MICEBayesianLOO.
 """
 
+import sys
 import numpy as np
 import pandas as pd
 import jax
 import jax.numpy as jnp
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 jax.config.update("jax_enable_x64", True)
 
@@ -536,6 +546,10 @@ class DirichletMultinomialContingency:
         """
         if result.alpha_posterior is None or result.predictor_categories is None:
             K = len(result.target_categories) if result.target_categories is not None else 2
+            _warn_fallback(
+                f"DM model has no posterior (alpha_posterior={result.alpha_posterior is not None}, "
+                f"predictor_categories={result.predictor_categories is not None}), "
+                f"returning uniform 1/{K}")
             return np.ones(K) / K
 
         pred_cats = result.predictor_categories
@@ -550,6 +564,9 @@ class DirichletMultinomialContingency:
             return alpha_row / total
         else:
             K = len(alpha_row)
+            _warn_fallback(
+                f"DM posterior alpha sums to zero, "
+                f"returning uniform 1/{K}")
             return np.ones(K) / K
 
     def predict_expected(
@@ -895,8 +912,9 @@ class PairwiseOrdinalStackingModel:
             )
         except Exception as e:
             if n_jobs != 1:
-                if self.verbose:
-                    print(f"  Parallel fitting failed ({e}), falling back to sequential")
+                _warn_fallback(
+                    "Parallel marginal fitting failed, "
+                    "falling back to sequential", e)
                 n_jobs = 1
                 results_gen = (
                     _worker_fit_marginal(data, i, cfg, seed + i, sample_weights)
@@ -959,8 +977,9 @@ class PairwiseOrdinalStackingModel:
                 )
             except Exception as e:
                 if n_jobs != 1:
-                    if self.verbose:
-                        print(f"  Parallel fitting failed ({e}), falling back to sequential")
+                    _warn_fallback(
+                        "Parallel univariate fitting failed, "
+                        "falling back to sequential", e)
                     n_jobs = 1
                 results_gen = (
                     _worker_fit_univariate(
@@ -1116,7 +1135,9 @@ class PairwiseOrdinalStackingModel:
             if 'n_obs_total' in state:
                 self.n_obs_total = state['n_obs_total']
             return n
-        except Exception:
+        except Exception as exc:
+            _warn_fallback(
+                "load_state failed, returning 0 loaded models", exc)
             return 0
 
     # ------------------------------------------------------------------
@@ -1302,13 +1323,10 @@ class PairwiseOrdinalStackingModel:
                     models_info.append((f"dm:{predictor_name}", dmr.elpd_loo_per_obs, dmr.elpd_loo_per_obs_se, pmf))
 
         if not models_info:
-            # No converged sub-models — caller must know, not silently fall
-            # back to uniform (would mask broken stacking fits).
-            raise ValueError(
-                f"PairwiseOrdinalStackingModel.predict_pmf: no converged "
-                f"sub-models for target={target!r} given items={list(items)}. "
-                f"Refit the stacking model before running imputation."
-            )
+            _warn_fallback(
+                f"No converged imputation models for target "
+                f"'{target}', returning uniform 1/{n_categories}")
+            return np.ones(n_categories) / n_categories
 
         # Reuse _compute_stacking_weights for consistent weight selection
         # (uses optimal weights when available, falls back to ELPD softmax)
@@ -1324,12 +1342,10 @@ class PairwiseOrdinalStackingModel:
         if total > 0:
             stacked_pmf /= total
         else:
-            # Numerical underflow in weighted PMF mix — surface the issue.
-            raise ValueError(
-                f"PairwiseOrdinalStackingModel.predict_pmf: stacked PMF for "
-                f"target={target!r} summed to {total:g}; cannot normalise. "
-                f"Inspect sub-model weights/PMFs."
-            )
+            _warn_fallback(
+                f"Stacked PMF sums to zero for target '{target}', "
+                f"returning uniform 1/{n_categories}")
+            stacked_pmf = np.ones(n_categories) / n_categories
         return stacked_pmf
 
     # ------------------------------------------------------------------

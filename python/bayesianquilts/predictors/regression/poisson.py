@@ -1,9 +1,19 @@
+import sys
 import jax
 import jax.numpy as jnp
 import tensorflow_probability.substrates.jax.distributions as tfd
 from typing import Dict, Any
 from bayesianquilts.model import BayesianModel
 from bayesianquilts.metrics.ais import AutoDiffLikelihoodMixin
+
+
+def _warn_fallback(msg, exc=None):
+    """Print a red warning about a fallback to degraded behavior."""
+    detail = f" ({type(exc).__name__}: {exc})" if exc else ""
+    sys.stderr.write(
+        f"\033[91mWARNING: {msg}{detail}\033[0m\n"
+    )
+    sys.stderr.flush()
 
 
 class PoissonRegression(BayesianModel):
@@ -332,10 +342,11 @@ class PoissonRegressionLikelihood(AutoDiffLikelihoodMixin):
             target_shape = jnp.broadcast_shapes(beta.shape[:-1], intercept.shape)
             beta = jnp.broadcast_to(beta, target_shape + (beta.shape[-1],))
             intercept = jnp.broadcast_to(intercept, target_shape)
-        except ValueError:
-            # Fallback if shapes don't broadcast straightforwardly (e.g. mismatch)
-            # This shouldn't happen with correct usage but for safety
-            pass
+        except ValueError as exc:
+            _warn_fallback(
+                f"Shape broadcast failed for beta {beta.shape} and "
+                f"intercept {intercept.shape} — using unbroadcast shapes, "
+                f"downstream errors likely", exc)
 
         theta = jnp.concatenate([beta, intercept[..., jnp.newaxis]], axis=-1)
         return theta
