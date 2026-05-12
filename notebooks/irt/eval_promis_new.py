@@ -110,12 +110,19 @@ def grm_loglik_vectorized(disc_samp, diffs_samp, obs_matrix, eap, K):
 # ---- Data loaders -----------------------------------------------------------
 
 def _load_wave1_module():
-    pyc_path = PYDIR / 'bayesianquilts/data/__pycache__/promis_wave1.cpython-313.pyc'
-    if not pyc_path.exists():
-        raise FileNotFoundError(f"wave1 pyc not found: {pyc_path}")
+    # Prefer .py source; fall back to any cpython-XYZ.pyc.
+    py_path = PYDIR / 'bayesianquilts/data/promis_wave1.py'
+    if py_path.exists():
+        src_path = py_path
+    else:
+        candidates = list((PYDIR / 'bayesianquilts/data/__pycache__').glob(
+            'promis_wave1.cpython-*.pyc'))
+        if not candidates:
+            raise FileNotFoundError(f"wave1 source not found at {py_path} or any pyc")
+        src_path = candidates[0]
     key = 'bayesianquilts.data.promis_wave1'
     if key not in sys.modules:
-        spec = importlib.util.spec_from_file_location(key, str(pyc_path))
+        spec = importlib.util.spec_from_file_location(key, str(src_path))
         mod = importlib.util.module_from_spec(spec)
         sys.modules[key] = mod
         spec.loader.exec_module(mod)
