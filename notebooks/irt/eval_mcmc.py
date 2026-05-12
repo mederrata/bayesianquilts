@@ -91,8 +91,8 @@ def compute_elpd_from_npz(npz_path, batch, item_keys, K, num_people,
 
         if ddiff_use is not None and ddiff_use.shape[-1] > 0:
             dd_s = ddiff_use[s]
-            diffs = np.concatenate([d0_s, d0_s + np.cumsum(
-                np.log1p(np.exp(dd_s)), axis=-1)], axis=-1)
+            diffs = np.cumsum(
+                np.concatenate([d0_s, dd_s], axis=-1), axis=-1)
         else:
             diffs = d0_s
 
