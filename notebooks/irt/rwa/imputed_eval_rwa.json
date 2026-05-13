@@ -1,0 +1,18 @@
+{
+  "dataset": "rwa",
+  "method": "imputed_scoring_time",
+  "rmse": 1.503488678691992,
+  "rmse_se": 0.004067657988998548,
+  "elpd_total": -277995.9587765644,
+  "elpd_per_n": -28.134395180302032,
+  "elpd_se_per_n": 0.049418354999922864,
+  "elpd_per_resp": -1.2809102832629793,
+  "elpd_se_per_resp": 0.0022499321096357086,
+  "n_obs": 217030,
+  "num_people": 9881,
+  "yao_weights_mean": {
+    "pairwise": 0.020817612348171862,
+    "irt": 0.505280942180746,
+    "shared_disc": 0.47390144547108215
+  }
+}
