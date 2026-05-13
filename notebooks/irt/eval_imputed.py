@@ -86,11 +86,13 @@ def eval_imputed_dataset(dataset_name):
     print(f"  Baseline IRT loaded (S={irt_model.surrogate_sample['discriminations'].shape[0]})")
 
     shared_disc_npz = work_dir / 'mcmc_samples' / 'mcmc_shared_disc.npz'
-    if not shared_disc_npz.exists():
-        raise FileNotFoundError(f"Missing shared-disc NPZ at {shared_disc_npz}")
-    shared_disc_model = load_shared_disc_model(
-        item_keys, num_people, K, shared_disc_npz)
-    print(f"  Shared-disc loaded")
+    if shared_disc_npz.exists():
+        shared_disc_model = load_shared_disc_model(
+            item_keys, num_people, K, shared_disc_npz)
+        print(f"  Shared-disc loaded")
+    else:
+        shared_disc_model = None
+        print(f"  Shared-disc NPZ absent -- using 2-component (pairwise + IRT) fallback")
 
     from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
     stacking_path = work_dir / 'pairwise_stacking_model.yaml'

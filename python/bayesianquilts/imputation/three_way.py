@@ -144,6 +144,33 @@ def _precompute_grm_pmf_matrix(grm_model):
     return probs[0]
 
 
+def _solve_two_way_stacking(lpd_m, lpd_i):
+    """Per-item Yao stacking on the (w_m, w_i) 1-simplex (no shared-disc)."""
+    lpd_m = np.asarray(lpd_m, dtype=np.float64)
+    lpd_i = np.asarray(lpd_i, dtype=np.float64)
+    n = min(len(lpd_m), len(lpd_i))
+    if n == 0:
+        return np.array([0.5, 0.5, 0.0])
+    lpd_m, lpd_i = lpd_m[:n], lpd_i[:n]
+
+    def neg_log_score(logit):
+        # w_m = sigmoid(logit), w_i = 1 - w_m
+        s = 1.0 / (1.0 + np.exp(-logit))
+        w_m, w_i = float(s), float(1.0 - s)
+        a = lpd_m + np.log(max(w_m, 1e-15))
+        b = lpd_i + np.log(max(w_i, 1e-15))
+        m = np.maximum(a, b)
+        log_mix = m + np.log(np.exp(a - m) + np.exp(b - m))
+        return -float(np.sum(log_mix))
+
+    res = minimize(
+        neg_log_score, x0=np.array([0.0]), method='BFGS',
+        options={'maxiter': 100, 'gtol': 1e-7},
+    )
+    s = 1.0 / (1.0 + np.exp(-res.x[0]))
+    return np.array([float(s), float(1.0 - s), 0.0])
+
+
 def _solve_three_way_stacking(lpd_m, lpd_i, lpd_s):
     """Per-item Yao stacking on the 2-simplex.
 
@@ -233,19 +260,27 @@ class ThreeWayImputationModel:
         print("Three-way stacking: IRT baseline per-item LOO...", flush=True)
         self._irt_elpd, self._irt_loo = _compute_grm_loo_per_item(
             irt_model, data_factory)
-        print("Three-way stacking: shared-disc per-item LOO...", flush=True)
-        self._shared_elpd, self._shared_loo = _compute_grm_loo_per_item(
-            shared_disc_model, data_factory)
+        if shared_disc_model is not None:
+            print("Three-way stacking: shared-disc per-item LOO...", flush=True)
+            self._shared_elpd, self._shared_loo = _compute_grm_loo_per_item(
+                shared_disc_model, data_factory)
+        else:
+            print("Three-way stacking: shared-disc absent, falling back to 2-way stack",
+                  flush=True)
+            self._shared_elpd, self._shared_loo = {}, {}
         print("Three-way stacking: MICE per-item LOO...", flush=True)
         self._mice_elpd, self._mice_loo = self._compute_mice_loo()
 
-        # Per-item simplex weights (w_m, w_i, w_s)
+        # Per-item simplex weights (w_m, w_i, w_s); w_s forced to 0 when shared absent
         print("Three-way stacking: solving per-item weights...", flush=True)
         self._weights: Dict[str, np.ndarray] = self._compute_weights()
 
         # PMF matrices for both GRM components
         self._irt_pmf_matrix = _precompute_grm_pmf_matrix(irt_model)
-        self._shared_pmf_matrix = _precompute_grm_pmf_matrix(shared_disc_model)
+        if shared_disc_model is not None:
+            self._shared_pmf_matrix = _precompute_grm_pmf_matrix(shared_disc_model)
+        else:
+            self._shared_pmf_matrix = None
         self._item_to_idx = {k: i for i, k in enumerate(irt_model.item_keys)}
 
     def _compute_mice_loo(self):
@@ -315,25 +350,32 @@ class ThreeWayImputationModel:
         return elpd_per_item, loo_per_obs
 
     def _compute_weights(self):
-        """Per-item three-way Yao stacking on the (m, i, s) simplex."""
+        """Per-item Yao stacking. 3-way (m, i, s) when shared-disc is present,
+        2-way (m, i) with w_s=0 when shared-disc is absent."""
         item_keys = self.irt_model.item_keys
+        has_shared = self.shared_disc_model is not None
         weights: Dict[str, np.ndarray] = {}
         for item_key in item_keys:
             lpd_m = self._mice_loo.get(item_key)
             lpd_i = self._irt_loo.get(item_key)
-            lpd_s = self._shared_loo.get(item_key)
+            lpd_s = self._shared_loo.get(item_key) if has_shared else None
 
-            if (lpd_m is None or lpd_i is None or lpd_s is None
-                    or len(lpd_m) == 0 or len(lpd_i) == 0 or len(lpd_s) == 0):
-                # Fall back: equal weights or biased to whichever exists.
-                weights[item_key] = np.array([1.0 / 3, 1.0 / 3, 1.0 / 3])
-                continue
-
-            # Align lengths if needed (rare).
-            n = min(len(lpd_m), len(lpd_i), len(lpd_s))
-            w = _solve_three_way_stacking(
-                lpd_m[:n], lpd_i[:n], lpd_s[:n])
-            weights[item_key] = w
+            if has_shared:
+                if (lpd_m is None or lpd_i is None or lpd_s is None
+                        or len(lpd_m) == 0 or len(lpd_i) == 0
+                        or len(lpd_s) == 0):
+                    weights[item_key] = np.array([1.0 / 3, 1.0 / 3, 1.0 / 3])
+                    continue
+                n = min(len(lpd_m), len(lpd_i), len(lpd_s))
+                w = _solve_three_way_stacking(
+                    lpd_m[:n], lpd_i[:n], lpd_s[:n])
+                weights[item_key] = w
+            else:
+                if (lpd_m is None or lpd_i is None
+                        or len(lpd_m) == 0 or len(lpd_i) == 0):
+                    weights[item_key] = np.array([0.5, 0.5, 0.0])
+                    continue
+                weights[item_key] = _solve_two_way_stacking(lpd_m, lpd_i)
         return weights
 
     # ------------------------------------------------------------------
