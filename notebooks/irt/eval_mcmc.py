@@ -23,7 +23,7 @@ from run_single_notebook import DATASET_CONFIGS, make_data_dict, calibrate_manua
 from bayesianquilts.metrics.nppsis import psisloo
 
 
-VARIANTS = ['baseline', 'pairwise', 'mixed']
+VARIANTS = ['baseline', 'imputed', 'pairwise', 'mixed', 'shared_disc']
 
 
 def compute_pred_rmse(model, batch, item_keys, K):

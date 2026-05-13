@@ -1,19 +1,21 @@
 #!/usr/bin/env python
-"""Run marginal MCMC for all 3 model variants: baseline, pairwise, mixed.
+"""Run marginal MCMC for the imputation-paper variants: baseline, imputed.
 
 For each variant, loads the fitted ADVI baseline GRM, optionally attaches
 an imputation model, then runs BlackJAX NUTS on item parameters with
 abilities Rao-Blackwellized out on a Gauss-Hermite quadrature grid.
 
-Results are saved per-variant:
-  - grm_mcmc_baseline/    (no imputation)
-  - grm_mcmc_pairwise/    (pairwise stacking imputation)
-  - grm_mcmc_mixed/       (mixed: pairwise + IRT baseline)
+Variants:
+  - baseline:   no imputation
+  - imputed:    three-way Yao stack of (pairwise MICE + IRT baseline +
+                shared-discrimination GRM); each item gets its own
+                (w_mice, w_irt, w_shared) on the 2-simplex
+  - pairwise:   pairwise stacking only (legacy, kept for backwards-compat)
+  - mixed:      pairwise + IRT baseline blend (legacy)
 
 Usage:
     python run_marginal_mcmc.py --dataset rwa
-    python run_marginal_mcmc.py --dataset tma --num-chains 2 --num-warmup 200
-    python run_marginal_mcmc.py --dataset npi --variants baseline pairwise
+    python run_marginal_mcmc.py --dataset npi --variants baseline imputed
 """
 
 import argparse
@@ -52,6 +54,45 @@ def make_data_dict(dataframe, num_people):
         data[col] = arr
     data['person'] = np.arange(num_people, dtype=np.float32)
     return data
+
+
+def load_shared_disc_model(item_keys, num_people, response_cardinality,
+                           shared_disc_npz_path):
+    """Instantiate a SharedDiscGRModel and populate its surrogate_sample
+    from a fitted shared-disc MCMC NPZ.
+
+    Returns a model object whose ``surrogate_sample`` is in the same
+    flattened (S, ...) shape mixed/three_way LOO code expects, plus
+    abilities injected from the EAP field.
+    """
+    from bayesianquilts.irt.shared_disc_grm import SharedDiscGRModel
+    sd = SharedDiscGRModel(
+        item_keys=item_keys,
+        num_people=num_people,
+        dim=1,
+        response_cardinality=response_cardinality,
+        dtype=jnp.float64,
+    )
+    npz = np.load(str(shared_disc_npz_path))
+    item_param_keys = [k for k in npz.files
+                       if k not in {'eap', 'psd', 'standardize_mu',
+                                     'standardize_sigma'}]
+    surrogate_sample = {}
+    for k in item_param_keys:
+        a = np.asarray(npz[k])
+        # (chains, samples, ...) → flatten chains and samples → (S, ...)
+        flat = a.reshape(-1, *a.shape[2:])
+        surrogate_sample[k] = jnp.asarray(flat)
+    # Abilities: EAP as a single "sample" with shape (1, N, D=1, 1, 1)
+    if 'eap' in npz.files:
+        eap = np.asarray(npz['eap']).astype(np.float64)
+        # mean(0) on (1, N, 1, 1, 1) → (N, 1, 1, 1) which matches what
+        # _precompute_grm_pmf_matrix expects.
+        surrogate_sample['abilities'] = jnp.asarray(
+            eap[np.newaxis, :, np.newaxis, np.newaxis, np.newaxis]
+        )
+    sd.surrogate_sample = surrogate_sample
+    return sd
 
 
 def run_single_variant(model, data, variant_name, output_dir,
@@ -202,10 +243,12 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
     base_data = make_data_dict(df, num_people)
     print(f"  People: {num_people}")
 
-    # Load pairwise stacking model (needed for pairwise and mixed)
+    # Load pairwise stacking model (needed for pairwise / mixed / imputed)
     pairwise_model = None
     stacking_path = output_dir / 'pairwise_stacking_model.yaml'
-    if stacking_path.exists() and ('pairwise' in variants or 'mixed' in variants):
+    needs_pairwise = bool(
+        {'pairwise', 'mixed', 'imputed'} & set(variants))
+    if stacking_path.exists() and needs_pairwise:
         from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
         print(f"  Loading pairwise stacking model...")
         pairwise_model = PairwiseOrdinalStackingModel.load(str(stacking_path))
@@ -274,6 +317,58 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         del model, mixed_model
         gc.collect()
 
+    # ---- Imputed: three-way Yao stack of MICE + IRT-baseline + shared-disc ----
+    if 'imputed' in variants and pairwise_model is not None:
+        from bayesianquilts.imputation.three_way import ThreeWayImputationModel
+        shared_disc_npz = output_dir / 'mcmc_samples' / 'mcmc_shared_disc.npz'
+        if not shared_disc_npz.exists():
+            print(f"  ERROR: shared-disc NPZ missing at {shared_disc_npz}; "
+                  f"run run_shared_disc_mcmc.py --dataset {dataset_name} first. "
+                  f"Skipping imputed variant.")
+        else:
+            model = ModelClass.load_from_disk(str(model_path))
+
+            # Calibrated expectations for the IRT-baseline component
+            surrogate = model.surrogate_distribution_generator(model.params)
+            key = jax.random.PRNGKey(seed + 100)
+            samples = surrogate.sample(32, seed=key)
+            model.surrogate_sample = samples
+            model.calibrated_expectations = {
+                k: jnp.mean(v, axis=0) for k, v in samples.items()
+            }
+
+            # Load shared-disc as a third stacking component
+            print(f"  Loading shared-disc component from {shared_disc_npz}")
+            shared_disc_model = load_shared_disc_model(
+                item_keys, num_people, response_cardinality,
+                shared_disc_npz,
+            )
+
+            def _data_factory():
+                yield base_data
+
+            three_way = ThreeWayImputationModel(
+                irt_model=model,
+                shared_disc_model=shared_disc_model,
+                mice_model=pairwise_model,
+                data_factory=_data_factory,
+            )
+            model.imputation_model = three_way
+
+            data = dict(base_data)
+            pmfs, weights = model._compute_batch_pmfs(data)
+            if pmfs is not None:
+                data['_imputation_pmfs'] = pmfs
+                if weights is not None:
+                    data['_imputation_weights'] = weights
+            print(f"  Three-way imputation PMFs attached")
+            run_single_variant(model, data, 'imputed', output_dir,
+                               num_chains, num_warmup, num_samples,
+                               step_size, seed + 3,
+                               sampler=sampler, dense_mass=dense_mass)
+            del model, three_way, shared_disc_model
+            gc.collect()
+
     del pairwise_model
     gc.collect()
     print(f"\nDone: {dataset_name}")
@@ -293,9 +388,12 @@ def main():
     parser.add_argument('--step-size', type=float, default=5e-4,
                         help='Initial NUTS step size')
     parser.add_argument('--variants', nargs='+',
-                        default=['baseline', 'pairwise', 'mixed'],
-                        choices=['baseline', 'pairwise', 'mixed'],
-                        help='Which model variants to run')
+                        default=['baseline', 'imputed'],
+                        choices=['baseline', 'imputed',
+                                 'pairwise', 'mixed'],
+                        help='Which model variants to run. Default is the '
+                             'paper set (baseline + imputed). pairwise/mixed '
+                             'are legacy 2-component stacking variants.')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--sampler', default='nuts', choices=['nuts', 'mala'],
                         help='MCMC sampler: nuts (default) or mala (for stiff posteriors)')
