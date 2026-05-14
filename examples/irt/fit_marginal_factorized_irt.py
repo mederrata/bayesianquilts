@@ -145,6 +145,7 @@ def main():
     from bayesianquilts.imputation.pairwise_stacking import (
         PairwiseOrdinalStackingModel
     )
+    from bayesianquilts.io.converged import export_multi_scale_artifact
 
     output_dir = 'marginal_output'
     os.makedirs(output_dir, exist_ok=True)
@@ -206,6 +207,7 @@ def main():
         response_cardinality=response_cardinality,
         dim=1,
         imputation_model=imputation_model,
+        share_discriminations=True,
         dtype=jnp.float64,
     )
 
@@ -360,6 +362,20 @@ def main():
              **save_dict)
     print(f"\nSaved to {output_dir}/eqsq_factorized_marginal.npz")
     print(f"All plots saved to {output_dir}/")
+
+    # ---- Converged artifact (libfab + gofluttercat consumable) ----
+    print(f"\n--- Exporting converged artifact (libfab + gofluttercat) ---")
+    mixed_models_by_scale = {
+        scale_names[d]: all_models[d] for d in range(len(scale_indices))
+    }
+    export_multi_scale_artifact(
+        irt_models=mixed_models_by_scale,
+        imputation_model=imputation_model,
+        out_dir=os.path.join(output_dir, 'converged'),
+        fit_method='marginal_factorized_mcmc',
+        source_script=os.path.basename(__file__),
+    )
+    print(f"  -> {os.path.join(output_dir, 'converged')}")
 
 
 if __name__ == '__main__':

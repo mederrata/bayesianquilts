@@ -282,6 +282,7 @@ def main():
     from bayesianquilts.imputation.mixed import (
         IrtMixedImputationModel, PairwiseOnlyImputationModel
     )
+    from bayesianquilts.io.converged import export_artifact
 
     config = DATASET_CONFIGS[args.dataset]
     mod = importlib.import_module(config['module'])
@@ -356,6 +357,7 @@ def main():
             item_keys=item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             dtype=jnp.float64,
+            share_discriminations=True,
         )
 
         def data_factory():
@@ -598,6 +600,42 @@ def main():
               f"{res['ess']:>8.1f} {ess_pct:>6.1f}% "
               f"{'—':>8} {'—':>12}")
     print(f"{'='*70}")
+
+    # ---- Converged artifact (libfab + gofluttercat consumable) ----
+    # The IS-reweighted "mixed" variant is the imputation-aware posterior.
+    # Apply its PSIS weights to the surrogate sample so the exported
+    # calibrated_expectations reflect the reweighted posterior, then export.
+    psis_w = np.asarray(is_results['mixed']['psis_weights'])
+    psis_w = psis_w / psis_w.sum()
+    reweighted_ce = {}
+    for k, v in mcmc_samples.items():
+        arr = np.asarray(v)
+        flat = arr.reshape(-1, *arr.shape[2:])
+        # Weighted mean over (chains x samples)
+        w_shape = (flat.shape[0],) + (1,) * (flat.ndim - 1)
+        reweighted_ce[k] = np.sum(flat * psis_w.reshape(w_shape), axis=0)
+    # EAP abilities from the reweighted IS run
+    reweighted_ce['abilities'] = np.asarray(
+        eap_results['mixed']['eap']
+    )[:, np.newaxis, np.newaxis, np.newaxis]
+    baseline_model.calibrated_expectations = reweighted_ce
+
+    print(f"\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+    export_artifact(
+        irt_model=baseline_model,
+        imputation_model=mixed_imputation,
+        out_dir=os.path.join(output_dir, 'converged'),
+        scale_names=['theta'],
+        fit_method='is_reweight_mcmc',
+        source_script=os.path.basename(__file__),
+        extra_manifest={
+            'dataset': args.dataset,
+            'use_ipw': use_ipw,
+            'psis_khat': float(is_results['mixed']['khat']),
+            'psis_ess': float(is_results['mixed']['ess']),
+        },
+    )
+    print(f"  -> {os.path.join(output_dir, 'converged')}")
     print(f"  Output: {output_dir}/")
 
 

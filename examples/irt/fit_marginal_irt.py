@@ -338,6 +338,7 @@ def main():
     from bayesianquilts.imputation.mixed import (
         IrtMixedImputationModel, PairwiseOnlyImputationModel
     )
+    from bayesianquilts.io.converged import export_artifact
 
     config = DATASET_CONFIGS[args.dataset]
     mod = importlib.import_module(config['module'])
@@ -402,6 +403,7 @@ def main():
             item_keys=item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             imputation_model=pairwise_model, dtype=jnp.float64,
+            share_discriminations=True,
         )
         data = dict(base_data)
         pmfs, _ = model_tmp._compute_batch_pmfs(data)
@@ -428,6 +430,7 @@ def main():
             item_keys=item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             dtype=jnp.float64,
+            share_discriminations=True,
         )
 
         def data_factory():
@@ -463,6 +466,7 @@ def main():
             item_keys=item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             imputation_model=mixed_imputation, dtype=jnp.float64,
+            share_discriminations=True,
         )
         data = dict(base_data)
         pmfs, weights = model_tmp._compute_batch_pmfs(data)
@@ -609,6 +613,21 @@ def main():
             gc.collect()
 
         print(f"{'='*70}")
+
+    # ---- Converged artifact (libfab + gofluttercat consumable) ----
+    final_irt = mcmc_models.get('mixed') if mcmc_models else None
+    if final_irt is not None:
+        print(f"\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+        export_artifact(
+            irt_model=final_irt,
+            imputation_model=mixed_imputation,
+            out_dir=os.path.join(output_dir, 'converged'),
+            scale_names=['theta'],
+            fit_method='marginal_mcmc',
+            source_script=os.path.basename(__file__),
+            extra_manifest={'dataset': args.dataset, 'use_ipw': use_ipw},
+        )
+        print(f"  -> {os.path.join(output_dir, 'converged')}")
 
     print(f"\n{'='*60}")
     print(f"Pipeline complete: {args.dataset.upper()}")

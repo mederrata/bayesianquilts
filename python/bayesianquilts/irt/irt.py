@@ -39,6 +39,7 @@ class IRTModel(BayesianModel):
             parameterization="softplus",
             discrimination_prior="half_normal",
             discrimination_prior_scale=2.0,
+            share_discriminations=False,
             expected_sparsity=None,
             slab_scale=2.0,
             slab_df=4,
@@ -68,6 +69,11 @@ class IRTModel(BayesianModel):
         self.parameterization = parameterization
         self.discrimination_prior = discrimination_prior
         self.discrimination_prior_scale = discrimination_prior_scale
+        # When True, all items share a single discrimination per dimension;
+        # the discrimination tensor has shape (1, D, 1, 1) instead of
+        # (1, D, num_items, 1). Broadcasting in grm_model_prob makes the
+        # downstream code identical for both shapes.
+        self.share_discriminations = share_discriminations
         self.expected_sparsity = expected_sparsity
         self.slab_scale = slab_scale
         self.slab_df = slab_df
