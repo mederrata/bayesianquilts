@@ -1,0 +1,18 @@
+{
+  "dataset": "promis_w1__anxiety",
+  "method": "imputed_scoring_time_2way",
+  "rmse": 0.6743820440787325,
+  "rmse_se": 0.0017981456084376892,
+  "elpd_total": -115403.38554584968,
+  "elpd_per_n": -7.740518180015406,
+  "elpd_se_per_n": 0.018674994905001425,
+  "elpd_per_resp": -0.8003341716427153,
+  "elpd_se_per_resp": 0.0019309090464143185,
+  "n_obs": 144194,
+  "num_people": 14909,
+  "yao_weights_mean": {
+    "pairwise": 0.10471170350449326,
+    "irt": 0.8952882964955068,
+    "shared_disc": 0.0
+  }
+}

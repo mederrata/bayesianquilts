@@ -1,0 +1,18 @@
+{
+  "dataset": "promis_su__bank4",
+  "method": "imputed_scoring_time_2way",
+  "rmse": 0.7028100761852774,
+  "rmse_se": 0.005761418966430253,
+  "elpd_total": -16553.354054831245,
+  "elpd_per_n": -9.232210850435719,
+  "elpd_se_per_n": 0.07490511230532385,
+  "elpd_per_resp": -0.6309885665484198,
+  "elpd_se_per_resp": 0.005119496316362189,
+  "n_obs": 26234,
+  "num_people": 1793,
+  "yao_weights_mean": {
+    "pairwise": 0.0419689133993046,
+    "irt": 0.9580310866006952,
+    "shared_disc": 0.0
+  }
+}
