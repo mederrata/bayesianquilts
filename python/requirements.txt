@@ -595,7 +595,7 @@ python-fasthtml==0.12.47
     # via fastprogress
 python-json-logger==4.0.0
     # via jupyter-events
-python-multipart==0.0.26
+python-multipart==0.0.27
     # via python-fasthtml
 python-pptx==1.0.2
     # via docling
