@@ -154,8 +154,9 @@ def _solve_two_way_stacking(lpd_m, lpd_i):
     lpd_m, lpd_i = lpd_m[:n], lpd_i[:n]
 
     def neg_log_score(logit):
-        # w_m = sigmoid(logit), w_i = 1 - w_m
-        s = 1.0 / (1.0 + np.exp(-logit))
+        # w_m = sigmoid(logit), w_i = 1 - w_m. logit is a length-1 array from
+        # scipy.optimize; extract the scalar before exponentiating.
+        s = 1.0 / (1.0 + np.exp(-float(np.asarray(logit).ravel()[0])))
         w_m, w_i = float(s), float(1.0 - s)
         a = lpd_m + np.log(max(w_m, 1e-15))
         b = lpd_i + np.log(max(w_i, 1e-15))
