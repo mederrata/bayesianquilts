@@ -80,6 +80,12 @@ def eval_imputed_dataset(dataset_name):
         get_data_kwargs['reorient'] = True
     df, num_people = mod.get_data(**get_data_kwargs)
     base_data = make_data_dict(df)
+
+    # Some modules (e.g. promis_substance_use) populate item_keys lazily inside
+    # get_data; re-read it now to pick up any dynamic discovery.
+    item_keys = mod.item_keys
+    I = len(item_keys)
+    print(f"  Items (post-load): {I}")
     print(f"  People: {num_people}")
 
     irt_model = _load_baseline_grm_with_mcmc(work_dir, item_keys, num_people)
