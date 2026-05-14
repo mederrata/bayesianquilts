@@ -1,0 +1,18 @@
+{
+  "dataset": "eqsq",
+  "method": "imputed_scoring_time",
+  "rmse": 0.8408689801764883,
+  "rmse_se": 0.0004005790857394977,
+  "elpd_total": -1795623.8310012203,
+  "elpd_per_n": -135.4574404798748,
+  "elpd_se_per_n": 0.03915074089531763,
+  "elpd_per_resp": -1.1341020848867682,
+  "elpd_se_per_resp": 0.0003277851457767514,
+  "n_obs": 1583300,
+  "num_people": 13256,
+  "yao_weights_mean": {
+    "pairwise": 0.7250229001171431,
+    "irt": 0.27497709988285685,
+    "shared_disc": 0.0
+  }
+}
