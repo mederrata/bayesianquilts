@@ -204,7 +204,7 @@ huggingface-hub==0.36.2
     #   transformers
 humanize==4.15.0
     # via orbax-checkpoint
-idna==3.11
+idna==3.15
     # via
     #   anyio
     #   httpx
