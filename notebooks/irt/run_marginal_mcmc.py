@@ -97,7 +97,8 @@ def load_shared_disc_model(item_keys, num_people, response_cardinality,
 
 def run_single_variant(model, data, variant_name, output_dir,
                        num_chains, num_warmup, num_samples, step_size, seed,
-                       sampler='nuts', dense_mass=False):
+                       sampler='nuts', dense_mass=False,
+                       target_accept_prob=0.95):
     """Run MCMC for one variant and save results."""
     print(f"\n  --- Variant: {variant_name} (sampler={sampler}) ---")
     sys.stdout.flush()
@@ -120,7 +121,7 @@ def run_single_variant(model, data, variant_name, output_dir,
             num_chains=num_chains,
             num_warmup=num_warmup,
             num_samples=num_samples,
-            target_accept_prob=0.95,
+            target_accept_prob=target_accept_prob,
             step_size=step_size,
             seed=seed,
             verbose=True,
@@ -203,7 +204,8 @@ def run_single_variant(model, data, variant_name, output_dir,
 
 
 def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
-                step_size, seed, variants, sampler='nuts', dense_mass=False):
+                step_size, seed, variants, sampler='nuts', dense_mass=False,
+                target_accept_prob=0.95):
     import importlib
     import inspect
     from pathlib import Path
@@ -259,7 +261,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         data = dict(base_data)  # no imputation PMFs
         run_single_variant(model, data, 'baseline', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed,
-                           sampler=sampler, dense_mass=dense_mass)
+                           sampler=sampler, dense_mass=dense_mass,
+                           target_accept_prob=target_accept_prob)
         del model
         gc.collect()
 
@@ -275,7 +278,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         print(f"  Pairwise imputation PMFs attached")
         run_single_variant(model, data, 'pairwise', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed + 1,
-                           sampler=sampler, dense_mass=dense_mass)
+                           sampler=sampler, dense_mass=dense_mass,
+                           target_accept_prob=target_accept_prob)
         del model
         gc.collect()
 
@@ -313,7 +317,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
         print(f"  Mixed imputation PMFs attached (with IS weights)")
         run_single_variant(model, data, 'mixed', output_dir,
                            num_chains, num_warmup, num_samples, step_size, seed + 2,
-                           sampler=sampler, dense_mass=dense_mass)
+                           sampler=sampler, dense_mass=dense_mass,
+                           target_accept_prob=target_accept_prob)
         del model, mixed_model
         gc.collect()
 
@@ -365,7 +370,8 @@ def run_dataset(dataset_name, model_dir, num_chains, num_warmup, num_samples,
             run_single_variant(model, data, 'imputed', output_dir,
                                num_chains, num_warmup, num_samples,
                                step_size, seed + 3,
-                               sampler=sampler, dense_mass=dense_mass)
+                               sampler=sampler, dense_mass=dense_mass,
+                               target_accept_prob=target_accept_prob)
             del model, three_way, shared_disc_model
             gc.collect()
 
@@ -400,6 +406,11 @@ def main():
     parser.add_argument('--dense-mass', action='store_true',
                         help='Use dense mass matrix (default: diagonal). '
                              'NUTS only; ignored for MALA.')
+    parser.add_argument('--target-accept', type=float, default=0.95,
+                        help='NUTS target acceptance rate. Lower (e.g. 0.7) '
+                             'shortens trajectories during warmup at the cost '
+                             'of more divergences; useful when warmup hangs '
+                             'on stiff posteriors.')
     args = parser.parse_args()
 
     model_dir = args.model_dir or os.path.expanduser(
@@ -420,6 +431,7 @@ def main():
         variants=args.variants,
         sampler=args.sampler,
         dense_mass=args.dense_mass,
+        target_accept_prob=args.target_accept,
     )
 
 
