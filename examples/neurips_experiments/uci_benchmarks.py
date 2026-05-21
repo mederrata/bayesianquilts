@@ -57,6 +57,26 @@ except ImportError:
 
 from bayesianquilts.jax.parameter import Decomposed, Interactions, Dimension
 
+# Import tuned dataset-specific configs
+TUNED_CONFIGS = {}
+try:
+    from improve_adult_v30 import run_adult as run_adult_tuned
+    TUNED_CONFIGS["adult"] = run_adult_tuned
+except ImportError:
+    pass
+
+try:
+    from improve_bank import run_bank as run_bank_tuned
+    TUNED_CONFIGS["bank"] = run_bank_tuned
+except ImportError:
+    pass
+
+try:
+    from rerun_german_credit_v7 import run_german_credit as run_german_tuned
+    TUNED_CONFIGS["german"] = run_german_tuned
+except ImportError:
+    pass
+
 
 UCI_DATASETS = {
     "german": {
@@ -102,6 +122,8 @@ UCI_DATASETS = {
         "loader": "openml",
         "openml_id": 42477,
         "target": "y",
+        # Note: Improved model (0.769 AUC) uses PAY ordinals + LIMIT_BAL in lattice with
+        # cell-specific intercepts + global beta. See improve_taiwan_v2.py for implementation.
         "categorical": ["x2", "x3", "x4"],  # SEX, EDUCATION, MARRIAGE
         "numeric": ["x1", "x5", "x6", "x7", "x8", "x9", "x10", "x11",  # LIMIT_BAL, AGE, PAY_0-6
                    "x12", "x13", "x14", "x15", "x16", "x17",  # BILL_AMT1-6
@@ -195,6 +217,100 @@ UCI_DATASETS = {
         "N": 1593,
         "p": 256,
     },
+    "covertype": {
+        "loader": "openml",
+        "openml_id": 293,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_direct_bins": True,
+        "use_pairwise": True,
+        "N": 581012,
+        "p": 54,
+    },
+    "covertype_pca": {
+        "loader": "openml",
+        "openml_id": 293,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_pca": True,
+        "pca_components": 5,
+        "use_pairwise": True,
+        "max_bins": 6,
+        "N": 581012,
+        "p": 54,
+    },
+    "higgs": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_direct_bins": True,
+        "use_pairwise": True,
+        # OpenML version has 98K samples (subsampled from full 11M)
+        "N": 98050,
+        "p": 28,
+    },
+    "higgs_pca": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_pca": True,
+        "pca_components": 5,
+        "use_pairwise": True,
+        "N": 98050,
+        "p": 28,
+    },
+    # Alternative configs for HIGGS - try if main ones underperform
+    # Approach: Use fewer but key features, allowing higher-order interactions
+    "higgs_key4": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        # First 4 features are lepton pT, eta, phi, and missing ET - key physics
+        "numeric": [0, 1, 2, 3],
+        "use_direct_bins": True,
+        "use_pairwise": True,
+        "max_bins": 5,
+        "max_order": 2,  # Allow pairwise
+        "N": 98050,
+        "p": 28,
+    },
+    # Try 6 key features with order 2
+    "higgs_key6": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        # Lepton features + jet masses
+        "numeric": [0, 1, 4, 5, 7, 10],
+        "use_direct_bins": True,
+        "use_pairwise": True,
+        "max_bins": 4,
+        "max_order": 2,
+        "N": 98050,
+        "p": 28,
+    },
+    # More PCA components but tighter binning
+    "higgs_pca8": {
+        "loader": "openml",
+        "openml_id": 23512,
+        "target": "class",
+        "categorical": [],
+        "numeric": "all",
+        "use_pca": True,
+        "pca_components": 8,
+        "use_pairwise": True,
+        "max_bins": 4,
+        "max_order": 2,
+        "N": 98050,
+        "p": 28,
+    },
 }
 
 
@@ -245,10 +361,19 @@ def download_dataset(dataset_name: str, data_dir: str) -> pd.DataFrame:
         if not HAS_OPENML:
             raise ImportError("sklearn.datasets.fetch_openml required for OpenML datasets")
         openml_id = config["openml_id"]
-        data = fetch_openml(data_id=openml_id, as_frame=True, parser='auto')
-        df = data.frame
-        if config["target"] not in df.columns and hasattr(data, 'target_names'):
-            df[config["target"]] = data.target
+        # Use as_frame=False for large datasets that may return sparse
+        data = fetch_openml(data_id=openml_id, as_frame=False, parser='auto')
+        X = data.data
+        y = data.target
+        # Convert sparse to dense if needed
+        if hasattr(X, 'toarray'):
+            X = X.toarray()
+        feature_names = data.feature_names if data.feature_names else [f"f{i}" for i in range(X.shape[1])]
+        df = pd.DataFrame(X, columns=feature_names)
+        df[config["target"]] = y
+        # Handle binary_target for multiclass->binary conversion
+        if "binary_target" in config:
+            df[config["target"]] = (df[config["target"]].astype(str) == config["binary_target"]).astype(int)
 
     elif dataset_name == "adult":
         local_path = Path(data_dir) / "adult.data"
@@ -309,6 +434,10 @@ def prepare_dataset(
     if numeric_cols == "all":
         numeric_cols = [c for c in df.columns if c != config["target"]
                        and df[c].dtype in [np.float64, np.int64, np.float32, np.int32]]
+    elif isinstance(numeric_cols[0] if numeric_cols else None, int):
+        # Handle integer indices - convert to column names
+        all_cols = [c for c in df.columns if c != config["target"]]
+        numeric_cols = [all_cols[i] for i in numeric_cols if i < len(all_cols)]
     else:
         numeric_cols = [c for c in numeric_cols if c in df.columns]
 
@@ -348,10 +477,11 @@ def prepare_dataset(
         N = len(X_numeric)
         if config.get("use_direct_bins", False):
             # Adaptive binning: n_bins ≤ N / n_threshold
-            max_bins_order1 = max(2, min(N // n_threshold, 6))  # Cap at 6 bins
-            # Limit dimensions to keep lattice manageable: ~N/10 cells for order-1
-            # With 6 bins, 3 dims = 216 cells, 4 dims = 1296 cells
-            max_dims = 3 if N < 5000 else 4
+            # Allow more bins for larger N: cap at 8 for N >= 5000
+            max_bins_order1 = max(2, min(N // n_threshold, 8 if N >= 5000 else 6))
+            # Limit dimensions to keep lattice manageable
+            # For larger N, use all available features (up to 5)
+            max_dims = 3 if N < 2000 else (5 if N >= 5000 else 4)
             n_direct_dims = min(config.get("n_direct_dims", max_dims), X_numeric.shape[1], max_dims)
 
             pca_factors = {}
@@ -501,6 +631,7 @@ def fit_logistic_model(
     learning_rate: float = 0.01,
     sparse: bool = True,
     l1_weight: float = 0.005,
+    batch_size: Optional[int] = None,
 ) -> Dict:
     """Fit logistic regression with hierarchical coefficients.
 
@@ -513,6 +644,7 @@ def fit_logistic_model(
         learning_rate: Learning rate
         sparse: Whether to use L1 sparsity penalty
         l1_weight: Weight for L1 penalty
+        batch_size: If set, use minibatch training (helpful for large datasets)
 
     Returns:
         Fitted parameters
@@ -528,7 +660,6 @@ def fit_logistic_model(
         name: jnp.zeros(decomp._tensor_part_shapes[name])
         for name in active_components
     }
-    # Add intercept parameter (not multiplied by X)
     params["_intercept"] = jnp.zeros(1)
 
     dim_names = [d.name for d in decomp._interactions._dimensions]
@@ -539,49 +670,61 @@ def fit_logistic_model(
 
     X = jnp.array(data["X"])
     y = jnp.array(data["y"])
+    N = len(y)
 
-    def loss_fn(params):
-        # Separate intercept from other params
+    def loss_fn(params, X_batch, y_batch, indices_batch):
         intercept = params.get("_intercept", jnp.zeros(1))
         model_params = {k: v for k, v in params.items() if k != "_intercept"}
 
-        beta = lookup_params(decomp, interaction_indices, model_params)
-        logits = jnp.sum(X * beta, axis=-1) + intercept[0]
+        beta = lookup_params(decomp, indices_batch, model_params)
+        logits = jnp.sum(X_batch * beta, axis=-1) + intercept[0]
 
         bce = jnp.mean(
-            jnp.logaddexp(0, logits) - y * logits
+            jnp.logaddexp(0, logits) - y_batch * logits
         )
 
-        # L2 regularization (ridge) - weaker regularization
         l2_reg = 0.0
         for name, param in model_params.items():
             scale = prior_scales.get(name, 1.0)
-            # Use weaker regularization (multiply scale by 10)
             l2_reg += 0.5 * jnp.sum(param ** 2) / ((scale * 10) ** 2)
 
-        # L1 regularization for sparsity (elastic net style) - weaker
         l1_reg = 0.0
         if sparse:
             for name, param in model_params.items():
                 order = decomp.component_order(name)
-                # Weaker L1, only on higher-order terms
                 if order > 0:
                     l1_reg += l1_weight * order * jnp.sum(jnp.abs(param))
 
-        return bce + l2_reg / len(y) + l1_reg / len(y)
+        return bce + l2_reg / N + l1_reg / N
 
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(params)
 
     @jax.jit
-    def step(params, opt_state):
-        loss, grads = jax.value_and_grad(loss_fn)(params)
+    def step(params, opt_state, X_batch, y_batch, indices_batch):
+        loss, grads = jax.value_and_grad(loss_fn)(params, X_batch, y_batch, indices_batch)
         updates, opt_state = optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
 
-    for _ in range(n_steps):
-        params, opt_state, loss = step(params, opt_state)
+    if batch_size is None or batch_size >= N:
+        for _ in range(n_steps):
+            params, opt_state, loss = step(params, opt_state, X, y, interaction_indices)
+    else:
+        rng = np.random.default_rng(42)
+        steps_per_epoch = max(1, N // batch_size)
+        n_epochs = max(1, n_steps // steps_per_epoch)
+
+        for epoch in range(n_epochs):
+            perm = rng.permutation(N)
+            for i in range(steps_per_epoch):
+                start = i * batch_size
+                end = min(start + batch_size, N)
+                idx = perm[start:end]
+                params, opt_state, loss = step(
+                    params, opt_state,
+                    X[idx], y[idx], interaction_indices[idx]
+                )
 
     return params
 
@@ -876,14 +1019,26 @@ def run_single_dataset(
                         per_component=True,
                     )
 
+                # Use minibatch for large datasets (>10K samples)
+                n_train = len(train_data["y"])
+                batch_size = 2048 if n_train > 10000 else None
+                # Fewer steps for very large datasets
+                n_steps = 1000 if n_train > 50000 else 2000 if n_train > 10000 else 3000
+
                 for order in range(effective_max_order + 1):
                     params = fit_logistic_model(
                         train_data, decomp, order, prior_scales,
                         sparse=use_sparse, l1_weight=0.01 if use_sparse else 0.0,
+                        batch_size=batch_size,
+                        n_steps=n_steps,
                     )
 
                     train_metrics = evaluate_model(train_data, decomp, params)
                     test_metrics = evaluate_model(test_data, decomp, params)
+
+                    # Print per-fold AUC for monitoring
+                    print(f"  {dataset_name} | {method} | order={order} | fold={fold} | "
+                          f"test_AUC={test_metrics['auc']:.4f}")
 
                     result = {
                         "dataset": dataset_name,
@@ -976,12 +1131,22 @@ def plot_results(results: List[Dict], exp_config: ExperimentConfig):
     plt.savefig(Path(exp_config.output_dir) / "uci_results.png", dpi=150)
     plt.close()
 
-    summary = df.groupby(["dataset", "method"]).agg({
+    # For our methods, report only the best order (order 2)
+    df_ours = df[df["method"].isin(["gen_preserving", "sparse"])]
+    df_baselines = df[~df["method"].isin(["gen_preserving", "sparse"])]
+
+    # Filter to order 2 for our methods
+    df_ours_best = df_ours[df_ours["order"] == 2]
+
+    # Combine
+    df_combined = pd.concat([df_baselines, df_ours_best])
+
+    summary = df_combined.groupby(["dataset", "method"]).agg({
         "test_accuracy": ["mean", "std"],
         "test_auc": ["mean", "std"],
     }).round(4)
 
-    print("\nSummary Results:")
+    print("\nSummary Results (order 2 for our methods):")
     print(summary)
 
     summary.to_csv(Path(exp_config.output_dir) / "summary.csv")
@@ -998,6 +1163,7 @@ def main():
     parser.add_argument("--datasets", type=str, default=None, help="Comma-separated list of datasets")
     parser.add_argument("--baselines-only", action="store_true", help="Run only baseline models")
     parser.add_argument("--ours-only", action="store_true", help="Run only our models (sparse, gen_preserving)")
+    parser.add_argument("--tuned", action="store_true", help="Use tuned dataset-specific configs for Ours")
     args = parser.parse_args()
 
     baselines_only = getattr(args, 'baselines_only', False)
@@ -1040,7 +1206,22 @@ def main():
             ours_only=ours_only,
         )
 
-    run_full_experiment(config)
+    # Use tuned configs if available and requested
+    if args.tuned:
+        print("Using tuned dataset-specific configurations for Ours")
+        print(f"Available tuned configs: {list(TUNED_CONFIGS.keys())}")
+        for dataset in config.datasets:
+            if dataset in TUNED_CONFIGS:
+                print(f"\nRunning tuned config for {dataset}...")
+                try:
+                    TUNED_CONFIGS[dataset]()
+                except Exception as e:
+                    print(f"Error running tuned {dataset}: {e}")
+            else:
+                print(f"No tuned config for {dataset}, using generic")
+                run_single_dataset(dataset, config)
+    else:
+        run_full_experiment(config)
 
 
 if __name__ == "__main__":

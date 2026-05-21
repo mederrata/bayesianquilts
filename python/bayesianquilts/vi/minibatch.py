@@ -193,10 +193,10 @@ def minibatch_mc_variational_loss(
             dreg_loss = -jnp.sum(jax.lax.stop_gradient(w_norm ** 2) * log_w)
 
             batch_expectations += [dreg_loss]
-            batch_expectations = jnp.atleast_1d(batch_expectations)
+            batch_expectations = jnp.atleast_1d(jnp.stack(batch_expectations))
         else:
             batch_expectations += [sample_expected_elbo(q_samples, q_lp)]
-            batch_expectations = jnp.atleast_1d(batch_expectations)
+            batch_expectations = jnp.atleast_1d(jnp.stack(batch_expectations))
     batch_expectations = jnp.mean(batch_expectations, axis=0)
     return batch_expectations / dataset_size
 
