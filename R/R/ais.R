@@ -2,16 +2,24 @@
 NULL
 
 #' Default transformation order by computational complexity (least to most expensive)
+#'
+#' Matches the Python `metrics/ais.AdaptiveImportanceSampler.DEFAULT_TRANSFORMATION_ORDER`.
+#'
 #' @export
 DEFAULT_TRANSFORMATION_ORDER <- c(
   "identity",   # No computation - just standard PSIS-LOO
   "mm1",        # Global moment matching (shift only)
   "mm2",        # Global moment matching (shift + scale)
+  "mm3",        # Global moment matching (full-rank affine)
+  "mixis",      # Mixture importance sampling (resampling-based)
   "pmm1",       # Partial moment matching (shift)
   "pmm2",       # Partial moment matching (shift + scale)
+  "pmm3",       # Partial moment matching (full-rank, step-size)
   "ll",         # Likelihood descent (requires gradient)
+  "nll",        # Natural-gradient LL (requires gradient + posterior covariance)
   "kl",         # KL divergence (requires gradient + posterior weights)
-  "nkl"         # Natural-gradient KL (requires gradient + posterior covariance)
+  "nkl",        # Natural-gradient KL (requires gradient + posterior covariance)
+  "var"         # Variance-based (requires gradient + Hessian + f_fn)
 )
 
 #' Adaptive Importance Sampler
@@ -66,6 +74,9 @@ AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
                                try_all_transformations = FALSE,
                                khat_threshold = 0.7,
                                variational = FALSE,
+                               f_fn = NULL,
+                               n_mix_samples = NULL,
+                               seed = 42,
                                verbose = FALSE) {
 
       # 1. Initial computations
@@ -133,13 +144,20 @@ AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
       # Available transformations
       all_transforms <- list(
         ll = LikelihoodDescent$new(self$likelihood_fn),
+        nll = NaturalLikelihoodDescent$new(self$likelihood_fn, posterior_cov),
         kl = KLDivergence$new(self$likelihood_fn),
         nkl = NaturalKLDivergence$new(self$likelihood_fn, posterior_cov),
         pmm1 = PMM1$new(self$likelihood_fn),
         pmm2 = PMM2$new(self$likelihood_fn),
+        pmm3 = PMM3$new(self$likelihood_fn),
         mm1 = MM1$new(self$likelihood_fn),
-        mm2 = MM2$new(self$likelihood_fn)
+        mm2 = MM2$new(self$likelihood_fn),
+        mm3 = MM3$new(self$likelihood_fn),
+        mixis = MixIS$new(self$likelihood_fn, n_mix_samples = n_mix_samples)
       )
+      if (!is.null(f_fn)) {
+        all_transforms[["var"]] <- Variance$new(self$likelihood_fn, f_fn)
+      }
 
       # Determine transformation order
       if (is.null(transformations)) {
@@ -163,6 +181,7 @@ AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
       )
 
       adapted_mask <- rep(FALSE, N)
+      timings <- list()
 
       # Helper to update best results
       update_best <- function(res) {
@@ -187,7 +206,9 @@ AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
 
       # Run transformations
       for (trans_name in transform_order) {
-        # Early exit
+        # Early exit (gated execution): once every point is adapted, stop
+        # running further transformations. This is the Python "run only
+        # when needed" behavior.
         if (!try_all_transformations && all(adapted_mask)) {
           if (verbose) message(sprintf("All %d points adapted, stopping", N))
           break
@@ -198,6 +219,8 @@ AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
           message(sprintf("Running %s... (%d points remaining)", trans_name,
                           n_remaining))
         }
+
+        t0 <- Sys.time()
 
         if (trans_name == "identity") {
           log_eta <- -log_ell
@@ -221,26 +244,30 @@ AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
                             sum(adapted_mask), N, khat_threshold))
           }
 
-        } else if (trans_name %in% c("mm1", "mm2")) {
+        } else if (trans_name %in% c("mm1", "mm2", "mm3", "mixis")) {
           # Global transforms (no rho sweep)
           tryCatch({
             transform <- all_transforms[[trans_name]]
-            res <- transform$call(
+            extra <- list()
+            if (trans_name == "mixis") extra$seed <- seed
+            res <- do.call(transform$call, c(list(
               max_iter = 1, params = params, theta = theta,
               data = data, log_ell = log_ell,
               log_ell_original = log_ell, log_pi = log_pi,
               variational = variational,
               surrogate_log_prob_fn = self$surrogate_log_prob_fn
-            )
+            ), extra))
             results[[trans_name]] <- res
             update_best(res)
           }, error = function(e) {
             if (verbose) message(sprintf("Error in %s: %s", trans_name, e$message))
           })
 
-        } else if (trans_name %in% c("ll", "kl", "nkl", "pmm1", "pmm2")) {
+        } else if (trans_name %in% c("ll", "nll", "kl", "nkl",
+                                      "pmm1", "pmm2", "pmm3", "var")) {
           # Small-step transforms with rho sweep
           transform <- all_transforms[[trans_name]]
+          if (is.null(transform)) next  # e.g. "var" without f_fn
 
           for (rho in rhos) {
             tryCatch({
@@ -263,9 +290,12 @@ AdaptiveImportanceSampler <- R6::R6Class("AdaptiveImportanceSampler",
             })
           }
         }
+
+        timings[[trans_name]] <- as.numeric(Sys.time() - t0, units = "secs")
       }
 
       results$best <- best_res
+      results$timings <- timings
       results
     }
   )
