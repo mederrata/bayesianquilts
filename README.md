@@ -224,6 +224,8 @@ This library implements methods from:
 
 ### Piecewise Linear Models
 
+- Chang JC (2026). A renormalization-group inspired lattice-based framework for piecewise generalized linear models. *ArXiv* [Preprint] 2605.05493. [https://arxiv.org/abs/2605.05493](https://arxiv.org/abs/2605.05493) -- theoretical foundation for the piecewise (quilt) models: lattice-based hierarchical decomposition, WAIC-based generalization analysis via replica theory, and scaling laws for prior regularization across interaction order.
+
 - Chang TL, Xia H, Mahajan S, Mahajan R, Maisog J, et al. (2024). Interpretable (not just posthoc-explainable) medical claims modeling for discharge placement to reduce preventable all-cause readmissions or death. *PLOS ONE* 19(5): e0302871. [https://doi.org/10.1371/journal.pone.0302871](https://doi.org/10.1371/journal.pone.0302871)
 
 - Xia H, Chang JC, Nowak S, Mahajan S, Mahajan R, Chang TL, Chow CC (2023). Proceedings of the 8th Machine Learning for Healthcare Conference, *PMLR* 219:884-905.
