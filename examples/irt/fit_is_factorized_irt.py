@@ -410,6 +410,10 @@ def main():
         # Standardize
         scale_model.standardize_marginal(scale_data)
         scale_model.fit_surrogate_to_mcmc()
+        # Refresh calibrated_expectations from the now-standardized surrogate
+        # so the downstream IrtMixedImputationModel sees the same N(0,1)
+        # scale as the MCMC samples.
+        calibrate_model(scale_model)
 
         # EAP
         eap_baseline = scale_model.compute_eap_abilities(scale_data)
