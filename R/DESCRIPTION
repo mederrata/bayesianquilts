@@ -1,10 +1,15 @@
 Package: bayesianquilts
-Title: Adaptive Importance Sampling for Bayesian Cross-Validation
-Version: 0.2.0
+Title: Adaptive Importance Sampling and Quilted-Model Scaling for Bayesian Cross-Validation
+Version: 0.3.0
 Authors@R: person("Joshua", "Chang", email = "josh@mederrata.com", role = c("aut", "cre"))
 Description: R port of the bayesianquilts library for interpretable Bayesian machine learning.
     Provides Adaptive Importance Sampling (AIS) methods for efficient Leave-One-Out (LOO)
     cross-validation, with support for brms models and custom likelihood functions.
+    Includes the full-rank transformations MM3 and PMM3, the natural-gradient variants
+    NLD and NKL, the variance-based transformation, and MixIS (Silva & Zanella 2024).
+    Also provides the quilted-model interaction decomposition with the manuscript's
+    generalization-preserving prior scales (Chang 2025) so multi-way component priors
+    can be set from data marginals.
 License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
@@ -29,3 +34,4 @@ Collate:
     'likelihoods.R'
     'ais.R'
     'brms_utils.R'
+    'decomposition.R'

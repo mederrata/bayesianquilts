@@ -229,6 +229,7 @@ def run(
     from bayesianquilts.irt.grm import GRModel
     from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
+    from bayesianquilts.io.converged import export_artifact
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -267,6 +268,7 @@ def run(
     model_baseline = GRModel(
         item_keys=item_keys, num_people=n_people, dim=1,
         response_cardinality=response_cardinality, dtype=jnp.float32,
+        share_discriminations=True,
     )
     model_baseline.fit(
         factory, batch_size=batch_size, dataset_size=n_people,
@@ -314,6 +316,7 @@ def run(
         item_keys=item_keys, num_people=n_people, dim=1,
         response_cardinality=response_cardinality, dtype=jnp.float32,
         imputation_model=pairwise_model,
+        share_discriminations=True,
     )
     model_pairwise._adaptive_thresholds = adaptive_thresholds
     ignored_pw = [k for k, t in adaptive_thresholds.items() if t >= 1.0]
@@ -336,6 +339,7 @@ def run(
         item_keys=item_keys, num_people=n_people, dim=1,
         response_cardinality=response_cardinality, dtype=jnp.float32,
         imputation_model=mixed_imputation,
+        share_discriminations=True,
     )
     model_mixed._adaptive_thresholds = adaptive_thresholds
     ignored_mix = [k for k in item_keys
@@ -408,6 +412,19 @@ def run(
                 out / 'forest_difficulties.png')
     plot_ability_histograms(models_ab, out / 'ability_histograms.png')
     plot_w_irt_weights(mixed_imputation, item_keys, out / 'w_irt_weights.png')
+
+    # ---- Converged artifact (libfab + gofluttercat consumable) ----
+    print("\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+    export_artifact(
+        irt_model=model_mixed,
+        imputation_model=mixed_imputation,
+        out_dir=out / 'converged',
+        scale_names=['theta'],
+        fit_method='weighted_advi',
+        source_script=os.path.basename(__file__),
+        extra_manifest={'reference_group': reference_group},
+    )
+    print(f"  -> {out / 'converged'}")
 
     print(f"\nAll artifacts saved to {out}/")
 

@@ -264,6 +264,10 @@ SmallStepTransformation <- R6::R6Class("SmallStepTransformation",
 #' Q = -grad(log_ell). Moves samples in the direction that decreases
 #' the likelihood of the left-out observation.
 #'
+#' Uses the analytical divergence div(Q) = -tr(H) (Hessian diagonal sum),
+#' matching the Python implementation. This avoids the zero-Jacobian bug
+#' from numerical differencing when h*div(Q) is small.
+#'
 #' @export
 LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
   inherit = SmallStepTransformation,
@@ -280,24 +284,22 @@ LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
     },
 
     compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
-      diag_hess <- self$likelihood_fn$log_likelihood_hessian_diag(data, params)
+      kwargs <- list(...)
+      if (!is.null(kwargs$log_ell_doubleprime)) {
+        diag_hess <- kwargs$log_ell_doubleprime
+      } else {
+        diag_hess <- self$likelihood_fn$log_likelihood_hessian_diag(data, params)
+      }
 
-      # Sum over parameter dimensions to get (S x N)
-      divs <- list()
+      # div(Q) = -tr(H) summed across all parameter leaves
+      total_div <- matrix(0, nrow = nrow(current_log_ell),
+                          ncol = ncol(current_log_ell))
       for (k in names(diag_hess)) {
         val <- diag_hess[[k]]
         if (length(dim(val)) == 3) {
-          divs[[k]] <- -apply(val, c(1, 2), sum)
+          total_div <- total_div - apply(val, c(1, 2), sum)
         } else {
-          divs[[k]] <- -val
-        }
-      }
-
-      # Sum over all params
-      total_div <- divs[[1]]
-      if (length(divs) > 1) {
-        for (i in 2:length(divs)) {
-          total_div <- total_div + divs[[i]]
+          total_div <- total_div - val
         }
       }
 
@@ -307,9 +309,85 @@ LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
 )
 
 
+#' Natural-gradient Likelihood Descent Transformation
+#'
+#' Q_NLL = Sigma %*% (-grad log ell_i), where Sigma is the posterior covariance.
+#' Approximates the influence function J^{-1} grad log ell_i without the
+#' pi(theta|D) prefactor of the KL flow. Cheaper than KL (no posterior
+#' evaluation) and more directly aligned with the optimal LOO shift.
+#'
+#' Analytical divergence: div(Q_NLL) = -tr(Sigma %*% H) with diagonal-Hessian
+#' approximation: -sum_k Sigma_kk * H_kk.
+#'
+#' @export
+NaturalLikelihoodDescent <- R6::R6Class("NaturalLikelihoodDescent",
+  inherit = SmallStepTransformation,
+  public = list(
+    posterior_cov = NULL,
+
+    #' @description Initialize
+    #' @param likelihood_fn LikelihoodFunction object
+    #' @param posterior_cov Posterior covariance matrix (K_total x K_total)
+    initialize = function(likelihood_fn, posterior_cov) {
+      super$initialize(likelihood_fn)
+      self$posterior_cov <- posterior_cov
+    },
+
+    compute_Q = function(theta, data, params, current_log_ell, ...) {
+      kwargs <- list(...)
+      if (!is.null(kwargs$log_ell_prime)) {
+        grad_ll <- kwargs$log_ell_prime
+      } else {
+        grad_ll <- self$likelihood_fn$log_likelihood_gradient(data, params)
+      }
+
+      # Q_LL = -grad log ell
+      Q_ll <- lapply(grad_ll, function(x) -x)
+
+      # Flatten to (S, N, K_total), precondition by Sigma, unflatten.
+      flat <- flatten_pytree_leaves(Q_ll, current_log_ell)
+      S <- nrow(current_log_ell)
+      N <- ncol(current_log_ell)
+      Q_flat <- flat$flat   # (S, N, K_total)
+
+      Q_nat_flat <- array(0, dim = dim(Q_flat))
+      for (s in seq_len(S)) {
+        Q_nat_flat[s, , ] <- Q_flat[s, , ] %*% self$posterior_cov
+      }
+      unflatten_pytree_leaves(Q_nat_flat, flat$layout)
+    },
+
+    compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
+      kwargs <- list(...)
+      if (!is.null(kwargs$log_ell_doubleprime)) {
+        hess_diag <- kwargs$log_ell_doubleprime
+      } else {
+        hess_diag <- self$likelihood_fn$log_likelihood_hessian_diag(data, params)
+      }
+
+      flat <- flatten_pytree_leaves(hess_diag, current_log_ell)
+      hess_flat <- flat$flat   # (S, N, K_total)
+      sigma_diag <- diag(self$posterior_cov)
+
+      # div(Q) = -tr(Sigma %*% H) ~ -sum_k Sigma_kk * H_kk (diagonal-H approx)
+      K_total <- dim(hess_flat)[3]
+      sigma_b <- array(rep(sigma_diag, each = dim(hess_flat)[1] * dim(hess_flat)[2]),
+                       dim = dim(hess_flat))
+      -apply(hess_flat * sigma_b, c(1, 2), sum)
+    }
+  )
+)
+
+
 #' KL Divergence Transformation
 #'
 #' Q_i = -exp(log_pi - log_ell_i) * grad(log_ell_i)
+#'
+#' Uses the analytical divergence
+#'   div(Q_KL) = c_i * (-tr(H_i) + (grad log_pi - grad log_ell_i) . grad log_ell_i)
+#' where c_i = -exp(log_pi - log_ell_i) and grad log_pi ~ sum_j grad log_ell_j
+#' (posterior-gradient approximation, ignoring prior). Matches the Python
+#' zero-Jacobian fix.
 #'
 #' @export
 KLDivergence <- R6::R6Class("KLDivergence",
@@ -344,6 +422,67 @@ KLDivergence <- R6::R6Class("KLDivergence",
         }
       }
       return(Q)
+    },
+
+    compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
+      kwargs <- list(...)
+      log_pi <- kwargs$log_pi
+      if (is.null(log_pi)) {
+        return(matrix(0, nrow = nrow(current_log_ell),
+                      ncol = ncol(current_log_ell)))
+      }
+      log_pi_centered <- log_pi - max(log_pi)
+      c_i <- -exp(log_pi_centered - current_log_ell)   # (S, N)
+
+      if (!is.null(kwargs$log_ell_doubleprime)) {
+        hess_diag <- kwargs$log_ell_doubleprime
+      } else {
+        hess_diag <- self$likelihood_fn$log_likelihood_hessian_diag(data, params)
+      }
+      tr_H <- matrix(0, nrow = nrow(current_log_ell),
+                     ncol = ncol(current_log_ell))
+      for (k in names(hess_diag)) {
+        val <- hess_diag[[k]]
+        if (length(dim(val)) == 3) {
+          tr_H <- tr_H + apply(val, c(1, 2), sum)
+        } else {
+          tr_H <- tr_H + val
+        }
+      }
+
+      if (!is.null(kwargs$log_ell_prime)) {
+        grad_ll <- kwargs$log_ell_prime
+      } else {
+        grad_ll <- self$likelihood_fn$log_likelihood_gradient(data, params)
+      }
+
+      # dot term: (sum_j g_j - g_i) . g_i, summed over leaves
+      dot_term <- matrix(0, nrow = nrow(current_log_ell),
+                         ncol = ncol(current_log_ell))
+      for (k in names(grad_ll)) {
+        leaf <- grad_ll[[k]]
+        if (length(dim(leaf)) == 3) {
+          total_g <- apply(leaf, c(1, 3), sum)              # (S, K)
+          total_g_3d <- array(rep(total_g, each = 1),
+                              dim = dim(leaf))
+          # rep over N dimension correctly: replicate total_g across N
+          total_g_3d <- aperm(array(rep(total_g,
+                                        times = dim(leaf)[2]),
+                                    dim = c(dim(leaf)[1], dim(leaf)[3],
+                                            dim(leaf)[2])),
+                              c(1, 3, 2))
+          diff <- total_g_3d - leaf
+          dot_term <- dot_term + apply(diff * leaf, c(1, 2), sum)
+        } else {
+          total_g <- rowSums(leaf)                          # (S,)
+          total_g_m <- matrix(total_g, nrow = nrow(leaf),
+                              ncol = ncol(leaf))
+          diff <- total_g_m - leaf
+          dot_term <- dot_term + diff * leaf
+        }
+      }
+
+      c_i * (-tr_H + dot_term)
     }
   )
 )
@@ -450,6 +589,53 @@ NaturalKLDivergence <- R6::R6Class("NaturalKLDivergence",
       }
 
       return(result)
+    },
+
+    #' @description Analytical divergence of Q_NKL = Sigma %*% Q_KL.
+    #' div(Q_NKL) = c_i * (-tr(Sigma %*% H_i) + (sum_j g_j - g_i)^T Sigma g_i)
+    #' with diagonal-Hessian approximation for tr(Sigma %*% H).
+    compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
+      kwargs <- list(...)
+      log_pi <- kwargs$log_pi
+      if (is.null(log_pi)) {
+        return(matrix(0, nrow = nrow(current_log_ell),
+                      ncol = ncol(current_log_ell)))
+      }
+      log_pi_centered <- log_pi - max(log_pi)
+      c_i <- -exp(log_pi_centered - current_log_ell)
+
+      if (!is.null(kwargs$log_ell_doubleprime)) {
+        hess_diag <- kwargs$log_ell_doubleprime
+      } else {
+        hess_diag <- self$likelihood_fn$log_likelihood_hessian_diag(data, params)
+      }
+      flat_H <- flatten_pytree_leaves(hess_diag, current_log_ell)
+      hess_flat <- flat_H$flat  # (S, N, K_total)
+      sigma_diag <- diag(self$posterior_cov)
+      sigma_b <- array(rep(sigma_diag,
+                           each = dim(hess_flat)[1] * dim(hess_flat)[2]),
+                       dim = dim(hess_flat))
+      tr_SH <- apply(hess_flat * sigma_b, c(1, 2), sum)  # (S, N)
+
+      if (!is.null(kwargs$log_ell_prime)) {
+        grad_ll <- kwargs$log_ell_prime
+      } else {
+        grad_ll <- self$likelihood_fn$log_likelihood_gradient(data, params)
+      }
+      flat_G <- flatten_pytree_leaves(grad_ll, current_log_ell)
+      g_flat <- flat_G$flat   # (S, N, K)
+      total_g <- apply(g_flat, c(1, 3), sum)   # (S, K)
+      S <- dim(g_flat)[1]; N <- dim(g_flat)[2]; K <- dim(g_flat)[3]
+      total_g_3d <- aperm(array(total_g, dim = c(S, K, N)), c(1, 3, 2))
+      diff <- total_g_3d - g_flat   # (S, N, K)
+      # diff_Sigma[s, n, :] = diff[s, n, :] %*% Sigma
+      diff_Sigma <- array(0, dim = c(S, N, K))
+      for (s in seq_len(S)) {
+        diff_Sigma[s, , ] <- diff[s, , ] %*% self$posterior_cov
+      }
+      dot_term <- apply(diff_Sigma * g_flat, c(1, 2), sum)  # (S, N)
+
+      c_i * (-tr_SH + dot_term)
     }
   )
 )
@@ -459,10 +645,16 @@ NaturalKLDivergence <- R6::R6Class("NaturalKLDivergence",
 #'
 #' Q = mean_w - mean, applied per observation as a small step.
 #'
+#' Analytical divergence: Q is independent of theta, so div(Q) = 0 exactly.
+#'
 #' @export
 PMM1 <- R6::R6Class("PMM1",
   inherit = SmallStepTransformation,
   public = list(
+    compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
+      matrix(0, nrow = nrow(current_log_ell), ncol = ncol(current_log_ell))
+    },
+
     compute_Q = function(theta, data, params, current_log_ell,
                          log_ell_original = NULL, ...) {
       if (is.null(log_ell_original)) stop("log_ell_original required for PMM1")
@@ -741,6 +933,401 @@ MM2 <- R6::R6Class("MM2",
         p_loo_psis = colSums(iw$psis_weights * exp_log_ell_new),
         ll_loo_eta = colSums(iw$eta_weights * exp_log_ell_new),
         ll_loo_psis = colSums(iw$psis_weights * exp_log_ell_new)
+      )
+    }
+  )
+)
+
+
+# ============================================================================
+# Full-rank transformations: MM3, PMM3
+# ============================================================================
+
+# Internal helper: flatten a named list of parameters of shape (S, ...) into
+# a (S, D) matrix plus a layout descriptor for unflattening.
+.flatten_params <- function(params) {
+  S <- NULL
+  layout <- list()
+  parts <- list()
+  for (name in sort(names(params))) {
+    v <- params[[name]]
+    if (is.null(dim(v))) {
+      if (is.null(S)) S <- length(v)
+      parts[[length(parts) + 1]] <- matrix(v, ncol = 1)
+      layout[[length(layout) + 1]] <- list(name = name, trailing = integer(0),
+                                            n_elems = 1L)
+    } else {
+      if (is.null(S)) S <- dim(v)[1]
+      trailing <- dim(v)[-1]
+      k <- as.integer(prod(trailing))
+      parts[[length(parts) + 1]] <- matrix(v, nrow = dim(v)[1], ncol = k)
+      layout[[length(layout) + 1]] <- list(name = name, trailing = trailing,
+                                            n_elems = k)
+    }
+  }
+  list(flat = do.call(cbind, parts), layout = layout, S = S)
+}
+
+# Unflatten a (S, N, D) array back into a named list, broadcasting where the
+# original parameter was scalar.
+.unflatten_to_per_obs <- function(arr_snd, layout) {
+  out <- list()
+  idx <- 1L
+  for (entry in layout) {
+    k_i <- entry$n_elems
+    chunk <- arr_snd[, , idx:(idx + k_i - 1), drop = FALSE]
+    if (length(entry$trailing) == 0) {
+      out[[entry$name]] <- matrix(chunk, nrow = dim(arr_snd)[1],
+                                  ncol = dim(arr_snd)[2])
+    } else {
+      out[[entry$name]] <- array(chunk,
+                                 dim = c(dim(arr_snd)[1], dim(arr_snd)[2],
+                                         entry$trailing))
+    }
+    idx <- idx + k_i
+  }
+  out
+}
+
+
+#' PMM3 (Partial Moment Matching 3) - full-rank affine with step size
+#'
+#' Generalization of MM3 with a tunable step size h. The vector field is
+#'   Q(theta) = (L_w %*% L^{-1} - I) %*% (theta - mu) + (mu_w - mu)
+#' so T(theta) = theta + h*Q(theta) interpolates between identity (h=0)
+#' and full MM3 (h=1). Divergence is exact: div(Q) = trace(L_w %*% L^{-1} - I),
+#' constant in theta.
+#'
+#' @export
+PMM3 <- R6::R6Class("PMM3",
+  inherit = SmallStepTransformation,
+  public = list(
+    .cached_A = NULL,
+
+    compute_Q = function(theta, data, params, current_log_ell,
+                         log_ell_original = NULL, ...) {
+      if (is.null(log_ell_original))
+        stop("log_ell_original required for PMM3")
+
+      log_w <- -log_ell_original
+      weights <- exp(log_w)
+      S <- nrow(log_w); N <- ncol(log_w)
+
+      fl <- .flatten_params(params)
+      theta_flat <- fl$flat    # (S, D)
+      D <- ncol(theta_flat)
+
+      mu <- colMeans(theta_flat)
+      centered <- sweep(theta_flat, 2, mu, "-")
+      cov_u <- crossprod(centered) / S + 1e-8 * diag(D)
+      L <- t(chol(cov_u))           # lower triangular
+      L_inv <- solve(L)
+
+      w_norm <- sweep(weights, 2, colSums(weights) + 1e-10, "/")
+      mu_w <- t(w_norm) %*% theta_flat                # (N, D)
+
+      # Weighted covariance per observation: cov_w[n] = Sum_s w_norm[s,n] dd^T
+      cov_w <- array(0, dim = c(N, D, D))
+      for (n in seq_len(N)) {
+        d <- sweep(theta_flat, 2, mu_w[n, ], "-")
+        cov_w[n, , ] <- t(d) %*% (d * w_norm[, n]) + 1e-8 * diag(D)
+      }
+
+      A <- array(0, dim = c(N, D, D))
+      mu_shift <- sweep(mu_w, 2, mu, "-")    # (N, D)
+      Q_flat <- array(0, dim = c(S, N, D))
+      for (n in seq_len(N)) {
+        L_w_n <- t(chol(cov_w[n, , ]))
+        A_n <- L_w_n %*% L_inv - diag(D)
+        A[n, , ] <- A_n
+        Q_flat[, n, ] <- centered %*% t(A_n) + matrix(mu_shift[n, ],
+                                                       nrow = S, ncol = D,
+                                                       byrow = TRUE)
+      }
+      self$.cached_A <- A
+      .unflatten_to_per_obs(Q_flat, fl$layout)
+    },
+
+    compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
+      A <- self$.cached_A
+      if (is.null(A)) {
+        return(matrix(0, nrow = nrow(current_log_ell),
+                      ncol = ncol(current_log_ell)))
+      }
+      N <- dim(A)[1]
+      trace_A <- numeric(N)
+      for (n in seq_len(N)) trace_A[n] <- sum(diag(A[n, , ]))
+      matrix(trace_A, nrow = nrow(current_log_ell), ncol = N, byrow = TRUE)
+    }
+  )
+)
+
+
+#' MM3 (Moment Matching 3) - global full-rank affine transformation
+#'
+#' From Paananen et al. (2021). Matches the full covariance structure (not
+#' just marginal variances like MM2) via
+#'   T_i(theta) = L_w_i %*% L^{-1} %*% (theta - mu) + mu_w_i
+#' where L, L_w_i are Cholesky factors of the unweighted and weighted
+#' covariance matrices respectively. The exact log-Jacobian per obs is
+#'   log|J_i| = sum(log(diag(L_w_i))) - sum(log(diag(L))).
+#'
+#' @export
+MM3 <- R6::R6Class("MM3",
+  inherit = Transformation,
+  public = list(
+    call = function(max_iter, params, theta, data, log_ell,
+                    log_ell_original = NULL, log_pi = NULL,
+                    variational = FALSE, surrogate_log_prob_fn = NULL, ...) {
+      if (is.null(log_ell_original)) log_ell_original <- log_ell
+      log_w <- -log_ell_original
+      weights <- exp(log_w)
+      S <- nrow(log_w); N <- ncol(log_w)
+
+      fl <- .flatten_params(params)
+      theta_flat <- fl$flat
+      D <- ncol(theta_flat)
+
+      mu <- colMeans(theta_flat)
+      centered <- sweep(theta_flat, 2, mu, "-")
+      cov_u <- crossprod(centered) / S + 1e-8 * diag(D)
+      L <- t(chol(cov_u))
+      L_inv <- solve(L)
+      log_det_L <- sum(log(diag(L)))
+      z <- centered %*% t(L_inv)   # (S, D)
+
+      w_norm <- sweep(weights, 2, colSums(weights) + 1e-10, "/")
+      mu_w <- t(w_norm) %*% theta_flat     # (N, D)
+
+      log_jac <- matrix(0, nrow = S, ncol = N)
+      theta_new_flat <- array(0, dim = c(S, N, D))
+      for (n in seq_len(N)) {
+        d <- sweep(theta_flat, 2, mu_w[n, ], "-")
+        cov_w_n <- t(d) %*% (d * w_norm[, n]) + 1e-8 * diag(D)
+        L_w_n <- t(chol(cov_w_n))
+        theta_new_flat[, n, ] <- z %*% t(L_w_n) + matrix(mu_w[n, ],
+                                                         nrow = S, ncol = D,
+                                                         byrow = TRUE)
+        log_jac[, n] <- sum(log(diag(L_w_n))) - log_det_L
+      }
+      new_params <- .unflatten_to_per_obs(theta_new_flat, fl$layout)
+
+      iw <- self$compute_importance_weights(
+        self$likelihood_fn, data, params, new_params,
+        log_jac, variational, log_pi, log_ell_original,
+        surrogate_log_prob_fn
+      )
+      log_ell_new <- iw$log_ell_new
+      exp_log_ell_new <- exp(log_ell_new)
+      list(
+        theta_new = new_params,
+        log_jacobian = log_jac,
+        eta_weights = iw$eta_weights,
+        psis_weights = iw$psis_weights,
+        khat = iw$khat,
+        log_ell_new = log_ell_new,
+        weight_entropy = entropy(iw$eta_weights),
+        psis_entropy = entropy(iw$psis_weights),
+        p_loo_eta = colSums(iw$eta_weights * exp_log_ell_new),
+        p_loo_psis = colSums(iw$psis_weights * exp_log_ell_new),
+        ll_loo_eta = colSums(iw$eta_weights * exp_log_ell_new),
+        ll_loo_psis = colSums(iw$psis_weights * exp_log_ell_new)
+      )
+    }
+  )
+)
+
+
+#' Variance-based Transformation
+#'
+#' Q = pi * (f/ell)^2 * grad(log(f/ell))
+#'   = pi * exp(2 log f - 2 log ell) * (grad log f - grad log ell)
+#'
+#' For the default target f = ell, this collapses to grad log f - grad log ell
+#' which is zero, so callers typically supply a custom f_fn (e.g. an
+#' expectation target).
+#'
+#' Analytical divergence (with default f = ell, so delta_g = 0):
+#'   div(Q_Var) ~ w * (-tr(H) - 2 * ||grad log ell||^2)
+#'
+#' @export
+Variance <- R6::R6Class("Variance",
+  inherit = SmallStepTransformation,
+  public = list(
+    f_fn = NULL,
+
+    #' @description Initialize
+    #' @param likelihood_fn LikelihoodFunction
+    #' @param f_fn Optional function(data, params) -> (S, N) target.
+    initialize = function(likelihood_fn, f_fn = NULL) {
+      super$initialize(likelihood_fn)
+      self$f_fn <- f_fn
+    },
+
+    compute_Q = function(theta, data, params, current_log_ell,
+                         log_pi = NULL, ...) {
+      if (is.null(log_pi)) stop("log_pi required for Variance transform")
+
+      kwargs <- list(...)
+      if (!is.null(kwargs$log_ell_prime)) {
+        grad_ll <- kwargs$log_ell_prime
+      } else {
+        grad_ll <- self$likelihood_fn$log_likelihood_gradient(data, params)
+      }
+
+      # Default target f = exp(log_ell): log_f == current_log_ell,
+      # grad_log_f == grad_ll, so delta_g = 0 and Q = 0.
+      if (is.null(self$f_fn)) {
+        return(lapply(grad_ll, function(x) array(0, dim = dim(x))))
+      }
+
+      log_f <- log(do.call(self$f_fn, list(data, params)))   # (S, N)
+      log_pi_centered <- log_pi - max(log_pi)
+      log_w <- log_pi_centered + 2 * log_f - 2 * current_log_ell
+      w <- exp(log_w)
+
+      grad_log_f <- if (!is.null(kwargs$grad_log_f)) kwargs$grad_log_f else grad_ll
+
+      Q <- list()
+      for (k in names(grad_ll)) {
+        gl <- grad_ll[[k]]
+        gf <- grad_log_f[[k]]
+        diff <- gf - gl
+        if (length(dim(diff)) == 3) {
+          K_dim <- dim(diff)[3]
+          w_3d <- array(rep(w, K_dim), dim = dim(diff))
+          Q[[k]] <- w_3d * diff
+        } else {
+          Q[[k]] <- w * diff
+        }
+      }
+      Q
+    },
+
+    compute_divergence_Q = function(theta, data, params, current_log_ell, ...) {
+      kwargs <- list(...)
+      log_pi <- kwargs$log_pi
+      if (is.null(log_pi)) {
+        return(matrix(0, nrow = nrow(current_log_ell),
+                      ncol = ncol(current_log_ell)))
+      }
+      log_pi_centered <- log_pi - max(log_pi)
+      log_f <- if (is.null(self$f_fn)) current_log_ell else
+        log(do.call(self$f_fn, list(data, params)))
+      w <- exp(log_pi_centered + 2 * log_f - 2 * current_log_ell)
+
+      if (!is.null(kwargs$log_ell_doubleprime)) {
+        hess_diag <- kwargs$log_ell_doubleprime
+      } else {
+        hess_diag <- self$likelihood_fn$log_likelihood_hessian_diag(data, params)
+      }
+      tr_H <- matrix(0, nrow = nrow(current_log_ell),
+                     ncol = ncol(current_log_ell))
+      for (k in names(hess_diag)) {
+        val <- hess_diag[[k]]
+        if (length(dim(val)) == 3) {
+          tr_H <- tr_H + apply(val, c(1, 2), sum)
+        } else {
+          tr_H <- tr_H + val
+        }
+      }
+
+      if (!is.null(kwargs$log_ell_prime)) {
+        grad_ll <- kwargs$log_ell_prime
+      } else {
+        grad_ll <- self$likelihood_fn$log_likelihood_gradient(data, params)
+      }
+      grad_sq <- matrix(0, nrow = nrow(current_log_ell),
+                        ncol = ncol(current_log_ell))
+      for (k in names(grad_ll)) {
+        leaf <- grad_ll[[k]]
+        if (length(dim(leaf)) == 3) {
+          grad_sq <- grad_sq + apply(leaf^2, c(1, 2), sum)
+        } else {
+          grad_sq <- grad_sq + leaf^2
+        }
+      }
+      w * (-tr_H - 2 * grad_sq)
+    }
+  )
+)
+
+
+#' MixIS - Mixture Importance Sampling for LOO-CV (Silva & Zanella 2024)
+#'
+#' Resamples posterior draws using the mixture proposal
+#'   q_mix(theta) ~ pi(theta|D) * sum_i 1/ell(theta|d_i)
+#' and reweights with finite-variance IS weights
+#'   nu_i(theta*) = (1/ell(theta*|d_i)) / sum_j (1/ell(theta*|d_j)).
+#' Provides a robust LOO baseline that does not require posterior smoothing.
+#'
+#' @export
+MixIS <- R6::R6Class("MixIS",
+  inherit = Transformation,
+  public = list(
+    n_mix_samples = NULL,
+
+    initialize = function(likelihood_fn, n_mix_samples = NULL) {
+      super$initialize(likelihood_fn)
+      self$n_mix_samples <- n_mix_samples
+    },
+
+    call = function(max_iter, params, theta, data, log_ell,
+                    log_ell_original = NULL, log_pi = NULL,
+                    variational = FALSE, surrogate_log_prob_fn = NULL,
+                    seed = 42, ...) {
+      if (is.null(log_ell_original)) log_ell_original <- log_ell
+      S <- nrow(log_ell_original); N <- ncol(log_ell_original)
+      n_mix <- if (is.null(self$n_mix_samples)) S else self$n_mix_samples
+
+      # log w_mix(theta_s) = log sum_i exp(-log ell_si)
+      neg_log_ell <- -log_ell_original   # (S, N)
+      row_max <- apply(neg_log_ell, 1, max)
+      log_w_mix <- row_max + log(rowSums(exp(neg_log_ell - row_max)))   # (S,)
+
+      # Categorical resample of size n_mix.
+      log_probs <- log_w_mix - logSumExp(log_w_mix)
+      probs <- exp(log_probs - max(log_probs))
+      probs <- probs / sum(probs)
+      set.seed(seed)
+      idx <- sample.int(S, size = n_mix, replace = TRUE, prob = probs)
+
+      resampled_params <- lapply(params, function(v) {
+        if (is.null(dim(v))) v[idx] else v[idx, , drop = FALSE]
+      })
+
+      log_ell_resampled <- self$likelihood_fn$log_likelihood(
+        data, resampled_params)   # (n_mix, N)
+
+      neg_log_ell_r <- -log_ell_resampled
+      row_max_r <- apply(neg_log_ell_r, 1, max)
+      log_w_mix_r <- row_max_r +
+        log(rowSums(exp(neg_log_ell_r - row_max_r)))
+      log_nu <- neg_log_ell_r - log_w_mix_r   # (n_mix, N)
+
+      # PSIS smoothing
+      col_max <- apply(log_nu, 2, max)
+      psis_res <- psislw(log_nu - rep(col_max, each = nrow(log_nu)))
+      psis_weights <- psis_res$weights
+      khat <- psis_res$khat
+
+      eta_weights <- exp(log_nu - rep(col_max, each = nrow(log_nu)))
+      eta_weights <- sweep(eta_weights, 2, colSums(eta_weights), "/")
+
+      exp_log_ell_r <- exp(log_ell_resampled)
+      list(
+        theta_new = resampled_params,
+        log_jacobian = matrix(0, nrow = n_mix, ncol = N),
+        eta_weights = eta_weights,
+        psis_weights = psis_weights,
+        khat = khat,
+        log_ell_new = log_ell_resampled,
+        weight_entropy = entropy(eta_weights),
+        psis_entropy = entropy(psis_weights),
+        p_loo_eta = colSums(eta_weights * exp_log_ell_r),
+        p_loo_psis = colSums(psis_weights * exp_log_ell_r),
+        ll_loo_eta = colSums(eta_weights * exp_log_ell_r),
+        ll_loo_psis = colSums(psis_weights * exp_log_ell_r)
       )
     }
   )

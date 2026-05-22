@@ -149,6 +149,7 @@ class FactorizedGRModel(IRTModel):
             positive_discriminations=self.positive_discriminations,
             discrimination_prior=getattr(self, 'discrimination_prior', 'half_normal'),
             discrimination_prior_scale=self.discrimination_prior_scale,
+            share_discriminations=getattr(self, 'share_discriminations', False),
             dtype=self.dtype,
             imputation_model=imputation_model,
         )

@@ -545,9 +545,12 @@ class GRModel(IRTModel):
         abilities = np.array(samples['abilities'])
         theta = abilities[:, :, 0, 0, 0]  # (S, N) assuming dim=1
 
-        # discriminations: (S, 1, D, I, 1) -> alpha: (S, I)
+        # discriminations: (S, 1, D, I, 1) -> alpha: (S, I).
+        # With share_discriminations the item axis is 1; broadcast to I.
         disc = np.array(samples['discriminations'])
-        alpha = disc[:, 0, 0, :, 0]  # (S, I) assuming dim=1
+        alpha = disc[:, 0, 0, :, 0]  # (S, I_or_1)
+        if alpha.shape[-1] == 1 and self.num_items > 1:
+            alpha = np.broadcast_to(alpha, (alpha.shape[0], self.num_items)).copy()
 
         # difficulties: cumsum(concat(difficulties0, ddifficulties))
         diff0 = np.array(samples['difficulties0'])  # (S, 1, 1, I, 1)
@@ -674,6 +677,10 @@ class GRModel(IRTModel):
 
         K = self.response_cardinality
 
+        # When sharing discriminations across items, the disc tensor has
+        # a singleton item axis; grm_model_prob broadcasts naturally.
+        disc_items = 1 if getattr(self, "share_discriminations", False) else self.num_items
+
         # Center mu prior at -(K-2)/2 so the median threshold starts
         # near 0 after cumsum with ddifficulties ~ HalfNormal(1).
         d0_loc = -(K - 2) / 2.0
@@ -720,7 +727,7 @@ class GRModel(IRTModel):
                         AbsHorseshoe(
                             scale=jnp.asarray(global_scale, dtype=self.dtype)
                             * jnp.ones(
-                                (1, self.dimensions, self.num_items, 1),
+                                (1, self.dimensions, disc_items, 1),
                                 dtype=self.dtype,
                             ),
                         ),
@@ -733,7 +740,7 @@ class GRModel(IRTModel):
                         tfd.Horseshoe(
                             scale=jnp.asarray(global_scale, dtype=self.dtype)
                             * jnp.ones(
-                                (1, self.dimensions, self.num_items, 1),
+                                (1, self.dimensions, disc_items, 1),
                                 dtype=self.dtype,
                             ),
                         ),
@@ -745,7 +752,7 @@ class GRModel(IRTModel):
             _scale = float(prior_scale) if prior_scale is not None else 2.0
             disc_scale = jnp.asarray(
                 _scale * jnp.ones(
-                    (1, self.dimensions, self.num_items, 1), dtype=self.dtype),
+                    (1, self.dimensions, disc_items, 1), dtype=self.dtype),
                 dtype=self.dtype,
             )
             if prior_type == 'half_cauchy':
