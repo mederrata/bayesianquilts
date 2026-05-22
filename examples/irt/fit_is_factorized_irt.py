@@ -236,6 +236,7 @@ def main():
     from bayesianquilts.imputation.mixed import (
         IrtMixedImputationModel, PairwiseOnlyImputationModel
     )
+    from bayesianquilts.io.converged import export_multi_scale_artifact
 
     config = DATASET_CONFIGS[args.dataset]
     mod = importlib.import_module(config['module'])
@@ -325,6 +326,7 @@ def main():
     all_eap = {}
     all_is_results = {}
     all_eap_variants = {}
+    reweighted_models_by_scale: dict[str, object] = {}
 
     for dim_idx, (indices, sname) in enumerate(
             zip(scale_indices, scale_names)):
@@ -348,6 +350,7 @@ def main():
             item_keys=scale_item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             dtype=jnp.float64,
+            share_discriminations=True,
         )
 
         def data_factory(d=scale_data):
@@ -538,7 +541,25 @@ def main():
         except Exception as e:
             print(f"  {sname} RMSE failed: {e}")
 
-        del scale_model
+        # Stash the IS-reweighted (mixed) state so we can export it later.
+        # Replace calibrated_expectations with PSIS-weighted means.
+        try:
+            psis_w = np.asarray(scale_is['mixed']['psis_weights'])
+            psis_w = psis_w / psis_w.sum()
+            rew_ce = {}
+            for k, v in mcmc_samples.items():
+                arr = np.asarray(v)
+                flat = arr.reshape(-1, *arr.shape[2:])
+                w_shape = (flat.shape[0],) + (1,) * (flat.ndim - 1)
+                rew_ce[k] = np.sum(flat * psis_w.reshape(w_shape), axis=0)
+            rew_ce['abilities'] = scale_eap_variants['Mixed'][
+                :, np.newaxis, np.newaxis, np.newaxis
+            ]
+            scale_model.calibrated_expectations = rew_ce
+            reweighted_models_by_scale[sname] = scale_model
+        except Exception as e:
+            print(f"  Skipping converged export for {sname}: {e}")
+            del scale_model
         gc.collect()
 
     # ================================================================
@@ -583,6 +604,19 @@ def main():
         **{f'psd_dim{d}': np.array(all_eap[d]['psd'])
            for d in range(len(scale_indices))},
     )
+    # ---- Converged artifact (libfab + gofluttercat consumable) ----
+    if reweighted_models_by_scale:
+        print("\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+        export_multi_scale_artifact(
+            irt_models=reweighted_models_by_scale,
+            imputation_model=pairwise_model,
+            out_dir=os.path.join(output_dir, 'converged'),
+            fit_method='is_reweight_factorized_mcmc',
+            source_script=os.path.basename(__file__),
+            extra_manifest={'dataset': args.dataset, 'use_ipw': use_ipw},
+        )
+        print(f"  -> {os.path.join(output_dir, 'converged')}")
+
     print(f"  Output: {output_dir}/")
 
 

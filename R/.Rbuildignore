@@ -1,0 +1,7 @@
+^LICENSE\.md$
+^cran-comments\.md$
+^README\.md$
+^bayesianquilts\.Rcheck$
+^bayesianquilts.*\.tar\.gz$
+^\.github$
+^\.Rproj\.user$

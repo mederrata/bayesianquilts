@@ -156,6 +156,7 @@ def run(output_dir='ipw_example_results'):
     from bayesianquilts.irt.grm import GRModel
     from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
+    from bayesianquilts.io.converged import export_artifact
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -237,6 +238,7 @@ def run(output_dir='ipw_example_results'):
     model_baseline = GRModel(
         item_keys=item_keys, num_people=n_people, dim=1,
         response_cardinality=K, dtype=jnp.float32,
+        share_discriminations=True,
     )
     model_baseline.fit(
         factory, batch_size=batch_size, dataset_size=n_people,
@@ -319,6 +321,7 @@ def run(output_dir='ipw_example_results'):
         item_keys=item_keys, num_people=n_people, dim=1,
         response_cardinality=K, dtype=jnp.float32,
         imputation_model=pw_only_imp,
+        share_discriminations=True,
     )
     model_pairwise._adaptive_thresholds = thresholds
     model_pairwise.fit(
@@ -340,6 +343,7 @@ def run(output_dir='ipw_example_results'):
         item_keys=item_keys, num_people=n_people, dim=1,
         response_cardinality=K, dtype=jnp.float32,
         imputation_model=mixed_imp,
+        share_discriminations=True,
     )
     model_mixed._adaptive_thresholds = thresholds
     model_mixed.fit(
@@ -365,6 +369,19 @@ def run(output_dir='ipw_example_results'):
     for label, mdl in models.items():
         ab = np.array(mdl.calibrated_expectations['abilities']).flatten()
         print(f"  {label}: ability mean={ab.mean():.3f}, std={ab.std():.3f}")
+
+    # ---- Converged artifact (libfab + gofluttercat consumable) ----
+    print("\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+    export_artifact(
+        irt_model=model_mixed,
+        imputation_model=mixed_imp,
+        out_dir=out / 'converged',
+        scale_names=['theta'],
+        fit_method='ipw_weighted_advi',
+        source_script=os.path.basename(__file__),
+        extra_manifest={'group_weights': group_weights},
+    )
+    print(f"  -> {out / 'converged'}")
 
     print(f"\nAll artifacts saved to {out}/")
 

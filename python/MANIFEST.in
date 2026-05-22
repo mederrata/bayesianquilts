@@ -1,0 +1,17 @@
+include LICENSE
+include README.md
+include pyproject.toml
+recursive-include bayesianquilts/data *.csv.gz
+recursive-include bayesianquilts py.typed
+prune duckworth-grit-scale-data
+prune results
+prune out
+prune __pycache__
+prune .pytest_cache
+prune .venv
+prune bayesianquilts.egg-info
+global-exclude *.py[cod]
+global-exclude __pycache__
+global-exclude .DS_Store
+global-exclude *.so
+global-exclude *.zip

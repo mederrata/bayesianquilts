@@ -347,6 +347,7 @@ def main():
     from bayesianquilts.imputation.mixed import (
         IrtMixedImputationModel, PairwiseOnlyImputationModel
     )
+    from bayesianquilts.io.converged import export_artifact
 
     config = DATASET_CONFIGS[args.dataset]
     mod = importlib.import_module(config['module'])
@@ -416,6 +417,7 @@ def main():
             item_keys=item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             imputation_model=pairwise_model, dtype=jnp.float64,
+            share_discriminations=True,
         )
         data = dict(base_data)
         pmfs, _ = model_tmp._compute_batch_pmfs(data)
@@ -442,6 +444,7 @@ def main():
             item_keys=item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             dtype=jnp.float64,
+            share_discriminations=True,
         )
 
         def data_factory():
@@ -488,6 +491,7 @@ def main():
             item_keys=item_keys, num_people=num_people,
             response_cardinality=response_cardinality, dim=1,
             imputation_model=mixed_imputation, dtype=jnp.float64,
+            share_discriminations=True,
         )
         data = dict(base_data)
         pmfs, weights = model_tmp._compute_batch_pmfs(data)
@@ -636,78 +640,89 @@ def main():
         print(f"{'='*70}")
 
     # ================================================================
-    # Step 6: BCM training + gofluttercat bundle (mixed variant only)
+    # Step 6: converged artifact + BCM (mixed variant)
+    #
+    # Upstream's ``bayesianquilts.io.converged.export_artifact`` writes
+    # the canonical ``items/`` + ``scales.json`` + ``imputation/`` +
+    # ``manifest.yaml`` bundle that libfab and gofluttercat both read.
+    # We then fit BCMConditional (Python-side, richer per-item-indicator
+    # corrector) and BCMSet (Go-side, per-J isotonic, drop-in for
+    # gofluttercat's biascorrection package) on top of the same triples
+    # and save them alongside the converged bundle.
     # ================================================================
-    if not args.skip_bcm and 'mixed' in mcmc_models:
-        print(f"\n{'='*60}")
-        print(f"Step 6: BCM training + gofluttercat bundle (mixed)")
-        print(f"{'='*60}")
-        from _bcm_triples import (
-            build_bcm_triples, extract_item_params_from_mcmc,
+    final_irt = mcmc_models.get('mixed') if mcmc_models else None
+    if final_irt is not None:
+        bundle_dir = os.path.join(output_dir, 'converged')
+        print(f"\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+        export_artifact(
+            irt_model=final_irt,
+            imputation_model=mixed_imputation,
+            out_dir=bundle_dir,
+            scale_names=[args.dataset],
+            fit_method='marginal_mcmc',
+            source_script=os.path.basename(__file__),
+            extra_manifest={'dataset': args.dataset, 'use_ipw': use_ipw,
+                            'standardized': True},
         )
-        from _gofluttercat_export import export_bundle
-        from libfabulouscatpy.biascorrection import BCMConditional
+        print(f"  -> {bundle_dir}")
 
-        bcm_model = mcmc_models['mixed']
-        # Re-attach the mixed imputation so subset scoring can recompute
-        # PMFs on the masked data; standardize_marginal already rescaled the
-        # MCMC item params during run_variant_mcmc.
-        bcm_model.imputation_model = mixed_imputation
+        if not args.skip_bcm:
+            print(f"\n=== Step 6: BCM (mixed variant) ===")
+            from _bcm_triples import (
+                build_bcm_triples, extract_item_params_from_mcmc,
+            )
+            from libfabulouscatpy.biascorrection import (
+                BCMConditional, fit_bcm_set,
+            )
 
-        # Use MCMC-mean item params so each subset eval is on the same scale.
-        bcm_item_params = extract_item_params_from_mcmc(bcm_model)
+            bcm_model = final_irt
+            bcm_model.imputation_model = mixed_imputation
+            bcm_item_params = extract_item_params_from_mcmc(bcm_model)
 
-        rng = np.random.default_rng(args.seed + 7)
-        subset_scores, indicators_mat, golds, _ = build_bcm_triples(
-            model=bcm_model,
-            base_data=base_data,
-            item_keys=item_keys,
-            subset_sizes=args.bcm_subset_sizes,
-            n_subsets_per_size=args.bcm_n_subsets,
-            max_respondents=args.bcm_max_respondents,
-            rng=rng,
-            item_params=bcm_item_params,
-        )
-        print(f"  n_triples = {subset_scores.size}")
+            rng_bcm = np.random.default_rng(args.seed + 7)
+            subset_scores, indicators_mat, golds, _ = build_bcm_triples(
+                model=bcm_model,
+                base_data=base_data,
+                item_keys=item_keys,
+                subset_sizes=args.bcm_subset_sizes,
+                n_subsets_per_size=args.bcm_n_subsets,
+                max_respondents=args.bcm_max_respondents,
+                rng=rng_bcm,
+                item_params=bcm_item_params,
+            )
+            print(f"  n_triples = {subset_scores.size}")
 
-        bcm_cond = BCMConditional.fit(
-            subset_scores, indicators_mat, golds,
-            item_keys=item_keys, scale_name=args.dataset,
-            n_folds=5, seed=args.seed,
-            max_iter=200, learning_rate=0.05, max_depth=4,
-        )
-        bcm_cond_path = os.path.join(
-            output_dir, f'bcm_{args.dataset}_mixed_conditional.joblib')
-        bcm_cond.save(bcm_cond_path)
-        print(f"  saved BCMConditional -> {bcm_cond_path}")
-        l2_naive = float(np.sqrt(np.mean((subset_scores - golds) ** 2)))
-        l2_bcm = float(np.sqrt(np.mean((bcm_cond.oof_predictions - golds) ** 2)))
-        print(f"  L2(subset - gold) = {l2_naive:.4f}; "
-              f"L2(BCMcond - gold) = {l2_bcm:.4f}")
+            # Richer Python-side corrector with per-item indicator features.
+            bcm_cond = BCMConditional.fit(
+                subset_scores, indicators_mat, golds,
+                item_keys=item_keys, scale_name=args.dataset,
+                n_folds=5, seed=args.seed,
+                max_iter=200, learning_rate=0.05, max_depth=4,
+            )
+            bcm_cond_path = os.path.join(
+                bundle_dir, f'bcm_{args.dataset}_conditional.joblib')
+            bcm_cond.save(bcm_cond_path)
+            l2_naive = float(np.sqrt(np.mean((subset_scores - golds) ** 2)))
+            l2_bcm = float(np.sqrt(np.mean(
+                (bcm_cond.oof_predictions - golds) ** 2)))
+            print(f"  BCMConditional -> {bcm_cond_path}")
+            print(f"  L2(subset - gold) = {l2_naive:.4f}; "
+                  f"L2(BCMcond - gold) = {l2_bcm:.4f}")
 
-        mixed_weights = None
-        if hasattr(mixed_imputation, '_weights') and mixed_imputation._weights:
-            mixed_weights = dict(mixed_imputation._weights)
-        export_bundle(
-            bundle_root=os.path.join(output_dir, 'gofluttercat_bundle'),
-            model=bcm_model,
-            item_keys=item_keys,
-            scale_name=args.dataset,
-            stacking_yaml_path=stacking_path,
-            subset_scores=subset_scores,
-            indicators=indicators_mat,
-            gold_scores=golds,
-            mixed_weights=mixed_weights,
-            manifest_fields={
-                'dataset': args.dataset,
-                'pipeline': 'fit_marginal_irt.py',
-                'inference': 'marginal MCMC (NUTS, standardize_marginal applied)',
-                'standardized': True,
-                'variant': 'mixed',
-                'subset_sizes': list(args.bcm_subset_sizes),
-                'n_subsets_per_size': args.bcm_n_subsets,
-            },
-        )
+            # Per-J isotonic BCMSet — what gofluttercat's Go-side reader expects.
+            js = indicators_mat.sum(axis=1).astype(int)
+            cells = {}
+            for j in np.unique(js):
+                if j < 1:
+                    continue
+                mask = js == j
+                if mask.sum() < 2:
+                    continue
+                cells[int(j)] = (subset_scores[mask], golds[mask])
+            bcm_set = fit_bcm_set(cells, scale=args.dataset)
+            bcm_set_path = os.path.join(bundle_dir, f'bcm_{args.dataset}.json')
+            bcm_set.save(bcm_set_path)
+            print(f"  BCMSet (per-J isotonic) -> {bcm_set_path}")
 
     print(f"\n{'='*60}")
     print(f"Pipeline complete: {args.dataset.upper()}")

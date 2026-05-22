@@ -220,6 +220,7 @@ def run(
     from bayesianquilts.irt.grm import GRModel
     from bayesianquilts.imputation.pairwise_stacking import PairwiseOrdinalStackingModel
     from bayesianquilts.imputation.mixed import IrtMixedImputationModel
+    from bayesianquilts.io.converged import export_multi_scale_artifact
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -262,6 +263,7 @@ def run(
 
     # ---- Per-scale fitting ----
     all_stats = []
+    mixed_models_by_scale: dict[str, object] = {}
 
     for dim, scale_name in enumerate(scale_names):
         scale_items = scales_dict[scale_name]
@@ -278,6 +280,7 @@ def run(
         mdl_base = GRModel(
             item_keys=scale_items, num_people=n_people, dim=1,
             response_cardinality=response_cardinality, dtype=jnp.float32,
+            share_discriminations=True,
         )
         mdl_base.fit(
             factory, batch_size=batch_size, dataset_size=n_people,
@@ -328,6 +331,7 @@ def run(
             item_keys=scale_items, num_people=n_people, dim=1,
             response_cardinality=response_cardinality, dtype=jnp.float32,
             imputation_model=pairwise_model,
+            share_discriminations=True,
         )
         mdl_pw._adaptive_thresholds = thresholds
         ignored_pw = [k for k, t in thresholds.items() if t >= 1.0]
@@ -349,6 +353,7 @@ def run(
             item_keys=scale_items, num_people=n_people, dim=1,
             response_cardinality=response_cardinality, dtype=jnp.float32,
             imputation_model=mixed_imp,
+            share_discriminations=True,
         )
         mdl_mix._adaptive_thresholds = thresholds
         ignored_mix = [k for k in scale_items
@@ -363,6 +368,7 @@ def run(
         )
         mdl_mix.save_to_disk(str(scale_out / 'grm_mixed'))
         calibrate_manually(mdl_mix, n_samples=sample_size, seed=102)
+        mixed_models_by_scale[scale_name] = mdl_mix
         gc.collect()
 
         # Standardize abilities
@@ -419,6 +425,19 @@ def run(
     print(combined.to_string(index=False, float_format='%.4f'))
     print(f"{'='*90}")
     combined.to_csv(out / 'comparison_stats.csv', index=False)
+
+    # ---- Converged artifact (libfab + gofluttercat consumable) ----
+    print("\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+    export_multi_scale_artifact(
+        irt_models=mixed_models_by_scale,
+        imputation_model=pairwise_model,
+        out_dir=out / 'converged',
+        fit_method='weighted_factorized_advi',
+        source_script=os.path.basename(__file__),
+        extra_manifest={'reference_group': reference_group},
+    )
+    print(f"  -> {out / 'converged'}")
+
     print(f"\nAll artifacts saved to {out}/")
 
 
