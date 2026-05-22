@@ -1,0 +1,18 @@
+{
+  "dataset": "promis_substance_use",
+  "method": "imputed_scoring_time",
+  "rmse": 0.8506659160830417,
+  "rmse_se": 0.0026449239895851477,
+  "elpd_total": -85435.30200607741,
+  "elpd_per_n": -47.64935973568177,
+  "elpd_se_per_n": 0.15676722327945222,
+  "elpd_per_resp": -0.7619579937398767,
+  "elpd_se_per_resp": 0.0025068550678705908,
+  "n_obs": 112126,
+  "num_people": 1793,
+  "yao_weights_mean": {
+    "pairwise": 0.2012819553819894,
+    "irt": 0.7987180446180105,
+    "shared_disc": 0.0
+  }
+}

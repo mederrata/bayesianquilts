@@ -1,0 +1,18 @@
+{
+  "dataset": "promis_w1__depression",
+  "method": "imputed_scoring_time_2way",
+  "rmse": 0.6274076242414128,
+  "rmse_se": 0.0017274307844596544,
+  "elpd_total": -108698.04075414824,
+  "elpd_per_n": -7.290766701599587,
+  "elpd_se_per_n": 0.01838740620039872,
+  "elpd_per_resp": -0.7556871576345122,
+  "elpd_se_per_resp": 0.0019058526073536192,
+  "n_obs": 143840,
+  "num_people": 14909,
+  "yao_weights_mean": {
+    "pairwise": 0.10081102650319705,
+    "irt": 0.8991889734968029,
+    "shared_disc": 0.0
+  }
+}

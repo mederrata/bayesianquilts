@@ -1,0 +1,18 @@
+{
+  "dataset": "npi",
+  "method": "imputed_scoring_time",
+  "rmse": 0.4116859344293183,
+  "rmse_se": 0.0003520337328048171,
+  "elpd_total": -226193.30130022447,
+  "elpd_per_n": -20.118589460128476,
+  "elpd_se_per_n": 0.028602101986913663,
+  "elpd_per_resp": -0.50456013923824,
+  "elpd_se_per_resp": 0.0007173206943570354,
+  "n_obs": 448298,
+  "num_people": 11243,
+  "yao_weights_mean": {
+    "pairwise": 0.054585672312323676,
+    "irt": 0.7899411966117539,
+    "shared_disc": 0.15547313107592248
+  }
+}

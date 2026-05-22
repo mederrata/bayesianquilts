@@ -25,6 +25,7 @@ The bayesianquilts IRT framework supports the following inference modes:
 | Marginal MCMC + IS | integrated out | IPW | pairwise IS-reweight | `fit_is_irt.py` |
 | Marginal MCMC + IS | integrated out | IPW | mixed IS-reweight | `fit_is_irt.py` |
 | Marginal MCMC + IS (factorized) | integrated out per-scale | IPW | pairwise/mixed IS-reweight | `fit_is_factorized_irt.py` |
+| Marginal ADVI + post-hoc BCM | integrated out | none | mixed (pairwise + IRT blend) | `fit_bcm_with_imputation.py` |
 
 ### Inference modes
 
@@ -36,6 +37,19 @@ The bayesianquilts IRT framework supports the following inference modes:
 ### After fitting item parameters
 
 All marginal inference modes support **EAP ability recovery** via `model.compute_eap_abilities(data)`, which computes posterior mean abilities by numerical integration given fixed item parameters.
+
+### Post-hoc bias correction (BCM)
+
+- **Bias-Correction Map (BCM)**: A scoring-time post-hoc correction that
+  maps a naive (or imputed) subset-IRT score to the score the same
+  respondent would have received from the full item bank, given which
+  items happened to be administered. Implemented as `BCMConditional` in
+  `libfabulouscatpy.biascorrection`. See `fit_bcm_with_imputation.py` for
+  an end-to-end pipeline that fits the pairwise stacking imputation
+  model, the baseline GRM, the `IrtMixedImputationModel`, and the BCM
+  using imputation-blended scoring for both the subset and gold scores.
+  This regime is required when no respondent has a complete response
+  vector (so a non-imputed "gold" cannot be defined).
 
 ### Weights and imputation
 
@@ -54,6 +68,7 @@ All marginal inference modes support **EAP ability recovery** via `model.compute
 | `fit_is_irt.py` | ADVI → MCMC baseline → IS reweight for pairwise/mixed |
 | `fit_is_factorized_irt.py` | Per-scale ADVI → MCMC → IS reweight pipeline |
 | `example_ipw_groups.py` | Creating IPW group weights from stratified data |
+| `fit_bcm_with_imputation.py` | End-to-end: pairwise imputation + baseline GRM (ADVI) + `IrtMixedImputationModel` + `BCMConditional` trained with imputation-blended subset/gold scoring (requires `libfabulouscatpy`) |
 
 ## Default dataset
 

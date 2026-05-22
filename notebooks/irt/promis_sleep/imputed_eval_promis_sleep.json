@@ -1,0 +1,18 @@
+{
+  "dataset": "promis_sleep",
+  "method": "imputed_scoring_time",
+  "rmse": 0.8755568455161744,
+  "rmse_se": 0.0015745232145418853,
+  "elpd_total": -262542.20662014175,
+  "elpd_per_n": -116.5817969005958,
+  "elpd_se_per_n": 0.18300963299392378,
+  "elpd_per_resp": -0.9703515863904354,
+  "elpd_se_per_resp": 0.0015232539935184151,
+  "n_obs": 270564,
+  "num_people": 2252,
+  "yao_weights_mean": {
+    "pairwise": 0.2736120840698343,
+    "irt": 0.7263879159301659,
+    "shared_disc": 0.0
+  }
+}
