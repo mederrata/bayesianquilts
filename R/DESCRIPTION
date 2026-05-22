@@ -35,3 +35,5 @@ Collate:
     'ais.R'
     'brms_utils.R'
     'decomposition.R'
+    'brms_quilt.R'
+    'ensemble.R'
