@@ -177,10 +177,22 @@ WPI.zip
 WPI/
 TMA.zip
 TMA/
+SCS.zip
+SCS/
+GCBS.zip
+GCBS/
 duckworth-grit-scale-data/
 *gitignore.swp
 duckworth-grit-scale-data.zip
 notebooks/irt/synthetic/results/
+
+# Stan model artifacts (compiled binaries + duplicated source + generated data)
+/ovarian_model
+/ovarian_model.stan
+python/out/
+notebooks/ovarian/ovarian_model
+notebooks/ovarian/ovarian_relu_model
+notebooks/ovarian/ovarian_relu_data.json
 
 # Notebooks (large output cells)
 *.ipynb
