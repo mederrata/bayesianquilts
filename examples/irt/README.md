@@ -104,6 +104,7 @@ and replace only the `scales: {<scale>: {...}}` payload.
 | `fit_is_factorized_irt.py` | Per-scale ADVI → MCMC → IS reweight pipeline |
 | `example_ipw_groups.py` | Creating IPW group weights from stratified data |
 | `fit_bcm_with_imputation.py` | End-to-end: pairwise imputation + baseline GRM (ADVI) + `IrtMixedImputationModel` + `BCMConditional` trained with imputation-blended subset/gold scoring (requires `libfabulouscatpy`) |
+| `fit_imputed_irt.py` | **Manuscript imputed-IRT pipeline**: pairwise stacking + joint-ADVI baseline + shared-disc GRM (marginal MCMC) + `ThreeWayImputationModel` + marginal MCMC on the three-way-imputed posterior. Optional IPW (`--use-ipw`), optional 2-way fallback (`--skip-shared-disc`), optional BCM, converged bundle. Mirrors `notebooks/irt/run_marginal_mcmc.py` `imputed` variant. |
 
 ## Default dataset
 
