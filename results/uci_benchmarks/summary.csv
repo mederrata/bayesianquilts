@@ -1,0 +1,12 @@
+,,test_accuracy,test_accuracy,test_auc,test_auc
+,,mean,std,mean,std
+dataset,method,,,,
+bank,LR,0.889,0.0016,0.8366,0.0055
+bank,ebm,0.8964,0.0018,0.8791,0.0047
+bank,gen_preserving,0.8862,0.0031,0.8443,0.014
+bank,gradient_boosting,0.8968,0.0022,0.8785,0.0046
+bank,lightgbm,0.8969,0.0021,0.8785,0.0048
+bank,mlp,0.8921,0.0021,0.8652,0.007
+bank,random_forest,0.8961,0.0022,0.876,0.0047
+bank,sparse,0.8852,0.0024,0.8417,0.0132
+bank,xgboost,0.8972,0.0023,0.8788,0.0048

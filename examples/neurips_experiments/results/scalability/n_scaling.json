@@ -1,0 +1,26 @@
+[
+  {
+    "experiment": "n_obs_scaling",
+    "n_obs": 500,
+    "d_factors": 3,
+    "L_levels": 5,
+    "lookup_time_mean": 0.00017724052304401994,
+    "lookup_time_std": 2.534751547500491e-05,
+    "gradient_time_mean": 0.02770742346183397,
+    "gradient_time_std": 0.001207288500154391,
+    "n_parameters": 648,
+    "memory_mb": 0.002471923828125
+  },
+  {
+    "experiment": "n_obs_scaling",
+    "n_obs": 1000,
+    "d_factors": 3,
+    "L_levels": 5,
+    "lookup_time_mean": 0.00027691051946021616,
+    "lookup_time_std": 7.336147245950997e-05,
+    "gradient_time_mean": 0.10230052747647278,
+    "gradient_time_std": 0.0006198645278345793,
+    "n_parameters": 648,
+    "memory_mb": 0.002471923828125
+  }
+]

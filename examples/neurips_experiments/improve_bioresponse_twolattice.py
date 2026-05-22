@@ -1,0 +1,204 @@
+"""Bioresponse: two-lattice approach with intercept vs beta decomposition."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
+
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.datasets import fetch_openml
+import jax
+import jax.numpy as jnp
+import optax
+
+from bayesianquilts.jax.parameter import Decomposed, Interactions, Dimension
+
+
+def run_bioresponse():
+    """Bioresponse with two-lattice approach."""
+    print("\n" + "="*60)
+    print("BIORESPONSE - Two-Lattice Approach")
+    print("="*60)
+
+    data = fetch_openml(data_id=4134, as_frame=True, parser="auto")
+    df = data.frame
+
+    X = df.drop(columns=["target"]).values.astype(np.float32)
+    y = df["target"].astype(int).values
+
+    N, p_orig = X.shape
+    print(f"  N = {N}, p = {p_orig}")
+
+    class_balance = y.mean()
+    print(f"  Class balance: {class_balance:.3f}")
+
+    # Select top features via LR on full data (fixed selection)
+    scaler_full = StandardScaler()
+    X_full_s = scaler_full.fit_transform(X)
+    lr_full = LogisticRegression(max_iter=2000, C=0.1, random_state=42)
+    lr_full.fit(X_full_s, y)
+    importance = np.abs(lr_full.coef_[0])
+
+    # Use 3 top features for intercept lattice, 2 for beta lattice
+    n_int_features = 3
+    n_beta_features = 2
+    n_bins = 6
+    top_features = np.argsort(importance)[::-1]
+    int_features = top_features[:n_int_features]
+    beta_features = top_features[:n_beta_features]
+    print(f"  Intercept lattice features: {int_features.tolist()}")
+    print(f"  Beta lattice features: {beta_features.tolist()}")
+
+    kfold = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    aucs = []
+
+    for fold_idx, (train_idx, test_idx) in enumerate(kfold.split(X, y)):
+        print(f"\n  Fold {fold_idx + 1}/5:")
+
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        N_train = len(y_train)
+
+        scaler = StandardScaler()
+        X_train_s = scaler.fit_transform(X_train)
+        X_test_s = scaler.transform(X_test)
+
+        # Build bins for intercept lattice features
+        train_int_indices = {}
+        test_int_indices = {}
+        dims_int = []
+        for feat_idx in int_features:
+            train_vals = X_train_s[:, feat_idx]
+            test_vals = X_test_s[:, feat_idx]
+            edges = np.percentile(train_vals, np.linspace(0, 100, n_bins + 1))
+            train_bins = np.clip(np.digitize(train_vals, edges[1:-1]), 0, n_bins - 1)
+            test_bins = np.clip(np.digitize(test_vals, edges[1:-1]), 0, n_bins - 1)
+            dim_name = f"F{feat_idx}"
+            train_int_indices[dim_name] = train_bins
+            test_int_indices[dim_name] = test_bins
+            dims_int.append(Dimension(dim_name, n_bins))
+
+        # Build bins for beta lattice features (simpler)
+        train_beta_indices = {}
+        test_beta_indices = {}
+        dims_beta = []
+        n_bins_beta = 4  # Fewer bins for beta
+        for feat_idx in beta_features:
+            train_vals = X_train_s[:, feat_idx]
+            test_vals = X_test_s[:, feat_idx]
+            edges = np.percentile(train_vals, np.linspace(0, 100, n_bins_beta + 1))
+            train_bins = np.clip(np.digitize(train_vals, edges[1:-1]), 0, n_bins_beta - 1)
+            test_bins = np.clip(np.digitize(test_vals, edges[1:-1]), 0, n_bins_beta - 1)
+            dim_name = f"F{feat_idx}"
+            train_beta_indices[dim_name] = train_bins
+            test_beta_indices[dim_name] = test_bins
+            dims_beta.append(Dimension(dim_name, n_bins_beta))
+
+        interactions_int = Interactions(dimensions=dims_int)
+        interactions_beta = Interactions(dimensions=dims_beta)
+
+        decomp_intercept = Decomposed(interactions=interactions_int, param_shape=[1], name="intercept")
+        decomp_beta = Decomposed(interactions=interactions_beta, param_shape=[p_orig], name="beta")
+
+        prior_scales_int = decomp_intercept.generalization_preserving_scales(
+            noise_scale=1.0, total_n=N_train, c=0.5, per_component=True,
+        )
+        prior_scales_beta = decomp_beta.generalization_preserving_scales(
+            noise_scale=1.0, total_n=N_train, c=0.5, per_component=True,
+        )
+
+        dim_names_int = [d.name for d in decomp_intercept._interactions._dimensions]
+        dim_names_beta = [d.name for d in decomp_beta._interactions._dimensions]
+        train_int_idx = jnp.stack([jnp.array(train_int_indices[name]) for name in dim_names_int], axis=-1)
+        test_int_idx = jnp.stack([jnp.array(test_int_indices[name]) for name in dim_names_int], axis=-1)
+        train_beta_idx = jnp.stack([jnp.array(train_beta_indices[name]) for name in dim_names_beta], axis=-1)
+        test_beta_idx = jnp.stack([jnp.array(test_beta_indices[name]) for name in dim_names_beta], axis=-1)
+
+        X_train_j = jnp.array(X_train_s)
+        X_test_j = jnp.array(X_test_s)
+        y_train_j = jnp.array(y_train)
+
+        # Intercept: order 2, Beta: order 1
+        max_order_int = 2
+        max_order_beta = 1
+
+        active_int = [
+            name for name in decomp_intercept._tensor_parts.keys()
+            if decomp_intercept.component_order(name) <= max_order_int
+        ]
+        active_beta = [
+            name for name in decomp_beta._tensor_parts.keys()
+            if decomp_beta.component_order(name) <= max_order_beta
+        ]
+        print(f"    Intercept: {len(dims_int)} dims × {n_bins} bins, order {max_order_int}, {len(active_int)} components")
+        print(f"    Beta: {len(dims_beta)} dims × {n_bins_beta} bins, order {max_order_beta}, {len(active_beta)} components")
+
+        params = {}
+        for name in active_int:
+            params[f"int_{name}"] = jnp.zeros(decomp_intercept._tensor_part_shapes[name])
+        for name in active_beta:
+            params[f"beta_{name}"] = jnp.zeros(decomp_beta._tensor_part_shapes[name])
+
+        def loss_fn(params):
+            int_params = {k[4:]: v for k, v in params.items() if k.startswith("int_")}
+            beta_params = {k[5:]: v for k, v in params.items() if k.startswith("beta_")}
+
+            cell_intercept = decomp_intercept.lookup_flat(train_int_idx, int_params)[:, 0]
+            cell_beta = decomp_beta.lookup_flat(train_beta_idx, beta_params)
+
+            logits = jnp.sum(X_train_j * cell_beta, axis=-1) + cell_intercept
+            bce = jnp.mean(jnp.logaddexp(0, logits) - y_train_j * logits)
+
+            l2_int = 0.0
+            for name, param in int_params.items():
+                scale = prior_scales_int.get(name, 1.0)
+                l2_int += 0.5 * jnp.sum(param ** 2) / ((scale * 20) ** 2)
+
+            l2_beta = 0.0
+            for name, param in beta_params.items():
+                scale = prior_scales_beta.get(name, 1.0)
+                l2_beta += 0.5 * jnp.sum(param ** 2) / ((scale * 20) ** 2)
+
+            return bce + (l2_int + l2_beta) / N_train
+
+        opt = optax.adam(0.01)
+        opt_state = opt.init(params)
+
+        @jax.jit
+        def step(params, opt_state):
+            loss, grads = jax.value_and_grad(loss_fn)(params)
+            updates, opt_state = opt.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            return params, opt_state, loss
+
+        for i in range(5000):
+            params, opt_state, loss = step(params, opt_state)
+            if i % 1000 == 0:
+                print(f"    Step {i}: loss = {loss:.4f}")
+
+        # Evaluate
+        int_params = {k[4:]: v for k, v in params.items() if k.startswith("int_")}
+        beta_params = {k[5:]: v for k, v in params.items() if k.startswith("beta_")}
+
+        cell_intercept = decomp_intercept.lookup_flat(test_int_idx, int_params)[:, 0]
+        cell_beta = decomp_beta.lookup_flat(test_beta_idx, beta_params)
+        logits = jnp.sum(X_test_j * cell_beta, axis=-1) + cell_intercept
+        probs = 1 / (1 + jnp.exp(-logits))
+
+        auc = roc_auc_score(y_test, np.array(probs))
+        aucs.append(auc)
+        print(f"    AUC: {auc:.4f}")
+
+    mean_auc = np.mean(aucs)
+    std_auc = np.std(aucs)
+    print(f"\n  OURS (two-lattice): {mean_auc:.4f} +/- {std_auc:.4f}")
+    print(f"  Table: 0.844, EBM: 0.866, LGBM: 0.872")
+    return mean_auc, std_auc
+
+
+if __name__ == "__main__":
+    run_bioresponse()
