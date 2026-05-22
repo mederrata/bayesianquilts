@@ -206,20 +206,21 @@ def main():
     def mixed_data_factory():
         yield base_data
 
+    # Standardise abilities to N(0,1) BEFORE wiring the baseline into the
+    # mixed imputation so the IRT-component PMFs are computed on the same
+    # N(0,1) scale that downstream subset scoring will use; otherwise the
+    # imputation references an unscaled theta while GRM scoring uses the
+    # scaled theta, inflating residual bias on the BCM training triples.
+    std_stats = model.standardize_abilities()
+    print(f"  standardized: mu={float(jnp.mean(std_stats['mu'])):.4f}, "
+          f"sigma={float(jnp.mean(std_stats['sigma'])):.4f}")
+
     mixed_imputation = IrtMixedImputationModel(
         irt_model=model, mice_model=pairwise_model,
         data_factory=mixed_data_factory,
     )
     model.imputation_model = mixed_imputation
-    print("  IrtMixedImputationModel attached to baseline GRM")
-
-    # Standardise abilities to N(0,1) before scoring. The GRM is invariant
-    # under theta -> (theta - mu)/sigma when item params absorb the shift,
-    # so this just rescales discriminations/cutpoints in place; downstream
-    # scores are immediately on the standard scale gofluttercat expects.
-    std_stats = model.standardize_abilities()
-    print(f"  standardized: mu={float(jnp.mean(std_stats['mu'])):.4f}, "
-          f"sigma={float(jnp.mean(std_stats['sigma'])):.4f}")
+    print("  IrtMixedImputationModel attached to standardized baseline GRM")
 
     # Extract item parameters from the joint-ADVI surrogate; scoring uses
     # these explicitly so we sidestep the marginal-ADVI rebuild (which can

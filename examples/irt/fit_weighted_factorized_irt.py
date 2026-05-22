@@ -288,6 +288,13 @@ def run(
         )
         mdl_base.save_to_disk(str(scale_out / 'grm_baseline'))
         calibrate_manually(mdl_base, n_samples=sample_size, seed=101)
+        # Standardize baseline BEFORE building the mixed imputation so its
+        # IRT-component PMFs are on the same N(0,1) scale that downstream
+        # scoring (and the final per-model standardize loop) will use.
+        base_std = mdl_base.standardize_abilities(reference_idx=ref_idx)
+        print(f"  Standardized baseline: "
+              f"mu={float(jnp.mean(base_std['mu'])):.4f}, "
+              f"sigma={float(jnp.mean(base_std['sigma'])):.4f}")
         gc.collect()
 
         # Stage 3: Mixed imputation model

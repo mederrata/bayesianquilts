@@ -459,6 +459,17 @@ def main():
 
     calibrate_model(baseline_model)
 
+    # Standardize baseline_model BEFORE wiring it into the mixed imputation
+    # so the IRT-component PMFs are computed on the same N(0,1) ability
+    # scale that the downstream MCMC variants will use after
+    # standardize_marginal. Without this, the imputation PMFs reference an
+    # unscaled theta while the GRM scoring uses the scaled theta, which
+    # would inflate residual bias on the BCM training triples.
+    base_std = baseline_model.standardize_abilities()
+    print(f"  Standardized baseline: "
+          f"mu={float(jnp.mean(base_std['mu'])):.4f}, "
+          f"sigma={float(jnp.mean(base_std['sigma'])):.4f}")
+
     # Build mixed imputation model
     def make_data_factory():
         def factory():
