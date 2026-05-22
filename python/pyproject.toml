@@ -1,0 +1,123 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bayesianquilts"
+version = "0.9.0"
+description = "Adaptive Importance Sampling and quilted-model scaling for Bayesian cross-validation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Joshua Chang", email = "josh@mederrata.org" },
+]
+maintainers = [
+    { name = "Joshua Chang", email = "josh@mederrata.org" },
+]
+keywords = [
+    "bayesian", "cross-validation", "loo", "psis",
+    "importance-sampling", "irt", "graded-response-model",
+    "interaction-decomposition", "regularization",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+# Core dependencies kept narrow. Heavy optional backends (JAX, brms-side
+# tooling, plotting, notebooks) live under `[project.optional-dependencies]`.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "h5py>=3.10",
+    "pyyaml>=6.0",
+    "safetensors>=0.4",
+    "dill>=0.3",
+    "tqdm>=4.65",
+    "natsort>=8.0",
+    "arviz>=0.16",
+    "xarray>=2024.0",
+]
+
+[project.optional-dependencies]
+# JAX backend (TensorFlow Probability nightly is the supported TFP build
+# for the JAX substrate).
+jax = [
+    "jax>=0.4.30",
+    "flax>=0.10",
+    "optax>=0.2",
+    "tfp-nightly[jax]>=0.25",
+    "orbax-checkpoint>=0.6",
+    "blackjax>=1.2",
+    "grain>=0.2",
+]
+# Plotting and notebook usage.
+plot = [
+    "matplotlib>=3.7",
+]
+# Stan-side tools that some examples use.
+stan = [
+    "cmdstanpy>=1.2",
+]
+# Polars-backed datasets.
+polars = [
+    "polars>=1.0",
+]
+# Convenience meta-extra pulling everything in.
+all = [
+    "bayesianquilts[jax,plot,stan,polars]",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "twine>=5.0",
+    "build>=1.2",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/mederrata/bayesianquilts"
+Repository = "https://github.com/mederrata/bayesianquilts"
+Issues = "https://github.com/mederrata/bayesianquilts/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bayesianquilts*"]
+exclude = [
+    "tests*",
+    "*.tests",
+    "*.tests.*",
+    "tests.*",
+    "duckworth-grit-scale-data*",
+    "results*",
+    "out*",
+    "__pycache__",
+]
+
+[tool.setuptools.package-data]
+bayesianquilts = [
+    "data/bouldering_men.csv.gz",
+    "data/bouldering_women.csv.gz",
+    "py.typed",
+]
+
+[tool.setuptools.exclude-package-data]
+"*" = [
+    "*.pyc",
+    "__pycache__",
+    "*.so",
+]
