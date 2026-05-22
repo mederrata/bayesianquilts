@@ -50,6 +50,38 @@ All marginal inference modes support **EAP ability recovery** via `model.compute
   using imputation-blended scoring for both the subset and gold scores.
   This regime is required when no respondent has a complete response
   vector (so a non-imputed "gold" cannot be defined).
+  `fit_marginal_irt.py` adds the same BCM step (Step 6) on top of its
+  marginal-MCMC `mixed` variant; skip with `--skip-bcm`.
+
+### gofluttercat-compatible bundle
+
+Both `fit_bcm_with_imputation.py` and `fit_marginal_irt.py` write a
+`gofluttercat_bundle/` subdirectory after fitting that is drop-in
+compatible with the Go runtime at
+`gofluttercat/backend-golang/<scale>/`:
+
+```
+<output_dir>/gofluttercat_bundle/
+  items/<item_key>.json         # per-item GRM params (gofluttercat factorized shape)
+  imputation/config.yaml.gz     # v2.0 pairwise-stacking artifact
+  bcm_<scale>.json              # per-J isotonic BCMSet (Go-readable)
+  manifest.yaml                 # provenance: timestamps, git SHA, settings
+```
+
+The IRT model is **standardised to N(0,1) abilities** before extraction
+(`model.standardize_abilities()` for joint-ADVI;
+`model.standardize_marginal(data)` for marginal-MCMC), so the
+discriminations and cumulative cutpoints written to the per-item JSON
+files are on the scale gofluttercat's prior assumes. The
+`BCMConditional` joblib is also written alongside for Python-side use; the
+isotonic `BCMSet` JSON in the bundle is the gofluttercat-compatible
+companion fit on the same `(subset, gold)` triples.
+
+The bundle assumes default integer response labels and uses the item key
+as placeholder question text. For datasets with curated metadata, copy
+the corresponding `<item>.json` files from
+`gofluttercat/backend-golang/<scale>/factorized/` and replace only the
+`scales: {<scale>: {...}}` payload.
 
 ### Weights and imputation
 

@@ -75,73 +75,14 @@ def calibrate_model(model, seed=101, n_samples=32):
     }
 
 
-def attach_imputation_pmfs(model, data):
-    """Compute imputation PMFs for the (possibly masked) data and attach
-    them under the keys ``_imputation_pmfs`` and ``_imputation_weights`` so
-    that ``compute_eap_abilities`` integrates over them for missing items."""
-    out = dict(data)
-    pmfs, weights = model._compute_batch_pmfs(out)
-    if pmfs is not None:
-        out['_imputation_pmfs'] = pmfs
-        if weights is not None:
-            out['_imputation_weights'] = weights
-    return out
-
-
-def score_subset(model, base_data, item_keys, subset_mask, item_params):
-    """Return EAP scores for every respondent given an item-subset mask.
-
-    Non-subset items are set to -1 (missing) so the imputation model attached
-    to ``model`` fills them in via Rao-Blackwellized PMFs.
-    """
-    masked = {}
-    for k in item_keys:
-        arr = np.asarray(base_data[k], dtype=np.float32).copy()
-        if k not in subset_mask:
-            arr[:] = -1.0
-        masked[k] = arr
-    masked['person'] = base_data['person']
-    masked = attach_imputation_pmfs(model, masked)
-    eap = model.compute_eap_abilities(masked, item_params=item_params)
-    return np.asarray(eap['eap'])
-
-
-def extract_item_params(model):
-    """Pull mean item parameters from the joint-ADVI surrogate.
-
-    ``_item_var_list()`` excludes ``abilities`` and ``mu`` (the latter is a
-    location shift that ``compute_eap_abilities`` absorbs via the data, not a
-    feature of the GRM kernel itself).
-    """
-    keys = model._item_var_list()
-    return {k: model.calibrated_expectations[k] for k in keys
-            if k in model.calibrated_expectations}
-
-
-def stratify_respondents(base_data, item_keys, max_respondents, rng):
-    """Pick a sum-score-stratified sample of respondents for tutorial speed."""
-    n = int(base_data['person'].shape[0])
-    if n <= max_respondents:
-        return np.arange(n)
-    sum_score = np.zeros(n, dtype=np.float64)
-    for k in item_keys:
-        arr = np.asarray(base_data[k], dtype=np.float64)
-        sum_score += np.where(arr >= 0, arr, 0.0)
-    sum_score += rng.normal(0, 1e-9, sum_score.shape)
-    sort_order = np.argsort(sum_score)
-    pick = np.linspace(0, n - 1, max_respondents).astype(int)
-    return sort_order[pick]
-
-
-def subsample_data(base_data, item_keys, indices):
-    """Return a new data dict with only the selected respondents."""
-    sub = {}
-    for k in item_keys:
-        sub[k] = np.asarray(base_data[k])[indices]
-    sub['person'] = np.arange(len(indices), dtype=np.float32)
-    if 'sample_weights' in base_data:
-        sub['sample_weights'] = np.asarray(base_data['sample_weights'])[indices]
-    return sub
+from _bcm_triples import (
+    attach_imputation_pmfs,  # noqa: F401 (kept exported for reuse)
+    build_bcm_triples,
+    extract_item_params,
+    score_subset,
+    stratify_respondents,
+    subsample_data,
+)
 
 
 def main():
@@ -272,11 +213,19 @@ def main():
     model.imputation_model = mixed_imputation
     print("  IrtMixedImputationModel attached to baseline GRM")
 
+    # Standardise abilities to N(0,1) before scoring. The GRM is invariant
+    # under theta -> (theta - mu)/sigma when item params absorb the shift,
+    # so this just rescales discriminations/cutpoints in place; downstream
+    # scores are immediately on the standard scale gofluttercat expects.
+    std_stats = model.standardize_abilities()
+    print(f"  standardized: mu={float(jnp.mean(std_stats['mu'])):.4f}, "
+          f"sigma={float(jnp.mean(std_stats['sigma'])):.4f}")
+
     # Extract item parameters from the joint-ADVI surrogate; scoring uses
     # these explicitly so we sidestep the marginal-ADVI rebuild (which can
     # trip the GRM ``mu`` location-shift in the prior chain).
     item_params = extract_item_params(model)
-    print(f"  using joint-ADVI item params: {list(item_params.keys())}")
+    print(f"  using standardized item params: {list(item_params.keys())}")
 
     # ------------------------------------------------------------------
     # Step 4: Build BCM training triples on a stratified respondent
@@ -285,42 +234,16 @@ def main():
     #         likelihood. Gold = same model, no masking.
     # ------------------------------------------------------------------
     print(f"\n{'─'*60}\nStep 4: BCM training triples\n{'─'*60}")
-    chosen_idx = stratify_respondents(
-        base_data, item_keys, args.max_respondents, rng)
-    sub_data = subsample_data(base_data, item_keys, chosen_idx)
-    n_sub = len(chosen_idx)
-    print(f"  stratified respondents: {n_sub}")
-
-    print("  computing gold scores (full bank + imputation)...")
-    gold = score_subset(model, sub_data, item_keys, set(item_keys),
-                        item_params)
-    print(f"    gold range: [{gold.min():.3f}, {gold.max():.3f}]")
-
-    print("  computing subset scores per (size, draw)...")
-    I = len(item_keys)
-    key_to_idx = {k: i for i, k in enumerate(item_keys)}
-    subset_scores, indicators, golds = [], [], []
-    from math import comb
-    for size in args.subset_sizes:
-        n_draws = min(args.n_subsets, comb(I, size))
-        print(f"    J={size}: {n_draws} draws")
-        for d in range(n_draws):
-            subset = rng.choice(item_keys, size=size, replace=False)
-            subset_set = set(subset)
-            scores = score_subset(model, sub_data, item_keys, subset_set,
-                                  item_params)
-            indicator = np.zeros(I, dtype=np.float32)
-            for k in subset:
-                indicator[key_to_idx[k]] = 1.0
-            for pi in range(n_sub):
-                subset_scores.append(scores[pi])
-                indicators.append(indicator)
-                golds.append(gold[pi])
-        gc.collect()
-
-    subset_scores = np.asarray(subset_scores, dtype=np.float64)
-    indicators_mat = np.stack(indicators, axis=0).astype(np.float64)
-    golds = np.asarray(golds, dtype=np.float64)
+    subset_scores, indicators_mat, golds, _ = build_bcm_triples(
+        model=model,
+        base_data=base_data,
+        item_keys=item_keys,
+        subset_sizes=args.subset_sizes,
+        n_subsets_per_size=args.n_subsets,
+        max_respondents=args.max_respondents,
+        rng=rng,
+        item_params=item_params,
+    )
     print(f"  n_triples = {subset_scores.size}")
 
     # ------------------------------------------------------------------
@@ -366,6 +289,34 @@ def main():
     for s, c, g in zip(subset_scores[demo_idx], demo_corrected,
                        golds[demo_idx]):
         print(f"  {s:>9.3f} {c:>9.3f} {g:>9.3f}")
+
+    # ------------------------------------------------------------------
+    # Step 7: gofluttercat bundle (per-item JSON + imputation v2.0 + BCMSet)
+    # ------------------------------------------------------------------
+    print(f"\n{'─'*60}\nStep 7: gofluttercat bundle\n{'─'*60}")
+    from _gofluttercat_export import export_bundle
+    mixed_weights = None
+    if hasattr(mixed_imputation, '_weights') and mixed_imputation._weights:
+        mixed_weights = dict(mixed_imputation._weights)
+    export_bundle(
+        bundle_root=output_dir / 'gofluttercat_bundle',
+        model=model,
+        item_keys=item_keys,
+        scale_name=args.dataset,
+        stacking_yaml_path=stacking_path,
+        subset_scores=subset_scores,
+        indicators=indicators_mat,
+        gold_scores=golds,
+        mixed_weights=mixed_weights,
+        manifest_fields={
+            'dataset': args.dataset,
+            'pipeline': 'fit_bcm_with_imputation.py',
+            'inference': 'joint ADVI',
+            'standardized': True,
+            'subset_sizes': list(args.subset_sizes),
+            'n_subsets_per_size': args.n_subsets,
+        },
+    )
 
     print(f"\nDone. Artifacts in {output_dir}/")
 
