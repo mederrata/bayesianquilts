@@ -36,6 +36,7 @@ os.environ.setdefault('JAX_PLATFORMS', 'cpu')
 os.environ.setdefault('JAX_ENABLE_X64', '1')
 
 from pathlib import Path
+from typing import Dict
 
 import numpy as np
 import jax
@@ -128,6 +129,9 @@ def main():
     parser.add_argument('--dense-mass', action='store_true',
                         help='Use dense mass matrix during warmup')
 
+    parser.add_argument('--skip-baseline', action='store_true',
+                        help='Skip the baseline (no-imputation) MCMC '
+                             'fit; report metrics for imputed variant only')
     parser.add_argument('--skip-bcm', action='store_true')
     parser.add_argument('--bcm-subset-sizes', type=int, nargs='+',
                         default=[5, 10])
@@ -275,6 +279,34 @@ def main():
         data_factory=make_factory(),
     )
 
+    # ---- Step 4b: baseline marginal MCMC (no imputation) for comparison ----
+    baseline_npz_path = None
+    if not args.skip_baseline:
+        print(f"\n{'─'*60}\nStep 4b: baseline marginal MCMC (no imputation)\n{'─'*60}")
+        baseline_mcmc_model = GRModel.load_from_disk(str(baseline_path))
+        b_mcmc = baseline_mcmc_model.fit_marginal_mcmc(
+            base_data,
+            num_chains=args.num_chains,
+            num_warmup=args.num_warmup,
+            num_samples=args.num_samples,
+            target_accept_prob=args.target_accept,
+            step_size=args.step_size,
+            dense_mass=args.dense_mass,
+            seed=args.seed + 11,
+            verbose=True,
+        )
+        baseline_mcmc_model.mcmc_samples = b_mcmc
+        baseline_mcmc_model.standardize_marginal(base_data)
+        b_eap = baseline_mcmc_model.compute_eap_abilities(base_data)
+        b_save = {k: np.asarray(v) for k, v in b_mcmc.items()}
+        b_save['eap'] = np.asarray(b_eap['eap'])
+        b_save['psd'] = np.asarray(b_eap['psd'])
+        baseline_npz_path = output_dir / 'mcmc_baseline.npz'
+        np.savez(str(baseline_npz_path), **b_save)
+        print(f"  raw MCMC -> {baseline_npz_path}")
+        del baseline_mcmc_model, b_mcmc
+        gc.collect()
+
     # ---- Step 5: marginal MCMC on baseline with three-way PMFs ----
     print(f"\n{'─'*60}\nStep 5: marginal MCMC on imputed posterior\n{'─'*60}")
     baseline_model.imputation_model = three_way
@@ -313,6 +345,20 @@ def main():
     npz_path = output_dir / 'mcmc_imputed.npz'
     np.savez(str(npz_path), **save_dict)
     print(f"  raw MCMC -> {npz_path}")
+
+    # ---- Manuscript metrics: PSIS-LOO RMSE + ELPD per variant ----
+    print(f"\n{'─'*60}\nManuscript metrics (PSIS-LOO)\n{'─'*60}")
+    from _eval_metrics import compute_metrics_from_npz, print_metrics_table
+    metrics: Dict[str, Dict[str, float]] = {}
+    if baseline_npz_path is not None:
+        print(f"  computing baseline metrics...")
+        metrics['baseline'] = compute_metrics_from_npz(
+            baseline_npz_path, base_data, item_keys, response_cardinality,
+            num_people)
+    print(f"  computing imputed metrics...")
+    metrics['imputed'] = compute_metrics_from_npz(
+        npz_path, base_data, item_keys, response_cardinality, num_people)
+    print_metrics_table(metrics)
 
     # ---- Step 6+7: BCM (optional) + converged bundle ----
     bundle_dir = output_dir / 'converged'
