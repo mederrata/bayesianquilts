@@ -292,32 +292,58 @@ def main():
         print(f"  {s:>9.3f} {c:>9.3f} {g:>9.3f}")
 
     # ------------------------------------------------------------------
-    # Step 7: gofluttercat bundle (per-item JSON + imputation v2.0 + BCMSet)
+    # Step 7: converged artifact + per-J isotonic BCMSet
+    #
+    # Upstream's ``bayesianquilts.io.converged.export_artifact`` writes
+    # the canonical ``items/`` + ``scales.json`` + ``imputation/`` +
+    # ``manifest.yaml`` bundle that libfab and gofluttercat both read.
+    # We then fit a per-J isotonic ``BCMSet`` on the same triples and
+    # save it next to the canonical bundle so gofluttercat's Go-side
+    # ``biascorrection`` package can consume it directly.
     # ------------------------------------------------------------------
-    print(f"\n{'─'*60}\nStep 7: gofluttercat bundle\n{'─'*60}")
-    from _gofluttercat_export import export_bundle
+    print(f"\n{'─'*60}\nStep 7: converged bundle + BCMSet\n{'─'*60}")
+    from bayesianquilts.io.converged import export_artifact
+    from libfabulouscatpy.biascorrection import fit_bcm_set
+
+    bundle_dir = output_dir / 'converged'
+    # export_artifact expects an imputation model with .save() or
+    # .save_to_disk(); IrtMixedImputationModel has neither, so pass the
+    # underlying PairwiseOrdinalStackingModel (the actual MICE-style
+    # imputer). The mixed weights captured on the IRT side are written
+    # into extra_manifest so consumers can reconstruct the blend.
     mixed_weights = None
     if hasattr(mixed_imputation, '_weights') and mixed_imputation._weights:
-        mixed_weights = dict(mixed_imputation._weights)
-    export_bundle(
-        bundle_root=output_dir / 'gofluttercat_bundle',
-        model=model,
-        item_keys=item_keys,
-        scale_name=args.dataset,
-        stacking_yaml_path=stacking_path,
-        subset_scores=subset_scores,
-        indicators=indicators_mat,
-        gold_scores=golds,
-        mixed_weights=mixed_weights,
-        manifest_fields={
+        mixed_weights = {str(k): float(v) for k, v in mixed_imputation._weights.items()}
+    export_artifact(
+        irt_model=model,
+        imputation_model=pairwise_model,
+        out_dir=str(bundle_dir),
+        scale_names=[args.dataset],
+        fit_method='joint_advi',
+        source_script=os.path.basename(__file__),
+        extra_manifest={
             'dataset': args.dataset,
             'pipeline': 'fit_bcm_with_imputation.py',
-            'inference': 'joint ADVI',
             'standardized': True,
             'subset_sizes': list(args.subset_sizes),
             'n_subsets_per_size': args.n_subsets,
+            'mixed_weights': mixed_weights,
         },
     )
+
+    js = indicators_mat.sum(axis=1).astype(int)
+    cells = {}
+    for j in np.unique(js):
+        if j < 1:
+            continue
+        mask = js == j
+        if mask.sum() < 2:
+            continue
+        cells[int(j)] = (subset_scores[mask], golds[mask])
+    bcm_set = fit_bcm_set(cells, scale=args.dataset)
+    bcm_set_path = bundle_dir / f'bcm_{args.dataset}.json'
+    bcm_set.save(str(bcm_set_path))
+    print(f"  per-J isotonic BCMSet -> {bcm_set_path}")
 
     print(f"\nDone. Artifacts in {output_dir}/")
 

@@ -53,35 +53,38 @@ All marginal inference modes support **EAP ability recovery** via `model.compute
   `fit_marginal_irt.py` adds the same BCM step (Step 6) on top of its
   marginal-MCMC `mixed` variant; skip with `--skip-bcm`.
 
-### gofluttercat-compatible bundle
+### Converged artifact (libfab + gofluttercat consumable)
 
 Both `fit_bcm_with_imputation.py` and `fit_marginal_irt.py` write a
-`gofluttercat_bundle/` subdirectory after fitting that is drop-in
-compatible with the Go runtime at
-`gofluttercat/backend-golang/<scale>/`:
+`converged/` subdirectory after fitting, produced by
+`bayesianquilts.io.converged.export_artifact`. The layout is the one
+both `libfabulouscatpy.irt.converged.load_artifact` and gofluttercat's
+Go-side loaders read:
 
 ```
-<output_dir>/gofluttercat_bundle/
-  items/<item_key>.json         # per-item GRM params (gofluttercat factorized shape)
-  imputation/config.yaml.gz     # v2.0 pairwise-stacking artifact
-  bcm_<scale>.json              # per-J isotonic BCMSet (Go-readable)
-  manifest.yaml                 # provenance: timestamps, git SHA, settings
+<output_dir>/converged/
+  items/<item_key>.json       # per-item GRM params (libfab + gofluttercat factorized shape)
+  scales.json                 # per-scale metadata
+  imputation/                 # gofluttercat-consumable imputation bundle
+  manifest.yaml               # provenance: timestamps, git SHA, settings
+  bcm_<scale>.json            # per-J isotonic BCMSet (Go-readable; written by the BCM-aware examples)
 ```
 
 The IRT model is **standardised to N(0,1) abilities** before extraction
 (`model.standardize_abilities()` for joint-ADVI;
 `model.standardize_marginal(data)` for marginal-MCMC), so the
-discriminations and cumulative cutpoints written to the per-item JSON
-files are on the scale gofluttercat's prior assumes. The
-`BCMConditional` joblib is also written alongside for Python-side use; the
-isotonic `BCMSet` JSON in the bundle is the gofluttercat-compatible
-companion fit on the same `(subset, gold)` triples.
+discriminations and cumulative cutpoints in `items/` are on the scale
+gofluttercat's prior assumes. The `BCMConditional` joblib (richer
+per-item-indicator corrector for Python-side use) is saved at the
+example's `<output_dir>/` root; the isotonic `BCMSet` JSON inside
+`converged/` is the gofluttercat-compatible companion fit on the same
+`(subset, gold)` triples.
 
-The bundle assumes default integer response labels and uses the item key
+The per-item JSON uses default integer response labels and the item key
 as placeholder question text. For datasets with curated metadata, copy
 the corresponding `<item>.json` files from
-`gofluttercat/backend-golang/<scale>/factorized/` and replace only the
-`scales: {<scale>: {...}}` payload.
+`gofluttercat/backend-golang/<scale>/factorized/` into `converged/items/`
+and replace only the `scales: {<scale>: {...}}` payload.
 
 ### Weights and imputation
 

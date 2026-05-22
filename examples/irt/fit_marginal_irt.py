@@ -654,15 +654,23 @@ def main():
     if final_irt is not None:
         bundle_dir = os.path.join(output_dir, 'converged')
         print(f"\n=== Exporting converged artifact (libfab + gofluttercat) ===")
+        # export_artifact needs an imputation model with .save() / .save_to_disk();
+        # IrtMixedImputationModel has neither, so pass the underlying
+        # PairwiseOrdinalStackingModel. Mixed-blend weights go into extra_manifest.
+        mixed_weights = None
+        if hasattr(mixed_imputation, '_weights') and mixed_imputation._weights:
+            mixed_weights = {str(k): float(v)
+                             for k, v in mixed_imputation._weights.items()}
         export_artifact(
             irt_model=final_irt,
-            imputation_model=mixed_imputation,
+            imputation_model=pairwise_model,
             out_dir=bundle_dir,
             scale_names=[args.dataset],
             fit_method='marginal_mcmc',
             source_script=os.path.basename(__file__),
             extra_manifest={'dataset': args.dataset, 'use_ipw': use_ipw,
-                            'standardized': True},
+                            'standardized': True,
+                            'mixed_weights': mixed_weights},
         )
         print(f"  -> {bundle_dir}")
 
