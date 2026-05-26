@@ -1792,11 +1792,15 @@ class IRTModel(BayesianModel):
 
         item_var_list = self._item_var_list()
 
-        # Build item-only prior
+        # Build the prior over every var except ``abilities`` (we still need
+        # ``mu`` and any other auxiliary parents in the dict so TFP's
+        # JointDistributionNamed chain-rule resolver can find them when
+        # flattening dependent priors like ``difficulties0``).
+        prior_keys = [v for v in self.var_list if not v.startswith('abilities')]
+
         prior_dict = {}
         bijectors = {}
-        for v in item_var_list:
-            # Extract the marginal prior for this variable
+        for v in prior_keys:
             prior_dict[v] = self.joint_prior_distribution.model[v]
             if hasattr(self, 'bijectors') and v in self.bijectors:
                 bijectors[v] = self.bijectors[v]

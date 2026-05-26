@@ -518,6 +518,8 @@ DATASETS = [
     'copd_physical_function', 'copd_social_satisfaction',
     'np_pain_interference', 'np_pain_behavior',
     'np_global_health', 'np_physical_function',
+    'w1_alcohol_use', 'w1_anger', 'w1_anxiety', 'w1_depression',
+    'w1_fatigue_experience', 'w1_fatigue_impact', 'w1_physical_function_a',
 ]
 
 
