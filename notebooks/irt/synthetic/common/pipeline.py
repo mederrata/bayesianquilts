@@ -50,10 +50,16 @@ _PROMIS_NP_DOMAINS = [
     'pain_interference', 'pain_behavior', 'global_health',
     'physical_function',
 ]
+_PROMIS_W1_DOMAINS = [
+    'alcohol_use', 'anger', 'anxiety', 'depression',
+    'fatigue_experience', 'fatigue_impact', 'physical_function_a',
+]
 for _d in _PROMIS_COPD_DOMAINS:
     DATASET_MODULES[f'copd_{_d}'] = 'bayesianquilts.data.promis_copd'
 for _d in _PROMIS_NP_DOMAINS:
     DATASET_MODULES[f'np_{_d}'] = 'bayesianquilts.data.promis_neuropathic_pain'
+for _d in _PROMIS_W1_DOMAINS:
+    DATASET_MODULES[f'w1_{_d}'] = 'bayesianquilts.data.promis_wave1'
 
 
 def load_dataset(dataset_name: str, cache_dir=None, gender=None):
@@ -88,6 +94,8 @@ def load_dataset(dataset_name: str, cache_dir=None, gender=None):
         domain = dataset_name[len('copd_'):]
     elif dataset_name.startswith('np_'):
         domain = dataset_name[len('np_'):]
+    elif dataset_name.startswith('w1_'):
+        domain = dataset_name[len('w1_'):]
     if domain is not None and 'domain' in inspect.signature(mod.get_data).parameters:
         kwargs['domain'] = domain
 
