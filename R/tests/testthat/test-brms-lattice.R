@@ -66,7 +66,7 @@ test_that("fit_quilt_lattice_brms runs end-to-end on a tiny dataset", {
 
   out <- fit_quilt_lattice_brms(
     "y", df, predictors = c("x1", "x2"), k = 4L,
-    family = brms::gaussian(),
+    family = stats::gaussian(),
     chains = 1L, iter = 300L, refresh = 0,
     seed = 1, silent = 2
   )

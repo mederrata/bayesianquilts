@@ -178,7 +178,7 @@ fit_quilt_lattice_brms <- function(response, data, predictors,
                                    family = NULL,
                                    scales = NULL, ...) {
   .require_brms()
-  if (is.null(family)) family <- brms::gaussian()
+  if (is.null(family)) family <- stats::gaussian()
   if (!response %in% names(data))
     stop(sprintf("response %s not in data", response))
 
