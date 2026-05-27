@@ -1840,7 +1840,11 @@ class IRTModel(BayesianModel):
                 )
                 log_probs.append(lp)
             log_joint = jnp.mean(jnp.stack(log_probs))
-            entropy = surrogate.entropy()
+            # Closed-form ``surrogate.entropy()`` fails on stacks containing
+            # TransformedDistribution (no analytic entropy for e.g. softplus
+            # bijector); fall back to a Monte Carlo estimate using the same
+            # draws we already took for the joint term.
+            entropy = -jnp.mean(surrogate.log_prob(samples))
             return -(log_joint + entropy)
 
         losses, trained_params = training_loop(
