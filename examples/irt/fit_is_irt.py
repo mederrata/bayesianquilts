@@ -426,6 +426,10 @@ def main():
     # Standardize and compute EAP
     stats = baseline_model.standardize_marginal(base_data)
     baseline_model.fit_surrogate_to_mcmc()
+    # Refresh calibrated_expectations from the now-standardized surrogate so
+    # any downstream consumer (IrtMixedImputationModel, etc.) sees the same
+    # N(0,1) scale that the MCMC samples are on.
+    calibrate_model(baseline_model)
     eap_baseline = baseline_model.compute_eap_abilities(base_data)
 
     # Inject EAP into surrogate_sample for ELPD-LOO

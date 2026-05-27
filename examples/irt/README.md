@@ -50,6 +50,41 @@ All marginal inference modes support **EAP ability recovery** via `model.compute
   using imputation-blended scoring for both the subset and gold scores.
   This regime is required when no respondent has a complete response
   vector (so a non-imputed "gold" cannot be defined).
+  `fit_marginal_irt.py` adds the same BCM step (Step 6) on top of its
+  marginal-MCMC `mixed` variant; skip with `--skip-bcm`.
+
+### Converged artifact (libfab + gofluttercat consumable)
+
+Both `fit_bcm_with_imputation.py` and `fit_marginal_irt.py` write a
+`converged/` subdirectory after fitting, produced by
+`bayesianquilts.io.converged.export_artifact`. The layout is the one
+both `libfabulouscatpy.irt.converged.load_artifact` and gofluttercat's
+Go-side loaders read:
+
+```
+<output_dir>/converged/
+  items/<item_key>.json       # per-item GRM params (libfab + gofluttercat factorized shape)
+  scales.json                 # per-scale metadata
+  imputation/                 # gofluttercat-consumable imputation bundle
+  manifest.yaml               # provenance: timestamps, git SHA, settings
+  bcm_<scale>.json            # per-J isotonic BCMSet (Go-readable; written by the BCM-aware examples)
+```
+
+The IRT model is **standardised to N(0,1) abilities** before extraction
+(`model.standardize_abilities()` for joint-ADVI;
+`model.standardize_marginal(data)` for marginal-MCMC), so the
+discriminations and cumulative cutpoints in `items/` are on the scale
+gofluttercat's prior assumes. The `BCMConditional` joblib (richer
+per-item-indicator corrector for Python-side use) is saved at the
+example's `<output_dir>/` root; the isotonic `BCMSet` JSON inside
+`converged/` is the gofluttercat-compatible companion fit on the same
+`(subset, gold)` triples.
+
+The per-item JSON uses default integer response labels and the item key
+as placeholder question text. For datasets with curated metadata, copy
+the corresponding `<item>.json` files from
+`gofluttercat/backend-golang/<scale>/factorized/` into `converged/items/`
+and replace only the `scales: {<scale>: {...}}` payload.
 
 ### Weights and imputation
 
@@ -69,6 +104,7 @@ All marginal inference modes support **EAP ability recovery** via `model.compute
 | `fit_is_factorized_irt.py` | Per-scale ADVI → MCMC → IS reweight pipeline |
 | `example_ipw_groups.py` | Creating IPW group weights from stratified data |
 | `fit_bcm_with_imputation.py` | End-to-end: pairwise imputation + baseline GRM (ADVI) + `IrtMixedImputationModel` + `BCMConditional` trained with imputation-blended subset/gold scoring (requires `libfabulouscatpy`) |
+| `fit_imputed_irt.py` | **Manuscript imputed-IRT pipeline**: pairwise stacking + joint-ADVI baseline + shared-disc GRM (marginal MCMC) + `ThreeWayImputationModel` + marginal MCMC on the three-way-imputed posterior. Optional IPW (`--use-ipw`), optional 2-way fallback (`--skip-shared-disc`), optional BCM, converged bundle. Mirrors `notebooks/irt/run_marginal_mcmc.py` `imputed` variant. |
 
 ## Default dataset
 

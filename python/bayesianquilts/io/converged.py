@@ -52,6 +52,27 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 
+def _jsonify(value):
+    """Recursively coerce numpy scalars/arrays to native Python types so
+    that ``yaml.safe_dump`` / ``json.dumps`` can serialise the result."""
+    if isinstance(value, dict):
+        return {str(k) if not isinstance(k, str) else k: _jsonify(v)
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonify(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _jsonify(value.tolist())
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, (np.str_, bytes)):
+        return str(value)
+    return value
+
+
 PathLike = Union[str, os.PathLike]
 
 
@@ -390,8 +411,8 @@ def export_artifact(
             getattr(irt_model, "share_discriminations", False)
         ),
         "n_items": len(items),
-        "scale_names": list(scales.keys()),
-        "item_keys": [it["item"] for it in items],
+        "scale_names": [str(k) for k in scales.keys()],
+        "item_keys": [str(it["item"]) for it in items],
         "response_cardinality": int(
             getattr(irt_model, "response_cardinality", 0)
         ),
@@ -401,7 +422,7 @@ def export_artifact(
         ),
     }
     if extra_manifest:
-        manifest.update(dict(extra_manifest))
+        manifest.update(_jsonify(dict(extra_manifest)))
     (out / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
 
     return out

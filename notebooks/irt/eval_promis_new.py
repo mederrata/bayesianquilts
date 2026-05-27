@@ -348,11 +348,34 @@ def compute_metrics_from_npz(npz_path, batch, item_keys, K, num_people,
 
 # ---- Dataset registry -------------------------------------------------------
 
+def load_domain_subscale(module_name, domain, cache_dir):
+    """Load a single PROMIS domain from a multi-domain module (NP or COPD).
+
+    Both promis_neuropathic_pain and promis_copd expose:
+        get_data(reorient=True, polars_out=True, cache_dir=..., domain=...)
+    and a module-level ``response_cardinality`` int.
+
+    Returns (batch, item_keys, num_people, K).
+    """
+    import importlib as imp
+    mod = imp.import_module(module_name)
+    df, num_people = mod.get_data(
+        reorient=True, polars_out=True,
+        cache_dir=str(cache_dir), domain=domain,
+    )
+    keys = [c for c in df.columns if c != 'person']
+    batch = {col: df[col].to_numpy().astype(np.float32) for col in keys}
+    return batch, keys, num_people, mod.response_cardinality
+
+
 def get_dataset_config():
     wave1_tab = IRT_DIR / 'promis_wave1' / 'promis_wave1.tab'
     su_tab_dir = IRT_DIR / 'promis_substance_use'
+    np_cache = IRT_DIR / 'promis_neuropathic_pain'
+    copd_cache = IRT_DIR / 'promis_copd'
 
     return {
+        # ---- PROMIS Wave 1 ---------------------------------------------------
         'promis_w1__anger': {
             'loader': 'wave1', 'domain': 'anger', 'K': 5,
             'wave1_tab': wave1_tab,
@@ -377,11 +400,20 @@ def get_dataset_config():
             'loader': 'wave1', 'domain': 'physical_function_a', 'K': 5,
             'wave1_tab': wave1_tab,
         },
+        'promis_w1__alcohol_use': {
+            'loader': 'wave1', 'domain': 'alcohol_use', 'K': 5,
+            'wave1_tab': wave1_tab,
+        },
+        # ---- PROMIS Sleep ----------------------------------------------------
         'promis_sleep': {
             'loader': 'module',
             'module': 'bayesianquilts.data.promis_sleep',
             'work_dir': IRT_DIR / 'promis_sleep',
             'sleep_data_dir': Path.home() / 'workspace/bayesianquilts',
+        },
+        # ---- PROMIS Substance Use banks --------------------------------------
+        'promis_su__bank1': {
+            'loader': 'su_bank', 'K': 5, 'su_tab_dir': su_tab_dir,
         },
         'promis_su__bank2': {
             'loader': 'su_bank', 'K': 5, 'su_tab_dir': su_tab_dir,
@@ -398,6 +430,68 @@ def get_dataset_config():
         'promis_su__bank6': {
             'loader': 'su_bank', 'K': 5, 'su_tab_dir': su_tab_dir,
         },
+        # ---- PROMIS Neuropathic Pain -----------------------------------------
+        'promis_np__global_health': {
+            'loader': 'np_domain', 'domain': 'global_health',
+            'module': 'bayesianquilts.data.promis_neuropathic_pain',
+            'cache_dir': np_cache,
+        },
+        'promis_np__pain_behavior': {
+            'loader': 'np_domain', 'domain': 'pain_behavior',
+            'module': 'bayesianquilts.data.promis_neuropathic_pain',
+            'cache_dir': np_cache,
+        },
+        'promis_np__pain_interference': {
+            'loader': 'np_domain', 'domain': 'pain_interference',
+            'module': 'bayesianquilts.data.promis_neuropathic_pain',
+            'cache_dir': np_cache,
+        },
+        # ---- PROMIS COPD -----------------------------------------------------
+        'promis_copd__anger': {
+            'loader': 'np_domain', 'domain': 'anger',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__anxiety': {
+            'loader': 'np_domain', 'domain': 'anxiety',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__depression': {
+            'loader': 'np_domain', 'domain': 'depression',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__fatigue_experience': {
+            'loader': 'np_domain', 'domain': 'fatigue_experience',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__fatigue_impact': {
+            'loader': 'np_domain', 'domain': 'fatigue_impact',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__pain_behavior': {
+            'loader': 'np_domain', 'domain': 'pain_behavior',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__pain_interference': {
+            'loader': 'np_domain', 'domain': 'pain_interference',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__physical_function': {
+            'loader': 'np_domain', 'domain': 'physical_function',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
+        'promis_copd__social_satisfaction': {
+            'loader': 'np_domain', 'domain': 'social_satisfaction',
+            'module': 'bayesianquilts.data.promis_copd',
+            'cache_dir': copd_cache,
+        },
     }
 
 
@@ -411,6 +505,11 @@ def load_data_for_dataset(ds_name, config):
     elif loader == 'su_bank':
         work_dir = IRT_DIR / ds_name
         return load_su_bank(work_dir, config['su_tab_dir'])
+    elif loader == 'np_domain':
+        # Handles both promis_neuropathic_pain and promis_copd subscales.
+        # Both modules expose get_data(reorient, polars_out, cache_dir, domain).
+        return load_domain_subscale(
+            config['module'], config['domain'], config['cache_dir'])
     elif loader == 'module':
         kw = {'polars_out': True}
         import importlib as imp

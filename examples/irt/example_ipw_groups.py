@@ -249,6 +249,14 @@ def run(output_dir='ipw_example_results'):
     )
     model_baseline.save_to_disk(str(out / 'grm_baseline'))
     calibrate_manually(model_baseline, n_samples=sample_size, seed=101)
+    # Standardize baseline BEFORE building the mixed imputation so its
+    # IRT-component PMFs are on the N(0,1) ability scale; otherwise the
+    # imputation references an unscaled theta while downstream scoring on
+    # the standardized model would see a mismatched scale.
+    base_std = model_baseline.standardize_abilities()
+    print(f"  Standardized baseline: "
+          f"mu={float(jnp.mean(base_std['mu'])):.4f}, "
+          f"sigma={float(jnp.mean(base_std['sigma'])):.4f}")
     gc.collect()
 
     # ------------------------------------------------------------------
