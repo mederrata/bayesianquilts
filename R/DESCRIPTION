@@ -1,39 +1,49 @@
 Package: bayesianquilts
 Title: Adaptive Importance Sampling and Quilted-Model Scaling for Bayesian Cross-Validation
-Version: 0.3.0
-Authors@R: person("Joshua", "Chang", email = "josh@mederrata.com", role = c("aut", "cre"))
-Description: R port of the bayesianquilts library for interpretable Bayesian machine learning.
-    Provides Adaptive Importance Sampling (AIS) methods for efficient Leave-One-Out (LOO)
-    cross-validation, with support for brms models and custom likelihood functions.
-    Includes the full-rank transformations MM3 and PMM3, the natural-gradient variants
-    NLD and NKL, the variance-based transformation, and MixIS (Silva & Zanella 2024).
-    Also provides the quilted-model interaction decomposition with the manuscript's
-    generalization-preserving prior scales (Chang 2025) so multi-way component priors
-    can be set from data marginals.
+Version: 0.9.0
+Authors@R: person("Joshua", "Chang",
+                  email = "josh@mederrata.org",
+                  role = c("aut", "cre"))
+Description: Tools for interpretable Bayesian machine learning built around two
+    ideas. (1) Adaptive Importance Sampling (AIS) for Leave-One-Out (LOO)
+    cross-validation: a family of small-step and global transformations of the
+    posterior (Likelihood Descent, KL and natural-gradient KL, variance-based,
+    moment-matching MM1/MM2/MM3, partial moment-matching PMM1/PMM2/PMM3, and
+    Mixture IS of Silva and Zanella (2024)) that target finite-variance
+    importance weights when standard PSIS-LOO fails. (2) The additive interaction
+    decomposition of multi-way regression coefficients into orthogonal
+    components, with generalization-preserving prior scales (Chang (2026))
+    derived from each component's effective sample size. The package pairs the
+    decomposition with the 'brms' formula interface so the manuscript priors can
+    be plugged into a Stan fit, and exposes parameter-level ensembling of the
+    additive components (uniform, AIC, or LOO-stacking weights).
 License: MIT + file LICENSE
+URL: https://github.com/mederrata/bayesianquilts
+BugReports: https://github.com/mederrata/bayesianquilts/issues
 Encoding: UTF-8
-LazyData: true
 Imports:
     R6,
     loo (>= 2.0.0),
-    numDeriv,
     stats
 Suggests:
     brms,
     rstan,
+    numDeriv,
     knitr,
     rmarkdown,
     testthat (>= 3.0.0)
-VignetteBuilder: knitr
-RoxygenNote: 7.2.3
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
 Collate:
     'utils.R'
     'psis.R'
     'ais_classes.R'
     'transformations.R'
-    'likelihoods.R'
     'ais.R'
+    'bayesianquilts-package.R'
+    'likelihoods.R'
     'brms_utils.R'
     'decomposition.R'
     'brms_quilt.R'
     'ensemble.R'
+Config/roxygen2/version: 8.0.0

@@ -305,11 +305,15 @@ Decomposed <- R6::R6Class("Decomposed",
     },
 
     #' @description Return the interaction order (rank) of a component name.
+    #' @param component_name Character. A key from
+    #'   `$.tensor_part_interactions`.
     component_order = function(component_name) {
       length(self$.tensor_part_interactions[[component_name]])
     },
 
     #' @description Return all component names at a given interaction order.
+    #' @param order Integer interaction order (0 = constant, 1 = main
+    #'   effect, 2 = two-way, ...).
     components_at_order = function(order) {
       nms <- names(self$.tensor_part_interactions)
       keep <- vapply(nms, function(n)
@@ -324,6 +328,8 @@ Decomposed <- R6::R6Class("Decomposed",
     },
 
     #' @description Set scales from a named list.
+    #' @param scales A named numeric list/vector. Names must match
+    #'   component names in `$.tensor_part_interactions`.
     set_scales = function(scales) {
       for (k in names(scales)) self$scales[[k]] <- scales[[k]]
       invisible(self)
@@ -338,6 +344,11 @@ Decomposed <- R6::R6Class("Decomposed",
 #' `Decomposed$generalization_preserving_scales` to derive prior scales
 #' from actual data marginals rather than a uniform assumption.
 #'
+#' @field interaction The `Interactions` object describing the contingency
+#'   structure being counted.
+#' @field counts An integer array shaped `interaction$shape()` holding the
+#'   per-cell counts after `$fit()`.
+#'
 #' @export
 MultiwayContingencyTable <- R6::R6Class("MultiwayContingencyTable",
   public = list(
@@ -345,6 +356,8 @@ MultiwayContingencyTable <- R6::R6Class("MultiwayContingencyTable",
     counts = NULL,     # array shaped self$interaction$shape()
 
     #' @description Construct a contingency table for an interaction.
+    #' @param interaction An `Interactions` object describing the multi-way
+    #'   contingency structure to count over.
     initialize = function(interaction) {
       if (!inherits(interaction, "Interactions"))
         stop("interaction must be an Interactions object")
@@ -418,14 +431,17 @@ MultiwayContingencyTable <- R6::R6Class("MultiwayContingencyTable",
 #'
 #' Equivalent to `Decomposed$new(interactions, param_shape)$generalization_preserving_scales(...)`
 #' but with the most common arguments inlined for users who don't otherwise
-#' need a Decomposed instance.
+#' need a `Decomposed` instance.
 #'
-#' @inheritParams Decomposed
+#' @param interactions An `Interactions` object, a `Decomposed` object, or a
+#'   list passed to `Interactions$new(...)`.
+#' @param param_shape Integer vector giving the per-cell parameter shape.
+#'   Defaults to `1L` (scalar parameter per cell).
 #' @param noise_scale Estimated noise standard deviation sigma.
 #' @param total_n Total sample size N.
-#' @param contingency_table Optional MultiwayContingencyTable.
+#' @param contingency_table Optional `MultiwayContingencyTable`.
 #' @param c Effective-df budget (default 0.5).
-#' @param per_component See Decomposed$generalization_preserving_scales.
+#' @param per_component See `Decomposed$generalization_preserving_scales`.
 #' @return Named list of prior scales, one per non-excluded component.
 #' @export
 quilt_prior_scales <- function(interactions, param_shape = 1L,
