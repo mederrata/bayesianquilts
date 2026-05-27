@@ -54,12 +54,15 @@ _PROMIS_W1_DOMAINS = [
     'alcohol_use', 'anger', 'anxiety', 'depression',
     'fatigue_experience', 'fatigue_impact', 'physical_function_a',
 ]
+_PROMIS_SU_BANKS = [1, 2, 3, 4, 5, 6]
 for _d in _PROMIS_COPD_DOMAINS:
     DATASET_MODULES[f'copd_{_d}'] = 'bayesianquilts.data.promis_copd'
 for _d in _PROMIS_NP_DOMAINS:
     DATASET_MODULES[f'np_{_d}'] = 'bayesianquilts.data.promis_neuropathic_pain'
 for _d in _PROMIS_W1_DOMAINS:
     DATASET_MODULES[f'w1_{_d}'] = 'bayesianquilts.data.promis_wave1'
+for _b in _PROMIS_SU_BANKS:
+    DATASET_MODULES[f'su_bank{_b}'] = 'bayesianquilts.data.promis_substance_use'
 
 
 def load_dataset(dataset_name: str, cache_dir=None, gender=None):
@@ -105,8 +108,33 @@ def load_dataset(dataset_name: str, cache_dir=None, gender=None):
     # Pass gender if the loader supports it (e.g. bouldering)
     if gender is not None and 'gender' in inspect.signature(mod.get_data).parameters:
         kwargs['gender'] = gender
+
+    # For per-bank SU datasets and promis_sleep, point cache_dir at the
+    # checked-in tab file rather than triggering an HTTP fetch.
+    irt_root = Path('/home/josh/workspace/bayesianquilts/notebooks/irt')
+    if 'cache_dir' not in kwargs:
+        if dataset_name.startswith('su_bank') or dataset_name == 'promis_substance_use':
+            kwargs['cache_dir'] = str(irt_root / 'promis_substance_use')
+        elif dataset_name == 'promis_sleep':
+            kwargs['cache_dir'] = str(irt_root / 'promis_sleep')
     df, num_people = mod.get_data(**kwargs)
     item_keys = mod.item_keys
+
+    # Sub-select to the bank's items via the existing grm_baseline config
+    if dataset_name.startswith('su_bank'):
+        import yaml
+        bank_idx = int(dataset_name[len('su_bank'):])
+        bank_cfg_path = (Path('/home/josh/workspace/bayesianquilts/'
+                              'notebooks/irt') / f'promis_su__bank{bank_idx}'
+                         / 'grm_baseline' / 'config.yaml')
+        with open(str(bank_cfg_path)) as fh:
+            cfg = yaml.safe_load(fh)
+        bank_keys = [k for k in cfg['item_keys'] if k in item_keys]
+        if not bank_keys:
+            raise ValueError(
+                f"No bank{bank_idx} items present in full SU dataset")
+        item_keys = bank_keys
+        df = df.select(bank_keys)
 
     # Convert to numpy data dict
     data = {}
