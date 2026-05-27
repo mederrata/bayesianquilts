@@ -45,5 +45,6 @@ Collate:
     'brms_utils.R'
     'decomposition.R'
     'brms_quilt.R'
+    'brms_lattice.R'
     'ensemble.R'
 Config/roxygen2/version: 8.0.0
