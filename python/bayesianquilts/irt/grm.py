@@ -945,6 +945,33 @@ class GRModel(IRTModel):
         )
         self.params = self.surrogate_parameter_initializer()
 
+    # ----- Serialization support -----
+    # The distribution generators contain local-closure lambdas that the
+    # standard serialization protocol cannot handle. Drop them on dump and
+    # recreate via create_distributions() on load -- params, calibrated state,
+    # and surrogate samples survive.
+    _UNSERIALIZABLE_DIST_ATTRS = (
+        'joint_prior_distribution', 'prior_distribution',
+        'surrogate_distribution_generator', 'surrogate_parameter_initializer',
+        'bijectors', 'var_list',
+    )
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        for attr in self._UNSERIALIZABLE_DIST_ATTRS:
+            state.pop(attr, None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Rebuild distribution generators from configuration so the model is
+        # usable post-load. Skip silently if create_distributions cannot run
+        # against the restored state (e.g. older saved object).
+        try:
+            self.create_distributions()
+        except Exception:
+            pass
+
     def score(self, responses, samples=400, mm_iterations=10):
         responses = jnp.astype(responses, jnp.int32)
         sampling_rv = tfd.Independent(
