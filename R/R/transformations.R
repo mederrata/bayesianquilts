@@ -55,7 +55,24 @@ SmallStepTransformation <- R6::R6Class("SmallStepTransformation",
       list(Q = Q, Q_norm_max = Q_norm_max)
     },
 
-    #' @description Apply transformation step
+    #' @description Apply transformation step.
+    #' @param max_iter Integer; ignored for the single-step transforms in
+    #'   this file but retained for API compatibility.
+    #' @param params Original posterior samples (named list of `(S, ...)` arrays).
+    #' @param theta Per-observation expansion of `params`, shape `(S, N, ...)`.
+    #' @param data Data object.
+    #' @param log_ell Matrix of log-likelihoods, shape `(S, N)`.
+    #' @param hbar Step size for `T(theta) = theta + h * Q(theta)`.
+    #' @param theta_std Per-parameter standard deviations used by the
+    #'   normalization step. If `NULL`, no standardization.
+    #' @param log_ell_original Original `(S, N)` log-likelihoods (used by
+    #'   transforms that compute moments under leave-one-out weights).
+    #' @param log_pi Posterior or surrogate log-probability per sample.
+    #' @param variational If `TRUE`, use the surrogate density ratio in the
+    #'   IS-weight computation.
+    #' @param surrogate_log_prob_fn Optional function returning log-surrogate
+    #'   density of transformed samples (variational case only).
+    #' @param ... Forwarded to `compute_Q`.
     call = function(max_iter, params, theta, data, log_ell, hbar = 1.0,
                     theta_std = NULL, log_ell_original = NULL,
                     log_pi = NULL, variational = FALSE,
@@ -311,10 +328,11 @@ LikelihoodDescent <- R6::R6Class("LikelihoodDescent",
 
 #' Natural-gradient Likelihood Descent Transformation
 #'
-#' Q_NLL = Sigma %*% (-grad log ell_i), where Sigma is the posterior covariance.
-#' Approximates the influence function J^{-1} grad log ell_i without the
-#' pi(theta|D) prefactor of the KL flow. Cheaper than KL (no posterior
-#' evaluation) and more directly aligned with the optimal LOO shift.
+#' \code{Q_NLL = Sigma \%*\% (-grad log ell_i)}, where `Sigma` is the
+#' posterior covariance. Approximates the influence function
+#' \code{Jinv \%*\% (grad log ell_i)} without the `pi(theta | D)` prefactor of
+#' the KL flow. Cheaper than KL (no posterior evaluation) and more directly
+#' aligned with the optimal LOO shift.
 #'
 #' Analytical divergence: div(Q_NLL) = -tr(Sigma %*% H) with diagonal-Hessian
 #' approximation: -sum_k Sigma_kk * H_kk.
@@ -992,11 +1010,11 @@ MM2 <- R6::R6Class("MM2",
 
 #' PMM3 (Partial Moment Matching 3) - full-rank affine with step size
 #'
-#' Generalization of MM3 with a tunable step size h. The vector field is
-#'   Q(theta) = (L_w %*% L^{-1} - I) %*% (theta - mu) + (mu_w - mu)
-#' so T(theta) = theta + h*Q(theta) interpolates between identity (h=0)
-#' and full MM3 (h=1). Divergence is exact: div(Q) = trace(L_w %*% L^{-1} - I),
-#' constant in theta.
+#' Generalization of MM3 with a tunable step size `h`. The vector field is
+#' \code{Q(theta) = (L_w \%*\% Linv - I) \%*\% (theta - mu) + (mu_w - mu)},
+#' so `T(theta) = theta + h * Q(theta)` interpolates between identity
+#' (`h=0`) and full MM3 (`h=1`). Divergence is exact:
+#' \code{div(Q) = trace(L_w \%*\% Linv - I)}, constant in `theta`.
 #'
 #' @export
 PMM3 <- R6::R6Class("PMM3",
@@ -1067,10 +1085,11 @@ PMM3 <- R6::R6Class("PMM3",
 #'
 #' From Paananen et al. (2021). Matches the full covariance structure (not
 #' just marginal variances like MM2) via
-#'   T_i(theta) = L_w_i %*% L^{-1} %*% (theta - mu) + mu_w_i
-#' where L, L_w_i are Cholesky factors of the unweighted and weighted
-#' covariance matrices respectively. The exact log-Jacobian per obs is
-#'   log|J_i| = sum(log(diag(L_w_i))) - sum(log(diag(L))).
+#' \code{T_i(theta) = L_w_i \%*\% Linv \%*\% (theta - mu) + mu_w_i}
+#' where `L` and `L_w_i` are Cholesky factors of the unweighted and weighted
+#' covariance matrices respectively, and `Linv` is the inverse of `L`. The
+#' exact log-Jacobian per observation is
+#' \code{log|J_i| = sum(log(diag(L_w_i))) - sum(log(diag(L)))}.
 #'
 #' @export
 MM3 <- R6::R6Class("MM3",

@@ -62,7 +62,7 @@ test_that("fit_quilt_brms runs end-to-end on a tiny dataset", {
                         interactions = list(Dimension$new("g", G),
                                             Dimension$new("t", T_)),
                         noise_scale = 0.3,
-                        family = brms::gaussian(),
+                        family = stats::gaussian(),
                         chains = 1L, iter = 200L, refresh = 0,
                         seed = 1, silent = 2)
   expect_s3_class(fit, "brmsfit")
@@ -84,7 +84,7 @@ test_that("component_predict + ensemble_components run on a mock brmsfit", {
   i <- Interactions$new(list(Dimension$new("g", G)))
   d <- Decomposed$new(i, 1L, name = "beta")
   fit <- fit_quilt_brms("y", df, interactions = d,
-                        noise_scale = 0.5, family = brms::gaussian(),
+                        noise_scale = 0.5, family = stats::gaussian(),
                         chains = 1L, iter = 200L, refresh = 0,
                         seed = 7, silent = 2)
   contribs <- component_predict(fit, d)

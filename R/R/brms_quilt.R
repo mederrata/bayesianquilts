@@ -68,8 +68,8 @@ quilt_brms_formula <- function(response, decomposed, predictors = NULL,
 #' Build brms priors from a Decomposed quilt structure
 #'
 #' For the order-0 component, sets `prior(normal(0, tau0), class = "Intercept")`.
-#' For each higher-order component {d1, ..., dk}, sets
-#'   `prior(normal(0, tau_alpha), class = "sd", group = "d1:...:dk")`.
+#' For each higher-order component `(d1, ..., dk)`, sets
+#' `prior(normal(0, tau_alpha), class = "sd", group = "d1:...:dk")`.
 #'
 #' Pass the returned object directly to `brms::brm(..., prior = ...)`.
 #'

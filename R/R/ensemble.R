@@ -187,7 +187,7 @@ component_loo_elpd <- function(fit, decomposed, sigma = NULL) {
 #'
 #' Combines per-component contributions into an ensembled posterior of the
 #' linear predictor:
-#'   eta_ens[s, n] = sum_alpha w_alpha * contributions[[alpha]][s, n]
+#' \code{eta_ens[s, n] = sum_alpha w_alpha * contributions[[alpha]][s, n]}.
 #'
 #' Weight schemes:
 #' * `"uniform"` -- w_alpha = 1/K.

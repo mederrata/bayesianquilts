@@ -32,7 +32,7 @@ LikelihoodFunction <- R6::R6Class("LikelihoodFunction",
     #'
     #' For per-observation transformed parameters with shape (S, N_params, K),
     #' computes for each (s, i):
-    #'     result[s, i] = sum_j log l(d_j | params[s, i, :])
+    #' \code{result[s, i] = sum_j log l(d_j | params[s, i, :])}.
     #'
     #' Default implementation loops over the N dimension.
     #'
@@ -149,7 +149,7 @@ Transformation <- R6::R6Class("Transformation",
     #' @description Compute importance weights for transformed parameters.
     #'
     #' Implements the importance weight from the manuscript:
-    #'   log eta = -log l(phi|d_i) + log|J| + log[pi(phi|D)/pi(theta|D)]
+    #' \code{log eta = -log l(phi | d_i) + log|J| + log(pi(phi | D) / pi(theta | D))}.
     #'
     #' For the variational case, uses surrogate density ratio.
     #' For the MCMC case, computes the full posterior LL ratio.

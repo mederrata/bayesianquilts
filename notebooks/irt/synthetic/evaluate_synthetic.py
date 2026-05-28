@@ -519,7 +519,10 @@ DATASETS = [
     'np_pain_interference', 'np_pain_behavior',
     'np_global_health', 'np_physical_function',
     'w1_alcohol_use', 'w1_anger', 'w1_anxiety', 'w1_depression',
-    'w1_fatigue_experience', 'w1_fatigue_impact', 'w1_physical_function_a',
+    'w1_fatigue_experience', 'w1_fatigue_impact',
+    'w1_pain_behavior', 'w1_pain_interference', 'w1_pain_quality',
+    'w1_physical_function_a', 'w1_physical_function_b', 'w1_physical_function_c',
+    'w1_social_personal', 'w1_social_satisfaction',
     'su_bank1', 'su_bank2', 'su_bank3', 'su_bank4', 'su_bank5', 'su_bank6',
 ]
 
