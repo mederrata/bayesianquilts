@@ -15,6 +15,7 @@ class IRTModel(BayesianModel):
     kappa_scale: Any = nnx.data(None)
     joint_prior_distribution: Any = nnx.data(None)
     bijectors: Any = nnx.data(None)
+    marginal_params: Any = nnx.data(None)
 
     def __init__(
             self,
