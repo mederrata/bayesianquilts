@@ -1,5 +1,7 @@
 # Bayesianquilts
 
+[![Donate via Zeffy](https://img.shields.io/badge/Donate-Support%20Transparency%20in%20AI-ff5a5f?style=for-the-badge)](https://www.zeffy.com/en-US/donation-form/donate-to-support-transparency-in-ai)
+
 A JAX-based library for building interpretable Bayesian models using piecewise linear regression and gradient-flow adaptive importance sampling for leave-one-out cross-validation.
 
 ## Overview
