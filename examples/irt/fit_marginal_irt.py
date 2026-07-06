@@ -330,8 +330,10 @@ def main():
     parser.add_argument('--skip-bcm', action='store_true',
                         help='Skip Step 6 (BCM training + gofluttercat bundle export)')
     parser.add_argument('--bcm-subset-sizes', type=int, nargs='+',
-                        default=[5, 10],
-                        help='Item subset sizes for BCM training')
+                        default=[5, 10, 20, 40],
+                        help='Item subset sizes for BCM training (the full '
+                             'battery and near-full sizes are always added on '
+                             'top so the correction vanishes at completion)')
     parser.add_argument('--bcm-n-subsets', type=int, default=100,
                         help='Random subset draws per size')
     parser.add_argument('--bcm-max-respondents', type=int, default=200,

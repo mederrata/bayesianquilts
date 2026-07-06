@@ -92,8 +92,10 @@ def main():
                         choices=list(DATASET_CONFIGS.keys()))
     parser.add_argument('--output-dir', default=None)
     parser.add_argument('--subset-sizes', type=int, nargs='+',
-                        default=[5, 10],
-                        help='Item subset sizes for BCM training')
+                        default=[5, 10, 20, 40],
+                        help='Item subset sizes for BCM training (the full '
+                             'battery and near-full sizes are always added on '
+                             'top so the correction vanishes at completion)')
     parser.add_argument('--n-subsets', type=int, default=100,
                         help='Random subset draws per size')
     parser.add_argument('--max-respondents', type=int, default=200,

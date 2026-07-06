@@ -164,6 +164,19 @@ def build_bcm_triples(
     print(f"    gold range: [{gold.min():.3f}, {gold.max():.3f}]")
 
     I = len(item_keys)
+    # Always anchor the upper boundary of test length so the correction learns
+    # to vanish at (near-)full administration. In addition to the caller's
+    # requested sizes, include the full battery (J=I) and a few near-full sizes:
+    # without a fully-administered row in training, the all-indicators-on region
+    # is pure extrapolation, so neither the point correction nor the
+    # sqrt(err^2 + bias^2) uncertainty term (which folds in the estimated bias)
+    # goes to zero as the instrument is completed. comb(I, I) == 1, so the full
+    # battery contributes a single anchoring draw (subset_score == gold,
+    # indicators all 1); out-of-range sizes are dropped.
+    anchored = {int(s) for s in subset_sizes if 1 <= int(s) <= I}
+    anchored.update(s for s in (I, I - 1, I - 2, I - 3) if s >= 1)
+    subset_sizes = sorted(anchored)
+
     key_to_idx = {k: i for i, k in enumerate(item_keys)}
     subset_scores: List[float] = []
     indicators: List[np.ndarray] = []

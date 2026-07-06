@@ -134,7 +134,7 @@ def main():
                              'fit; report metrics for imputed variant only')
     parser.add_argument('--skip-bcm', action='store_true')
     parser.add_argument('--bcm-subset-sizes', type=int, nargs='+',
-                        default=[5, 10])
+                        default=[5, 10, 20, 40])
     parser.add_argument('--bcm-n-subsets', type=int, default=100)
     parser.add_argument('--bcm-max-respondents', type=int, default=200)
 
