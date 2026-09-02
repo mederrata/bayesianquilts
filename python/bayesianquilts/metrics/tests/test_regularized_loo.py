@@ -1,4 +1,4 @@
-"""Correctness tests for noise-regularized affine LOO transformations."""
+"""Correctness tests for noise-regularized LOO transformations."""
 
 from __future__ import annotations
 
@@ -11,13 +11,15 @@ import numpy as np
 from bayesianquilts.metrics.regularized_loo import (
     AffineMap,
     clipped_log_weight_loss,
+    crossfit_regularized_flow_loo_fold,
     crossfit_regularized_pmm_loo_fold,
     fit_pmm,
+    fit_vector_field,
+    regularized_flow_loo_fold,
     regularized_pmm_loo_fold,
     three_fold_split,
     transformed_log_weights,
 )
-
 
 jax.config.update("jax_enable_x64", True)
 
@@ -206,6 +208,135 @@ class RegularizedLOOTests(unittest.TestCase):
         fitted = fit_pmm(self.draws, self.log_weights, method="pmm1")
         with self.assertRaisesRegex(ValueError, r"\[0, 1\]"):
             fitted.at(1.01)
+
+    def test_vector_field_map_uses_exact_pointwise_jacobian(self):
+        draws = self.draws[:, :1]
+
+        def vector_field(theta):
+            return jnp.tanh(theta)
+
+        def vector_field_jacobian(theta):
+            derivative = 1.0 - jnp.tanh(theta[:, 0]) ** 2
+            return derivative[:, None, None]
+
+        fitted = fit_vector_field(
+            draws,
+            vector_field=vector_field,
+            vector_field_jacobian=vector_field_jacobian,
+            posterior_scale=jnp.ones(1),
+            global_lipschitz_bound=1.0,
+            max_h=0.5,
+        )
+        partial = fitted.at(0.25)
+        expected_draws = draws + partial.coefficient * jnp.tanh(draws)
+        expected_log_determinants = jnp.log(
+            1.0
+            + partial.coefficient
+            * (1.0 - jnp.tanh(draws[:, 0]) ** 2)
+        )
+        np.testing.assert_allclose(partial(draws), expected_draws)
+        np.testing.assert_allclose(
+            partial.log_abs_determinants(draws),
+            expected_log_determinants,
+        )
+
+    def test_flow_step_requires_global_bijectivity_certificate(self):
+        draws = self.draws[:, :1]
+
+        def vector_field(theta):
+            return theta
+
+        def vector_field_jacobian(theta):
+            return jnp.ones((theta.shape[0], 1, 1))
+
+        with self.assertRaisesRegex(ValueError, "Lipschitz certificate"):
+            fit_vector_field(
+                draws,
+                vector_field=vector_field,
+                vector_field_jacobian=vector_field_jacobian,
+                posterior_scale=jnp.ones(1),
+                global_lipschitz_bound=100.0,
+                max_h=0.5,
+            )
+
+    def test_heldout_regularization_selects_exact_ll_shift(self):
+        keys = jax.random.split(jax.random.PRNGKey(260902), 3)
+        splits = [
+            jax.random.normal(key, (500, 1))
+            for key in keys
+        ]
+
+        def log_full(theta):
+            return -0.5 * theta[:, 0] ** 2
+
+        def log_heldout(theta):
+            return 0.2 * theta[:, 0] + 0.02
+
+        def vector_field(theta):
+            return jnp.full_like(theta, -0.2)
+
+        def vector_field_jacobian(theta):
+            return jnp.zeros((theta.shape[0], 1, 1))
+
+        result = regularized_flow_loo_fold(
+            *splits,
+            log_full_posterior=log_full,
+            log_heldout_likelihood=log_heldout,
+            vector_field=vector_field,
+            vector_field_jacobian=vector_field_jacobian,
+            posterior_scale=jnp.ones(1),
+            global_lipschitz_bound=0.0,
+            h_grid=(0.0, 0.1, 0.2, 0.5),
+        )
+        self.assertAlmostEqual(result.selected_map.h, 0.2)
+        self.assertGreater(float(result.raw_effective_sample_size), 499.0)
+
+        contribution_result = regularized_flow_loo_fold(
+            *splits,
+            log_full_posterior=log_full,
+            log_heldout_likelihood=log_heldout,
+            vector_field=vector_field,
+            vector_field_jacobian=vector_field_jacobian,
+            posterior_scale=jnp.ones(1),
+            global_lipschitz_bound=0.0,
+            h_grid=(0.0, 0.1, 0.2, 0.5),
+            log_target_function=lambda theta: -0.5
+            * (theta[:, 0] + 1.0) ** 2,
+        )
+        self.assertTrue(
+            bool(jnp.all(jnp.isfinite(contribution_result.tuning_scores)))
+        )
+
+    def test_flow_crossfit_rotates_all_draws(self):
+        draws = jax.random.normal(jax.random.PRNGKey(19), (90, 1))
+        folds = three_fold_split(draws, jax.random.PRNGKey(20260902))
+
+        def log_full(theta):
+            return -0.5 * theta[:, 0] ** 2
+
+        def log_heldout(theta):
+            return 0.2 * theta[:, 0] + 0.02
+
+        def vector_field(theta):
+            return jnp.full_like(theta, -0.2)
+
+        def vector_field_jacobian(theta):
+            return jnp.zeros((theta.shape[0], 1, 1))
+
+        result = crossfit_regularized_flow_loo_fold(
+            folds,
+            log_full_posterior=log_full,
+            log_heldout_likelihood=log_heldout,
+            vector_field=vector_field,
+            vector_field_jacobian=vector_field_jacobian,
+            posterior_scale=jnp.ones(1),
+            global_lipschitz_bound=0.0,
+            h_grid=(0.0, 0.1, 0.2, 0.5),
+        )
+        self.assertEqual(result.transformed_evaluation_draws.shape, (90, 1))
+        self.assertEqual(result.evaluation_log_weights.shape, (90,))
+        self.assertEqual(result.selected_steps.shape, (3,))
+        self.assertEqual(len(result.fold_results), 3)
 
 
 if __name__ == "__main__":
